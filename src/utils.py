@@ -153,7 +153,7 @@ class MaskedEmbedding(keras.layers.Layer):
             Tensor with masked positions set to zero.
         """
         mask = tf.cast(mask, tf.float32)
-        mask = tf.where(mask == self.pad_token, 0., 1.)
+        mask = tf.where((mask == self.pad_token) | (mask == self.mask_token), 0., 1.)
         return x * mask[:, :, tf.newaxis]  # Apply mask to zero out positions
 
 
@@ -168,19 +168,19 @@ class PositionalEncoding(keras.layers.Layer):
         max_len (int): Maximum sequence length expected (used to precompute encodings).
     """
 
-    def __init__(self, embed_dim, max_len=100, mask_token=-1., pad_token=-2., name='positional_encoding'):
+    def __init__(self, embed_dim, pos_range=100, mask_token=-1., pad_token=-2., name='positional_encoding'):
         super().__init__(name=name)
         self.embed_dim = embed_dim
-        self.max_len = max_len
+        self.pos_range = pos_range
         self.mask_token = mask_token
         self.pad_token = pad_token
 
     def build(self, x):
-        # Create (1, max_len, embed_dim) encoding matrix
-        pos = tf.range(self.max_len, dtype=tf.float32)[:, tf.newaxis]  # (max_len, 1)
+        # Create (1, pos_range, embed_dim) encoding matrix
+        pos = tf.range(self.pos_range, dtype=tf.float32)[:, tf.newaxis]  # (pos_range, 1)
         i = tf.range(self.embed_dim, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim)
         angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, tf.float32))
-        angle_rads = pos * angle_rates  # (max_len, embed_dim)
+        angle_rads = pos * angle_rates  # (pos_range, embed_dim)
 
         # Apply sin to even indices, cos to odd indices
         sines = tf.sin(angle_rads[:, 0::2])
@@ -376,24 +376,19 @@ class ConcatMask(keras.layers.Layer):
 
 
 class ConcatBarcode(keras.layers.Layer):
-    def __init__(self,barcode_length, barcode_dim, name='barcode_layer'):
+    def __init__(self, name='barcode_layer'):
         super().__init__(name=name)
-        self.barcode_length = barcode_length
-        self.barcode_dim = barcode_dim
 
-    def build(self, input_shape):
-        self.barcode = self.add_weight(shape=(self.barcode_length, self.barcode_dim),
-                                       initializer='ones',
-                                       trainable=False, name=f'barcode_{self.name}')
-
-    def call(self, x):
+    def call(self, x, barcode):
         """ Args:
             x: Input tensor of shape (B, N, D)
+            barcode: Input tenshor of shape (B,N2,1)
         Returns:
             x: Tensor with barcode concatenated at the beginning.
             mask: Mask tensor of shape (B, N + barcode_length)
         """
-        barcode = tf.broadcast_to(self.barcode, (tf.shape(x)[0], self.barcode_length, self.barcode_dim))
+        tf.debugging.assert_rank(x, 3, message="Input tensor x must be 3D (B, N, D)")
+        barcode = tf.broadcast_to(barcode, shape=(tf.shape(x)[0], tf.shape(barcode)[1], tf.shape(x)[-1]))
         # concat barcode to the input
         x = tf.concat([barcode, x], axis=1) #(B,N2+N,D)
         return x
@@ -419,3 +414,24 @@ class SplitLayer(keras.layers.Layer):
         return tf.split(x, num_or_size_splits=self.split_size, axis=1)  # Split along the second dimension
 
 
+def OHE_to_seq(ohe: np.ndarray) -> list:
+    """
+    Convert a one-hot encoded matrix back to a peptide sequence.
+    # (B, max_pep_len, 21) -> (B, max_pep_len)
+    Args:
+        ohe: One-hot encoded matrix of shape (B, N, 21).
+    Returns:
+        sequence: Peptide sequence as a string. (B,)
+    """
+    AA = "ACDEFGHIKLMNPQRSTVWY"
+    sequence = []
+    for i in range(ohe.shape[0]):  # Iterate over batch dimension
+        seq = []
+        for j in range(ohe.shape[1]):  # Iterate over sequence length
+            aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
+            if aa_index < len(AA):  # Check if it's a valid amino acid index
+                seq.append(AA[aa_index])
+            else:
+                seq.append('X')  # Use 'X' for unknown amino acids
+        sequence.append(''.join(seq))  # Join the list into a string
+    return sequence  # Return list of sequences
