@@ -16,7 +16,8 @@ from tensorflow.keras import layers
 import matplotlib.pyplot as plt
 import seaborn as sns
 from keras.layers import Conv1D
-from src.utils import seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding, ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq
+from src.utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
+                       ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict)
 
 
 
@@ -72,20 +73,23 @@ def bicross_recon(max_pep_len: int,
                                                            type="self", heads=heads, resnet=True,
                                                            return_att_weights=True, name="mhc_self_attn",
                                                            mask_token=mask_token,
-                                                           pad_token=pad_token)(mhc_EMB, mask_mhc)
+                                                           pad_token=pad_token)(mhc_EMB, mask_mhc_inp)
 
-    # Z Latent Representation ---------------------------------------------
+    # Latent Representation ---------------------------------------------
     # Cross-attention
     mhc_cross_attn, mhc_cross_attn_scores = AttentionLayer( query_dim=mhc_emb_dim, context_dim=pep_emb_dim, output_dim=mhc_emb_dim,
                                                             type="cross", heads=heads, resnet=False,
                                                             return_att_weights=True, name="mhc_cross_attn",
                                                             mask_token=mask_token,
-                                                            pad_token=pad_token)(mhc_self_attn, mask_mhc,
+                                                            pad_token=pad_token)(mhc_self_attn, mask_mhc_inp,
                                                                                  pep_self_attn, mask_pep_inp)
-    pepconv = Conv1D(filters=64, activation='relu', kernel_size=3, strides=2, padding='valid')(mhc_cross_attn)  # 34 → 16
-    pepconv = Conv1D(filters=64, activation='relu', kernel_size=3, strides=1, padding='valid')(pepconv)  # 16 → 14
-    pepconv = Conv1D(filters=32, activation='relu', kernel_size=3, strides=1, padding='valid')(pepconv)  # 14 → 12
-    pepconv = Conv1D(filters=32, activation='relu', kernel_size=2, strides=1, padding='valid')(pepconv)  # 12 → 11
+    #ks_dict = {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
+    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[max_mhc_len,max_mhc_len//2,max_mhc_len//2,max_pep_len], max_strides=20, max_kernel_size=60)
+    # Convolutional layers
+    pepconv = Conv1D(filters=64, activation='relu', kernel_size=ks_dict["k1"], strides=ks_dict["s1"], padding='valid', name="pepconv1")(mhc_cross_attn)
+    pepconv = Conv1D(filters=64, activation='relu', kernel_size=ks_dict["k2"], strides=ks_dict["s2"], padding='valid', name="pepconv2")(pepconv)
+    pepconv = Conv1D(filters=32, activation='relu', kernel_size=ks_dict["k3"], strides=ks_dict["s3"], padding='valid', name="pepconv3")(pepconv)
+    pepconv = Conv1D(filters=32, activation='relu', kernel_size=ks_dict["k4"], strides=ks_dict["s4"], padding='valid', name="pepconv4")(pepconv)
     pepconv, mhc_to_pep_attn_score = AttentionLayer(query_dim=32, context_dim=32, output_dim=32,
                                                             type="self", heads=heads, resnet=True,
                                                             return_att_weights=True, name="mhc_to_pep_attn",
@@ -96,7 +100,7 @@ def bicross_recon(max_pep_len: int,
     #                                                         return_att_weights=True, name="pep_cross_attn",
     #                                                         mask_token=mask_token,
     #                                                         pad_token=pad_token)(pep_self_attn, mask_pep,
-    #                                                                              mhc_cross_attn, mask_mhc)
+    #                                                                              mhc_cross_attn, mask_mhc_inp)
 
     # the mhc_cross_attn shape is (batch_size, max_mhc_len, mhc_emb_dim)
     # verify the shape
@@ -150,8 +154,8 @@ if __name__ == "__main__":
     np.random.seed(0)
 
     # Parameters
-    max_pep_len = 11
-    max_mhc_len = 34
+    max_pep_len = 14
+    max_mhc_len = 342
     batch_size = 32
     pep_emb_dim = 128
     mhc_emb_dim = 128
@@ -201,7 +205,7 @@ if __name__ == "__main__":
     }
 
     # Generate MHC sequences with more realistic properties
-    mhc_lengths = np.random.randint(32, 35, size=batch_size)  # Less variation in length
+    mhc_lengths = np.random.randint(340,342, size=batch_size)  # Less variation in length
     mhc_seqs = []
     for length in mhc_lengths:
         seq = []
@@ -240,6 +244,8 @@ if __name__ == "__main__":
     # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=tf.float32)
     # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=tf.float32)
 
+    # Cov layers
+    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20, max_kernel_size=60)
 
     # Build models
     encoder, encoder_decoder = bicross_recon(
@@ -249,7 +255,7 @@ if __name__ == "__main__":
         pad_token=PAD_TOKEN,
         pep_emb_dim=pep_emb_dim,
         mhc_emb_dim=mhc_emb_dim,
-        heads=heads
+        heads=heads,
     )
 
     # Print model summaries
@@ -259,13 +265,16 @@ if __name__ == "__main__":
     # Train
     encoder_decoder.fit(x=[pep_OHE, mask_pep, mhc_EMB, mask_mhc],
                         y={'pep_reconstruction': pep_OHE, 'mhc_reconstruction': mhc_OHE},
-                        epochs=1000, batch_size=batch_size )
+                        epochs=200, batch_size=batch_size )
+
+    # save the model
+    encoder_decoder.save("h5/bicross_encoder_decoder.h5")
 
     outputs = encoder_decoder.predict([pep_OHE, mask_pep, mhc_EMB, mask_mhc])
     pep_recon = outputs['pep_reconstruction']  # Shape: (batch_size, max_pep_len, 21)
     mhc_recon = outputs['mhc_reconstruction']  # Shape: (batch_size, max_mhc_len, 21)
     # barcoded_mhc_attn = outputs['barcode_mhc_attn']  # Shape: (batch_size, max_pep_len + max_mhc_len, mhc_emb_dim)
-    barcoded_mhc_attn_scores = outputs['mhc_to_pep_attn_score']  # Shape: (batch_size, heads, max_pep_len + max_mhc_len, mhc_emb_dim)
+    conv_mhc_attn_scores = outputs['mhc_to_pep_attn_score']  # Shape: (batch_size, heads, max_pep_len + max_mhc_len, mhc_emb_dim)
     pep_OHE_m = outputs['pep_OHE_m']  # Masked peptide OHE
     mhc_EMB_m = outputs['mhc_EMB_m']  # Masked MHC embeddings
 
@@ -296,25 +305,25 @@ if __name__ == "__main__":
     plt.figure(figsize=(6, 4))
     sns.heatmap(mhc_att_avg, cmap='viridis')
     plt.title('Peptide-MHC Cross-Attention')
-    plt.xlabel('MHC Positions')
-    plt.ylabel('Peptide Positions')
+    plt.xlabel('Peptide Positions')
+    plt.ylabel('MHC Positions')
     plt.show()
 
     # Visualize barcoded MHC attention
-    barcoded_mhc_attn_avg = barcoded_mhc_attn_scores[0].mean(axis=0)  # Shape: (max_pep_len + max_mhc_len, mhc_emb_dim)
+    conv_mhc_attn_avg = conv_mhc_attn_scores[0].mean(axis=0)  # Shape: (max_pep_len + max_mhc_len, mhc_emb_dim)
     plt.figure(figsize=(6, 4))
-    sns.heatmap(barcoded_mhc_attn_avg, cmap='viridis')
-    plt.title('Barcoded MHC Attention')
-    plt.xlabel('Barcode + MHC Positions')
-    plt.ylabel('Barcode + MHC Positions')
+    sns.heatmap(conv_mhc_attn_avg, cmap='viridis')
+    plt.title('Convolution pMHC Attention')
+    plt.xlabel('Conv Positions')
+    plt.ylabel('Conv Positions')
     plt.show()
 
     # Visualize masked peptide OHE
     plt.figure(figsize=(6, 4))
     sns.heatmap(pep_OHE_m[0], cmap='viridis')
     plt.title('Masked Peptide OHE')
-    plt.xlabel('Amino Acid Positions')
-    plt.ylabel('Batch Size')
+    plt.xlabel('Amino Acid Types')
+    plt.ylabel('Peptide Positions')
     plt.show()
 
     # Visualize masked MHC embeddings
@@ -322,5 +331,5 @@ if __name__ == "__main__":
     sns.heatmap(mhc_EMB_m[0], cmap='viridis')
     plt.title('Masked MHC Embeddings')
     plt.xlabel('Embedding Dimensions')
-    plt.ylabel('Batch Size')
+    plt.ylabel('MHC Positions')
     plt.show()
