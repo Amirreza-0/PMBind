@@ -6,18 +6,57 @@ import numpy as np
 # Constants
 AA = "ACDEFGHIKLMNPQRSTVWY"
 AA_TO_INT = {a: i for i, a in enumerate(AA)}
-UNK = 21  # Index for "unknown"
+UNK_IDX = 20  # Index for "unknown"
 MASK_TOKEN = -1.0
 PAD_TOKEN = -2.0
-
+PAD_VALUE = 0.0
+MASK_VALUE = 0.0
 
 # Helper function to one-hot encode peptide sequences
-def seq_to_onehot(seq: str, max_len: int) -> np.ndarray:
-    """Return (max_len, 21) one-hot matrix."""
-    mat = np.zeros((max_len, 21), dtype=np.float32)
-    for i, aa in enumerate(seq[:max_len]):
-        mat[i, AA_TO_INT.get(aa, UNK)] = 1.0
-    return mat
+# def seq_to_onehot(seq: str, max_len: int) -> np.ndarray:
+#     """Return (max_len, 21) one-hot matrix."""
+#     mat = np.zeros((max_len, 21), dtype=np.float32)
+#     for i, aa in enumerate(seq[:max_len]):
+#         mat[i, AA_TO_INT.get(aa, UNK)] = 1.0
+#     return mat
+
+def seq_to_onehot(sequence: str, max_seq_len: int) -> np.ndarray:
+    """Convert peptide sequence to one-hot encoding"""
+    arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32) # initialize padding with 0
+    for j, aa in enumerate(sequence.upper()[:max_seq_len]):
+        arr[j, AA_TO_INT.get(aa, UNK_IDX)] = 1.0
+        # print number of UNKs in the sequence
+    num_unks = np.sum(arr[:, UNK_IDX])
+    if num_unks > 0:
+        print(f"Warning: {num_unks} unknown amino acids in sequence '{sequence}'")
+    return arr
+
+
+def OHE_to_seq(ohe: np.ndarray) -> list:
+    """
+    Convert a one-hot encoded matrix back to a peptide sequence.
+    # (B, max_pep_len, 21) -> (B, max_pep_len)
+    Args:
+        ohe: One-hot encoded matrix of shape (B, N, 21).
+    Returns:
+        sequence: Peptide sequence as a string. (B,)
+    """
+    AA = "ACDEFGHIKLMNPQRSTVWY"
+    sequence = []
+    for i in range(ohe.shape[0]):  # Iterate over batch dimension
+        seq = []
+        for j in range(ohe.shape[1]):  # Iterate over sequence length
+            aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
+            if aa_index < len(AA):  # Check if it's a valid amino acid index
+                seq.append(AA[aa_index])
+            else:
+                seq.append('X')  # Use 'X' for unknown amino acids
+        sequence.append(''.join(seq))  # Join the list into a string
+    return sequence  # Return list of sequences
+
+
+
+
 
 # Custom Attention Layer
 class AttentionLayer(keras.layers.Layer):
@@ -414,24 +453,64 @@ class SplitLayer(keras.layers.Layer):
         return tf.split(x, num_or_size_splits=self.split_size, axis=1)  # Split along the second dimension
 
 
-def OHE_to_seq(ohe: np.ndarray) -> list:
+def determine_conv_params(input_dim, output_dim, max_kernel_size=5, max_strides=2):
     """
-    Convert a one-hot encoded matrix back to a peptide sequence.
-    # (B, max_pep_len, 21) -> (B, max_pep_len)
+    Determine kernel size and strides for a single Conv1D layer.
+
     Args:
-        ohe: One-hot encoded matrix of shape (B, N, 21).
+        input_dim (int): Input sequence length.
+        output_dim (int): Desired output sequence length.
+        max_kernel_size (int): Maximum allowed kernel size.
+        max_strides (int): Maximum allowed strides.
+
     Returns:
-        sequence: Peptide sequence as a string. (B,)
+        tuple: (kernel_size, strides) if found, else None.
     """
-    AA = "ACDEFGHIKLMNPQRSTVWY"
-    sequence = []
-    for i in range(ohe.shape[0]):  # Iterate over batch dimension
-        seq = []
-        for j in range(ohe.shape[1]):  # Iterate over sequence length
-            aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
-            if aa_index < len(AA):  # Check if it's a valid amino acid index
-                seq.append(AA[aa_index])
-            else:
-                seq.append('X')  # Use 'X' for unknown amino acids
-        sequence.append(''.join(seq))  # Join the list into a string
-    return sequence  # Return list of sequences
+    candidates = []
+    for strides in range(1, max_strides + 1):
+        for kernel_size in range(1, max_kernel_size + 1):
+            if (input_dim - kernel_size) // strides + 1 == output_dim:
+                candidates.append((kernel_size, strides))
+    if candidates:
+        candidates.sort(key=lambda x: (x[1], x[0]))  # Prefer smaller strides, then kernel size
+        return candidates[0]
+    return None
+
+def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_strides=20):
+    """
+    Determine kernel sizes and strides for four sequential Conv1D layers.
+
+    Args:
+        initial_input_dim (int): Initial input sequence length.
+        output_dims (list of int): List of four output sequence lengths after each layer.
+        max_kernel_size (int): Maximum allowed kernel size.
+        max_strides (int): Maximum allowed strides.
+
+    Returns:
+        dict: Dictionary with keys "k1", "s1", ..., "k4", "s4", or None if no valid parameters.
+    """
+    if len(output_dims) != 4:
+        raise ValueError("output_dims must contain exactly four integers.")
+
+    ks_dict = {}
+    current_dim = initial_input_dim
+
+    for i, output_dim in enumerate(output_dims, start=1):
+        result = determine_conv_params(current_dim, output_dim, max_kernel_size, max_strides)
+        if result is not None:
+            kernel_size, strides = result
+            ks_dict[f"k{i}"] = kernel_size
+            ks_dict[f"s{i}"] = strides
+            current_dim = output_dim  # Update input for next layer
+        else:
+            print(f"No valid parameters found for layer {i}: {current_dim} → {output_dim}")
+            return None
+
+    return ks_dict
+
+# # Example usage
+# if __name__ == "__main__":
+#     initial_input = 180
+#     output_dims = [79, 43, 19, 11]
+#     result = determine_ks_dict(initial_input, output_dims)
+#     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
