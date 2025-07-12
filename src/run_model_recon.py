@@ -435,6 +435,8 @@ def save_cross_latent_npy(encoder_model, ds, run_dir: str, name: str = "cross_la
 def plot_training_recon_curve(history: tf.keras.callbacks.History, run_dir: str, fold_id: int = None,
                         model=None, val_dataset=None):
     """Plot training curves and validation metrics"""
+    # print history keys
+    print("History keys:", history.history.keys())
     fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
     plot_dir = os.path.join(run_dir, f"plots{fold_str}")
     pathlib.Path(plot_dir).mkdir(parents=True, exist_ok=True)
@@ -470,25 +472,41 @@ def plot_training_recon_curve(history: tf.keras.callbacks.History, run_dir: str,
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
 
-    # Peptide accuracy
+    # Peptide accuracy (if available) or loss (as fallback)
     plt.subplot(2, 2, 3)
-    plt.plot(hist_dict['pep_reconstruction_accuracy'], label='Training')
-    if 'val_pep_reconstruction_accuracy' in hist_dict:
-        plt.plot(hist_dict['val_pep_reconstruction_accuracy'], label='Validation')
-    plt.title('Peptide Reconstruction Accuracy')
+    if 'pep_reconstruction_accuracy' in hist_dict:
+        plt.plot(hist_dict['pep_reconstruction_accuracy'], label='Training')
+        if 'val_pep_reconstruction_accuracy' in hist_dict:
+            plt.plot(hist_dict['val_pep_reconstruction_accuracy'], label='Validation')
+        plt.title('Peptide Reconstruction Accuracy')
+        plt.ylabel('Accuracy')
+    else:
+        # Plot peptide loss when accuracy isn't available
+        plt.plot(hist_dict['pep_reconstruction_loss'], label='Training')
+        if 'val_pep_reconstruction_loss' in hist_dict:
+            plt.plot(hist_dict['val_pep_reconstruction_loss'], label='Validation')
+        plt.title('Peptide Reconstruction Loss')
+        plt.ylabel('Loss')
     plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
 
-    # MHC accuracy
+    # MHC accuracy (if available) or loss (as fallback)
     plt.subplot(2, 2, 4)
-    plt.plot(hist_dict['mhc_reconstruction_accuracy'], label='Training')
-    if 'val_mhc_reconstruction_accuracy' in hist_dict:
-        plt.plot(hist_dict['val_mhc_reconstruction_accuracy'], label='Validation')
-    plt.title('MHC Reconstruction Accuracy')
+    if 'mhc_reconstruction_accuracy' in hist_dict:
+        plt.plot(hist_dict['mhc_reconstruction_accuracy'], label='Training')
+        if 'val_mhc_reconstruction_accuracy' in hist_dict:
+            plt.plot(hist_dict['val_mhc_reconstruction_accuracy'], label='Validation')
+        plt.title('MHC Reconstruction Accuracy')
+        plt.ylabel('Accuracy')
+    else:
+        # Plot MHC loss when accuracy isn't available
+        plt.plot(hist_dict['mhc_reconstruction_loss'], label='Training')
+        if 'val_mhc_reconstruction_loss' in hist_dict:
+            plt.plot(hist_dict['val_mhc_reconstruction_loss'], label='Validation')
+        plt.title('MHC Reconstruction Loss')
+        plt.ylabel('Loss')
     plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
 
@@ -498,161 +516,509 @@ def plot_training_recon_curve(history: tf.keras.callbacks.History, run_dir: str,
     plt.close()
     print(f"✓ Training curves saved to {loss_plot_path}")
 
-    # If model and validation dataset are provided, generate reconstruction visualizations
-    if model is not None and val_dataset is not None:
-        print("Generating reconstruction visualizations...")
 
-        for (x_pep, pep_mask, mhc_emb, mhc_mask), (pep_target, mhc_target) in val_dataset.take(1):
-            predictions = model.predict(
-                [x_pep, pep_mask, mhc_emb, mhc_mask],
-                verbose=0
-            )
-
-            # Visualize reconstructions for a few samples
-            plt.figure(figsize=(16, 12))
-
-            # Show up to 3 samples
-            num_samples = min(3, x_pep.shape[0])
-
-            for i in range(num_samples):
-                # Get predictions
-                pep_pred = predictions['pep_reconstruction'][i]
-                mhc_pred = predictions['mhc_reconstruction'][i]
-
-                # Get masked positions
-                pep_mask_sample = pep_mask[i].numpy()
-                mhc_mask_sample = mhc_mask[i].numpy()
-
-                # Visualization for peptide reconstruction
-                plt.subplot(num_samples, 2, 2*i+1)
-                # Show reconstruction quality only for masked positions
-                masked_pos = np.where(pep_mask_sample == MASK_TOKEN)[0]
-                if len(masked_pos) > 0:
-                    plt.imshow(pep_pred[masked_pos].T, aspect='auto', cmap='viridis')
-                    plt.title(f'Sample {i+1} - Peptide Reconstruction (Masked)')
-                    plt.xlabel('Masked Position')
-                    plt.ylabel('AA Probability')
-                    plt.colorbar()
-
-                # Visualization for MHC reconstruction
-                plt.subplot(num_samples, 2, 2*i+2)
-                # Show reconstruction quality only for masked positions
-                masked_pos_mhc = np.where(mhc_mask_sample == MASK_TOKEN)[0]
-                if len(masked_pos_mhc) > 0:
-                    plt.imshow(mhc_pred[masked_pos_mhc].T, aspect='auto', cmap='viridis')
-                    plt.title(f'Sample {i+1} - MHC Reconstruction (Masked)')
-                    plt.xlabel('Masked Position')
-                    plt.ylabel('AA Probability')
-                    plt.colorbar()
-
-            plt.tight_layout()
-            recon_plot_path = os.path.join(plot_dir, f"reconstruction_samples{fold_str}.png")
-            plt.savefig(recon_plot_path, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"✓ Reconstruction visualizations saved to {recon_plot_path}")
-
-            # Plot attention heatmaps if available
-            if 'attention_scores_CA' in predictions:
-                plt.figure(figsize=(15, 10))
-                att_scores = predictions['attention_scores_CA']
-
-                for i in range(min(3, att_scores.shape[0])):
-                    # Average over attention heads if multiple heads
-                    if len(att_scores.shape) > 3:
-                        att_map = np.mean(att_scores[i], axis=0)
-                    else:
-                        att_map = att_scores[i]
-
-                    plt.subplot(1, 3, i+1)
-                    sns.heatmap(att_map, cmap='viridis', cbar_kws={'label': 'Attention Weight'})
-                    plt.title(f'Sample {i+1} - Cross-Attention Map')
-                    plt.xlabel('MHC Position')
-                    plt.ylabel('Peptide Position')
-
-                plt.tight_layout()
-                att_plot_path = os.path.join(plot_dir, f"attention_maps{fold_str}.png")
-                plt.savefig(att_plot_path, dpi=300, bbox_inches='tight')
-                plt.close()
-                print(f"✓ Attention maps saved to {att_plot_path}")
-
-            break  # Process only one batch
-
-
+# TODO verify
 def plot_test_metrics(model, test_dataset, run_dir: str, fold_id: int = None,
                       history=None, string: str = None):
     """Plot comprehensive evaluation metrics for test dataset"""
-    # TODO
+    fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
+    test_str = f"_{string}" if string else ""
+    plot_dir = os.path.join(run_dir, f"plots{fold_str}")
+    pathlib.Path(plot_dir).mkdir(parents=True, exist_ok=True)
 
+    print(f"Evaluating model on test dataset...")
+
+    # Run predictions on test dataset
+    all_predictions = []
+    all_targets_pep = []
+    all_targets_mhc = []
+    all_masks_pep = []
+    all_masks_mhc = []
+
+    for i, ((x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_target, pep_target)) in enumerate(test_dataset):
+        predictions = model.predict([x_pep, pep_mask, mhc_emb, mhc_mask], verbose=0)
+
+        # Extract predictions and targets
+        pep_preds = predictions['pep_reconstruction']
+        mhc_preds = predictions['mhc_reconstruction']
+
+        # Store for metrics calculation
+        all_predictions.append((pep_preds, mhc_preds))
+        all_targets_pep.append(pep_target)
+        all_targets_mhc.append(mhc_target)
+        all_masks_pep.append(pep_mask)
+        all_masks_mhc.append(mhc_mask)
+
+        if i >= 10:  # Limit evaluation to 10 batches for efficiency
+            break
+
+    # Create figure for evaluation metrics
+    plt.figure(figsize=(16, 14))
+
+    # 1. Peptide reconstruction accuracy for masked positions
+    plt.subplot(2, 2, 1)
+    pep_accs = []
+    for i, ((pep_pred, _), pep_target, pep_mask) in enumerate(zip(all_predictions, all_targets_pep, all_masks_pep)):
+        # Only evaluate masked positions
+        mask = tf.cast(tf.equal(pep_mask, MASK_TOKEN), tf.float32).numpy()
+
+        # For each position, get the predicted amino acid (argmax)
+        pep_pred_class = np.argmax(pep_pred, axis=-1)
+        pep_target_class = np.argmax(pep_target, axis=-1)
+
+        # Calculate accuracy only at masked positions
+        correct = (pep_pred_class == pep_target_class) * mask
+        accuracy = np.sum(correct) / (np.sum(mask) + 1e-10)
+        pep_accs.append(accuracy)
+
+    plt.bar(range(len(pep_accs)), pep_accs)
+    plt.axhline(np.mean(pep_accs), color='r', linestyle='--', label=f'Mean: {np.mean(pep_accs):.3f}')
+    plt.xlabel('Batch')
+    plt.ylabel('Accuracy')
+    plt.title('Peptide Reconstruction Accuracy (Masked Positions)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # 2. MHC reconstruction accuracy for masked positions
+    plt.subplot(2, 2, 2)
+    mhc_accs = []
+    for i, ((_, mhc_pred), mhc_target, mhc_mask) in enumerate(zip(all_predictions, all_targets_mhc, all_masks_mhc)):
+        # Only evaluate masked positions
+        mask = tf.cast(tf.equal(mhc_mask, MASK_TOKEN), tf.float32).numpy()
+
+        # For each position, get the predicted amino acid (argmax)
+        mhc_pred_class = np.argmax(mhc_pred, axis=-1)
+        mhc_target_class = np.argmax(mhc_target, axis=-1)
+
+        # Calculate accuracy only at masked positions
+        correct = (mhc_pred_class == mhc_target_class) * mask
+        accuracy = np.sum(correct) / (np.sum(mask) + 1e-10)
+        mhc_accs.append(accuracy)
+
+    plt.bar(range(len(mhc_accs)), mhc_accs)
+    plt.axhline(np.mean(mhc_accs), color='r', linestyle='--', label=f'Mean: {np.mean(mhc_accs):.3f}')
+    plt.xlabel('Batch')
+    plt.ylabel('Accuracy')
+    plt.title('MHC Reconstruction Accuracy (Masked Positions)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # 3. Peptide reconstruction loss
+    plt.subplot(2, 2, 3)
+    # Calculate categorical cross-entropy loss for peptide reconstruction
+    pep_losses = []
+    for ((pep_pred, _), pep_target, pep_mask) in zip(all_predictions, all_targets_pep, all_masks_pep):
+        # Only compute loss for masked positions
+        mask = tf.cast(tf.equal(pep_mask, MASK_TOKEN), tf.float32).numpy()
+        mask = mask[:, :, np.newaxis]  # Add channel dimension for broadcasting
+
+        # Calculate cross entropy loss
+        epsilon = 1e-10
+        loss = -np.sum(pep_target * np.log(pep_pred + epsilon) * mask) / (np.sum(mask) + epsilon)
+        pep_losses.append(loss)
+
+    plt.bar(range(len(pep_losses)), pep_losses)
+    plt.axhline(np.mean(pep_losses), color='r', linestyle='--', label=f'Mean: {np.mean(pep_losses):.3f}')
+    plt.xlabel('Batch')
+    plt.ylabel('Loss')
+    plt.title('Peptide Reconstruction Loss (Masked Positions)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # 4. MHC reconstruction loss
+    plt.subplot(2, 2, 4)
+    # Calculate categorical cross-entropy loss for MHC reconstruction
+    mhc_losses = []
+    for ((_, mhc_pred), mhc_target, mhc_mask) in zip(all_predictions, all_targets_mhc, all_masks_mhc):
+        # Only compute loss for masked positions
+        mask = tf.cast(tf.equal(mhc_mask, MASK_TOKEN), tf.float32).numpy()
+        mask = mask[:, :, np.newaxis]  # Add channel dimension for broadcasting
+
+        # Calculate cross entropy loss
+        epsilon = 1e-10
+        loss = -np.sum(mhc_target * np.log(mhc_pred + epsilon) * mask) / (np.sum(mask) + epsilon)
+        mhc_losses.append(loss)
+
+    plt.bar(range(len(mhc_losses)), mhc_losses)
+    plt.axhline(np.mean(mhc_losses), color='r', linestyle='--', label=f'Mean: {np.mean(mhc_losses):.3f}')
+    plt.xlabel('Batch')
+    plt.ylabel('Loss')
+    plt.title('MHC Reconstruction Loss (Masked Positions)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    metrics_plot_path = os.path.join(plot_dir, f"test_metrics{fold_str}{test_str}.png")
+    plt.savefig(metrics_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Save metrics summary
+    metrics_summary = {
+        'peptide_reconstruction_accuracy_mean': float(np.mean(pep_accs)),
+        'peptide_reconstruction_accuracy_std': float(np.std(pep_accs)),
+        'mhc_reconstruction_accuracy_mean': float(np.mean(mhc_accs)),
+        'mhc_reconstruction_accuracy_std': float(np.std(mhc_accs)),
+        'peptide_reconstruction_loss_mean': float(np.mean(pep_losses)),
+        'mhc_reconstruction_loss_mean': float(np.mean(mhc_losses)),
+    }
+
+    with open(os.path.join(run_dir, f"metrics_summary{fold_str}{test_str}.json"), 'w') as f:
+        json.dump(metrics_summary, f, indent=4)
+
+    print(f"✓ Test metrics saved to {metrics_plot_path}")
+    return metrics_summary
+
+
+# TODO verify
 def plot_reconstruction(model, test_dataset, run_dir: str, fold_id: int = None):
-    """Plot reconstruction results for test dataset"""
-    # TODO
+    """Plot reconstruction results for test dataset in a comprehensive way.
+    Shows actual sequences with masked positions highlighted by borders.
+    """
+    fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
+    plot_dir = os.path.join(run_dir, f"plots{fold_str}")
+    pathlib.Path(plot_dir).mkdir(parents=True, exist_ok=True)
 
-def plot_cross_attn(att_model, val_loader, run_dir: str, fold_id: int = None):
-    # TODO revision
-    # """Generate and save attention heatmaps for 5 samples."""
-    # # -------------------------------------------------------------
-    # # ATTENTION VISUALISATION – take ONE batch from validation
-    # # -------------------------------------------------------------
-    # (pep_ex, mhc_ex), labels = next(iter(val_loader))  # first batch
-    # att_scores = att_model.predict([pep_ex, mhc_ex], verbose=0)
-    # print("attn_scores", att_scores.shape)
-    # # save attention scores
-    # if fold_id is None:
-    #     fold_id = 0
-    # run_dir = os.path.join(run_dir, f"fold_{fold_id}")
-    # pathlib.Path(run_dir).mkdir(parents=True, exist_ok=True)
-    # print(f"✓ Attention scores saved to {run_dir}")
-    # out_attn = os.path.join(run_dir, f"attn_scores_fold{fold_id}.npy")
-    # np.save(out_attn, att_scores)
-    # print(f"✓ Attention scores saved to {out_attn}")
-    # # -------------------------------------------------------------
-    # # att_scores shape : (B, heads, pep_len, mhc_len)
-    # att_mean = att_scores.mean(axis=1)  # (B,pep,mhc)
-    # print("att_mean shape:", att_mean.shape)
-    # # Find positive and negative samples
-    # labels_np = labels.numpy().flatten()
-    # pos_indices = np.where(labels_np == 1)[0]
-    # neg_indices = np.where(labels_np == 0)[0]
-    # # Select up to 5 samples (prioritize positive samples, then use negative if needed)
-    # num_pos = min(5, len(pos_indices))
-    # num_neg = min(5 - num_pos, len(neg_indices)) if num_pos < 5 else 0
-    # selected_pos = pos_indices[:num_pos]
-    # selected_neg = neg_indices[:num_neg] if num_neg > 0 else []
-    # selected_samples = list(selected_pos) + list(selected_neg)
-    # print(f"Plotting attention maps for {len(selected_pos)} positive and {len(selected_neg)} negative samples")
-    # # Generate heatmaps for each selected sample
-    # for i, sample_id in enumerate(selected_samples[:5]):
-    #     sample_type = "Positive" if sample_id in pos_indices else "Negative"
-    #     A = att_mean[sample_id]
-    #     A = A.transpose()
-    #     plt.figure(figsize=(8, 6))
-    #     ax = sns.heatmap(
-    #         A,
-    #         cmap="viridis",
-    #         xticklabels=[
-    #             AA[pep_ex[sample_id][j].numpy().argmax()] if float(tf.reduce_sum(pep_ex[sample_id][j])) > 0 else ""
-    #             for j in range(A.shape[1])
-    #         ],
-    #         yticklabels=[f"M{i}" for i in range(A.shape[0])],
-    #         cbar_kws={"label": "attention"},
-    #         linewidths=0.1,  # Add lines between cells
-    #         linecolor='black',  # White lines for better contrast
-    #         linestyle=':'  # Dashed lines
-    #     )
-    #     # Improve labels and title
-    #     plt.xlabel("Peptide Position (Amino Acid)")
-    #     plt.ylabel("MHC Position")
-    #     plt.title(f"Fold {fold_id} - Attention Heatmap\nSample {sample_id} ({sample_type} Example)")
-    #     # Add box around the entire heatmap
-    #     for _, spine in ax.spines.items():
-    #         spine.set_visible(True)
-    #         spine.set_linewidth(2)
-    #     out_png = os.path.join(run_dir, f"attention_fold{fold_id}_sample{sample_id}_{sample_type.lower()}.png")
-    #     plt.tight_layout()
-    #     plt.savefig(out_png, dpi=300, bbox_inches="tight")
-    #     plt.close()
-    #     print(f"✓ Attention heat-map {i+1}/5 saved to {out_png}")
-    return
+    # Define amino acid letters and colors
+    AA = "ACDEFGHIKLMNPQRSTVWY-"  # 20 standard AAs + gap
+
+    # Create a color map for amino acids (using a qualitative colormap)
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+    import matplotlib.patches as patches
+
+    # Use a discrete colormap for amino acids
+    aa_colors = plt.cm.tab20(np.linspace(0, 1, len(AA)))
+    aa_colormap = {aa: aa_colors[i] for i, aa in enumerate(AA)}
+
+    # Collect reconstruction results
+    sequences_data = []
+    sample_count = 0
+    max_samples = 5
+
+    for (x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_target, pep_target) in test_dataset:
+        if sample_count >= max_samples:
+            break
+
+        # Get predictions
+        predictions = model.predict([x_pep, pep_mask, mhc_emb, mhc_mask], verbose=0)
+        pep_pred = predictions['pep_reconstruction']
+        mhc_pred = predictions['mhc_reconstruction']
+
+        # Process each sample in the batch
+        batch_size = x_pep.shape[0]
+        for i in range(batch_size):
+            if sample_count >= max_samples:
+                break
+
+            # Peptide reconstruction
+            pep_pred_class = np.argmax(pep_pred[i], axis=-1)
+            pep_target_class = np.argmax(pep_target[i], axis=-1)
+            pep_mask_positions = (pep_mask[i] == MASK_TOKEN)
+
+            # Convert to amino acid sequences
+            pep_original = ''.join([AA[idx] for idx in pep_target_class])
+            pep_predicted = ''.join([AA[idx] for idx in pep_pred_class])
+
+            # MHC reconstruction
+            mhc_pred_class = np.argmax(mhc_pred[i], axis=-1)
+            mhc_target_class = np.argmax(mhc_target[i], axis=-1)
+            mhc_mask_positions = (mhc_mask[i] == MASK_TOKEN)
+
+            # Convert to amino acid sequences
+            mhc_original = ''.join([AA[idx] for idx in mhc_target_class])
+            mhc_predicted = ''.join([AA[idx] for idx in mhc_pred_class])
+
+            sequences_data.append({
+                'pep_original': pep_original,
+                'pep_predicted': pep_predicted,
+                'pep_mask_positions': pep_mask_positions,
+                'mhc_original': mhc_original,
+                'mhc_predicted': mhc_predicted,
+                'mhc_mask_positions': mhc_mask_positions
+            })
+
+            sample_count += 1
+
+    # Create two separate visualizations
+
+    # 1. Peptide visualization (compact)
+    fig_pep, axes_pep = plt.subplots(max_samples, 1, figsize=(12, max_samples * 1.2))
+    if max_samples == 1:
+        axes_pep = [axes_pep]
+
+    for sample_idx, data in enumerate(sequences_data):
+        ax_pep = axes_pep[sample_idx]
+        ax_pep.set_xlim(0, len(data['pep_original']))
+        ax_pep.set_ylim(-0.5, 1.5)
+        ax_pep.set_yticks([0, 1])
+        ax_pep.set_yticklabels(['Original', 'Predicted'])
+
+        # Plot original peptide sequence
+        for pos, aa in enumerate(data['pep_original']):
+            color = aa_colormap[aa]
+            rect = patches.Rectangle((pos, -0.4), 0.8, 0.8,
+                                     facecolor=color, edgecolor='black', linewidth=0.5)
+            ax_pep.add_patch(rect)
+            ax_pep.text(pos + 0.4, 0, aa, ha='center', va='center', fontsize=10, fontweight='bold')
+
+        # Plot predicted peptide sequence
+        for pos, aa in enumerate(data['pep_predicted']):
+            color = aa_colormap[aa]
+            is_masked = data['pep_mask_positions'][pos]
+            is_correct = data['pep_original'][pos] == aa
+
+            # Different border styles for masked positions
+            if is_masked:
+                if is_correct:
+                    edge_color = 'green'
+                    edge_width = 3
+                else:
+                    edge_color = 'red'
+                    edge_width = 3
+            else:
+                edge_color = 'black'
+                edge_width = 0.5
+
+            rect = patches.Rectangle((pos, 0.6), 0.8, 0.8,
+                                     facecolor=color, edgecolor=edge_color, linewidth=edge_width)
+            ax_pep.add_patch(rect)
+            ax_pep.text(pos + 0.4, 1, aa, ha='center', va='center', fontsize=10, fontweight='bold')
+
+        ax_pep.set_title(f'Sample {sample_idx + 1} - Peptide Reconstruction', fontsize=12)
+        ax_pep.set_xlabel('Position')
+        ax_pep.set_xticks(range(len(data['pep_original'])))
+        ax_pep.grid(True, alpha=0.3)
+
+    # Add legend for peptide plot
+    legend_elements = [
+        patches.Patch(color='white', ec='black', linewidth=0.5, label='Unmasked position'),
+        patches.Patch(color='white', ec='green', linewidth=3, label='Correctly reconstructed'),
+        patches.Patch(color='white', ec='red', linewidth=3, label='Incorrectly reconstructed')
+    ]
+    fig_pep.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(0.98, 0.98))
+
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.95)
+
+    # Save peptide plot
+    peptide_plot_path = os.path.join(plot_dir, f"reconstruction_peptides{fold_str}.png")
+    plt.savefig(peptide_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # 2. MHC visualization (focus on masked positions only)
+    fig_mhc, axes_mhc = plt.subplots(max_samples, 1, figsize=(20, max_samples * 2))
+    if max_samples == 1:
+        axes_mhc = [axes_mhc]
+
+    for sample_idx, data in enumerate(sequences_data):
+        ax_mhc = axes_mhc[sample_idx]
+
+        # Find masked positions for this sample
+        masked_positions = np.where(data['mhc_mask_positions'])[0]
+
+        if len(masked_positions) == 0:
+            ax_mhc.text(0.5, 0.5, 'No masked positions in this sample',
+                        ha='center', va='center', transform=ax_mhc.transAxes, fontsize=12)
+            ax_mhc.set_title(f'Sample {sample_idx + 1} - MHC (No masked positions)', fontsize=12)
+            ax_mhc.set_xlim(0, 1)
+            ax_mhc.set_ylim(0, 1)
+            ax_mhc.axis('off')
+            continue
+
+        # Create context window around masked positions
+        context_size = 5  # Show 5 positions on each side
+        positions_to_show = set()
+
+        for masked_pos in masked_positions:
+            start = max(0, masked_pos - context_size)
+            end = min(len(data['mhc_original']), masked_pos + context_size + 1)
+            positions_to_show.update(range(start, end))
+
+        positions_to_show = sorted(list(positions_to_show))
+
+        ax_mhc.set_xlim(0, len(positions_to_show))
+        ax_mhc.set_ylim(-0.5, 1.5)
+        ax_mhc.set_yticks([0, 1])
+        ax_mhc.set_yticklabels(['Original', 'Predicted'])
+
+        # Plot original MHC sequence (context window)
+        for plot_pos, actual_pos in enumerate(positions_to_show):
+            aa = data['mhc_original'][actual_pos]
+            color = aa_colormap[aa]
+
+            # Highlight if this is a masked position
+            if actual_pos in masked_positions:
+                rect = patches.Rectangle((plot_pos, -0.4), 0.8, 0.8,
+                                         facecolor=color, edgecolor='blue', linewidth=2)
+            else:
+                rect = patches.Rectangle((plot_pos, -0.4), 0.8, 0.8,
+                                         facecolor=color, edgecolor='black', linewidth=0.5)
+
+            ax_mhc.add_patch(rect)
+            ax_mhc.text(plot_pos + 0.4, 0, aa, ha='center', va='center', fontsize=10, fontweight='bold')
+
+        # Plot predicted MHC sequence (context window)
+        for plot_pos, actual_pos in enumerate(positions_to_show):
+            aa = data['mhc_predicted'][actual_pos]
+            color = aa_colormap[aa]
+            is_masked = actual_pos in masked_positions
+            is_correct = data['mhc_original'][actual_pos] == aa
+
+            # Different border styles
+            if is_masked:
+                if is_correct:
+                    edge_color = 'green'
+                    edge_width = 3
+                else:
+                    edge_color = 'red'
+                    edge_width = 3
+            else:
+                edge_color = 'black'
+                edge_width = 0.5
+
+            rect = patches.Rectangle((plot_pos, 0.6), 0.8, 0.8,
+                                     facecolor=color, edgecolor=edge_color, linewidth=edge_width)
+            ax_mhc.add_patch(rect)
+            ax_mhc.text(plot_pos + 0.4, 1, aa, ha='center', va='center', fontsize=10, fontweight='bold')
+
+        # Add position labels
+        ax_mhc.set_xticks(range(len(positions_to_show)))
+        ax_mhc.set_xticklabels([str(pos) for pos in positions_to_show], rotation=45)
+        ax_mhc.set_title(f'Sample {sample_idx + 1} - MHC Context)',
+                         fontsize=12)
+        ax_mhc.set_xlabel('Original MHC Position')
+        ax_mhc.grid(True, alpha=0.3)
+
+    # Add legend for MHC plot
+    legend_elements_mhc = [
+        patches.Patch(color='white', ec='black', linewidth=0.5, label='Unmasked context'),
+        patches.Patch(color='white', ec='blue', linewidth=2, label='Masked position (original)'),
+        patches.Patch(color='white', ec='green', linewidth=3, label='Correctly reconstructed'),
+        patches.Patch(color='white', ec='red', linewidth=3, label='Incorrectly reconstructed')
+    ]
+    fig_mhc.legend(handles=legend_elements_mhc, loc='upper right', bbox_to_anchor=(0.98, 0.98))
+
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.95)
+
+    # Save MHC plot
+    mhc_plot_path = os.path.join(plot_dir, f"reconstruction_mhc{fold_str}.png")
+    plt.savefig(mhc_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Calculate and print summary statistics
+    total_pep_masked = sum(np.sum(data['pep_mask_positions']) for data in sequences_data)
+    total_mhc_masked = sum(np.sum(data['mhc_mask_positions']) for data in sequences_data)
+
+    correct_pep = sum(
+        np.sum(data['pep_mask_positions'] &
+               (np.array(list(data['pep_original'])) == np.array(list(data['pep_predicted']))))
+        for data in sequences_data
+    )
+
+    correct_mhc = sum(
+        np.sum(data['mhc_mask_positions'] &
+               (np.array(list(data['mhc_original'])) == np.array(list(data['mhc_predicted']))))
+        for data in sequences_data
+    )
+
+    pep_accuracy_rate = correct_pep / total_pep_masked if total_pep_masked > 0 else 0
+    mhc_accuracy_rate = correct_mhc / total_mhc_masked if total_mhc_masked > 0 else 0
+
+    print(f"✓ Peptide reconstruction visualization saved to {peptide_plot_path}")
+    print(f"✓ MHC reconstruction visualization saved to {mhc_plot_path}")
+    print(f"  Peptide reconstruction accuracy: {pep_accuracy_rate:.3f} ({correct_pep}/{total_pep_masked})")
+    print(f"  MHC reconstruction accuracy: {mhc_accuracy_rate:.3f} ({correct_mhc}/{total_mhc_masked})")
+    print(f"  Total samples visualized: {sample_count}")
+
+    # Save summary statistics
+    summary_stats = {
+        'peptide_accuracy': float(pep_accuracy_rate),
+        'mhc_accuracy': float(mhc_accuracy_rate),
+        'total_samples': int(sample_count),
+        'peptide_total_masked': int(total_pep_masked),
+        'mhc_total_masked': int(total_mhc_masked),
+        'peptide_correct': int(correct_pep),
+        'mhc_correct': int(correct_mhc)
+    }
+
+    with open(os.path.join(plot_dir, f"reconstruction_stats{fold_str}.json"), 'w') as f:
+        json.dump(summary_stats, f, indent=4)
+
+
+# TODO verify
+def plot_cross_attn(model, test_dataset, run_dir: str, fold_id: int = None):
+    """Generate and save attention heatmaps for masked sequence reconstruction."""
+    fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
+    plot_dir = os.path.join(run_dir, f"plots{fold_str}")
+    pathlib.Path(plot_dir).mkdir(parents=True, exist_ok=True)
+
+    # Define amino acid letters for visualization
+    AA = "ACDEFGHIKLMNPQRSTVWY-"  # 20 standard AAs + gap
+
+    # Process one batch from the dataset
+    for (x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_OHE, pep_OHE) in test_dataset.take(1):
+        # Get model predictions including attention scores
+        predictions = model.predict(
+            [x_pep, pep_mask, mhc_emb, mhc_mask],
+            verbose=0
+        )
+
+        # Extract attention scores
+        attn_scores_ca = None
+        attn_scores_cnn = None
+        if 'attention_scores_CA' in predictions:
+            attn_scores_ca = predictions['attention_scores_CA']
+        if 'mhc_to_pep_attn_score' in predictions:
+            attn_scores_cnn = predictions['mhc_to_pep_attn_score']
+
+        if attn_scores_ca is None and attn_scores_cnn is None:
+            print("No attention scores found in model predictions")
+            return
+
+        # Convert one-hot encodings to sequences
+        pep_seqs = []
+        mhc_seqs = []
+        for i in range(min(5, pep_OHE.shape[0])):  # Process up to 5 samples
+            pep_seq = ''.join([AA[np.argmax(pep_OHE[i, j])] for j in range(pep_OHE.shape[1])])
+            mhc_seq = ''.join([AA[np.argmax(mhc_OHE[i, j])] for j in range(mhc_OHE.shape[1])])
+            pep_seqs.append(pep_seq.replace('-', ''))
+            mhc_seqs.append(mhc_seq.replace('-', ''))
+
+            # Plot cross-attention maps
+            plt.figure(figsize=(14, 10))
+
+            # Plot cross-attention scores if available
+            if attn_scores_ca is not None:
+                plt.subplot(1, 2, 1)
+                attn = attn_scores_ca[i]  # Get attention for this sample
+
+                # Create heatmap
+                sns.heatmap(attn, cmap="viridis", xticklabels=list(pep_seq),
+                            yticklabels=list(mhc_seq))
+                plt.title(f"Cross-Attention Map (Sample {i + 1})")
+                plt.xlabel("Peptide Sequence")
+                plt.ylabel("MHC Sequence")
+
+            # Plot CNN attention if available
+            if attn_scores_cnn is not None:
+                plt.subplot(1, 2, 2 if attn_scores_ca is not None else 1)
+                attn_cnn = attn_scores_cnn[i]
+
+                # Create heatmap
+                sns.heatmap(attn_cnn, cmap="rocket", xticklabels=list(pep_seq),
+                            yticklabels=list(mhc_seq))
+                plt.title(f"CNN Attention Map (Sample {i + 1})")
+                plt.xlabel("Peptide Sequence")
+                plt.ylabel("MHC Sequence")
+
+            plt.tight_layout()
+            attn_plot_path = os.path.join(plot_dir, f"attention_map_sample_{i + 1}{fold_str}.png")
+            plt.savefig(attn_plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
+        print(f"✓ Attention maps saved to {plot_dir}")
+
 
 
 # ----------------------------------------------------------------------------
@@ -668,7 +1034,7 @@ def main(argv=None):
                    help="Output dir (default: runs/run_YYYYmmdd-HHMMSS)")
     p.add_argument("--buffer_size", type=int, default=1000,
                    help="Buffer size for streaming data loading")
-    p.add_argument("--test_batches", type=int, default=3,
+    p.add_argument("--debug_batches", type=int, default=3,
                    help="Number of batches to use for test dataset evaluation")
 
     args = p.parse_args(argv)
@@ -721,10 +1087,13 @@ def main(argv=None):
     max_peptide_length = 0
 
     print("Scanning datasets for maximum peptide length...")
-    all_parquet_files = [
-        os.path.join(args.dataset_path, "test1.parquet"),
-        os.path.join(args.dataset_path, "test2.parquet")
-    ]
+    benchmarks_dir = os.path.join(args.dataset_path, "benchmarks")
+    all_parquet_files = []
+    for root, _, files in os.walk(benchmarks_dir):
+        for file in files:
+            if file.endswith('.parquet'):
+                all_parquet_files.append(os.path.join(root, file))
+    print(f"Found {len(all_parquet_files)} parquet files in `{benchmarks_dir}` and its subdirectories")
 
     # Add fold files
     for i in range(1, n_folds + 1):
@@ -762,7 +1131,7 @@ def main(argv=None):
         train_ds = (train_ds
                     .shuffle(buffer_size=args.buffer_size, reshuffle_each_iteration=True)
                     .batch(args.batch)
-                    .take(args.test_batches)
+                    .take(args.debug_batches)
                     .prefetch(tf.data.AUTOTUNE))
 
         train_ids = np.asarray(val_ids)
@@ -772,7 +1141,7 @@ def main(argv=None):
                                            buffer_size=args.buffer_size, seq_map=SEQ_MAP)
         val_ds = (val_ds
                   .batch(args.batch)
-                  .take(args.test_batches)
+                  .take(args.debug_batches)
                   .prefetch(tf.data.AUTOTUNE))
 
 
@@ -787,25 +1156,39 @@ def main(argv=None):
     # Create bench datasets
     print("Creating test datasets...")
     n_benchs = 10 # CHANGE
-    # for folder in BENCHMARKS_DIR:
-        # for file in os.listdir(folder):
-            # create bench ds named file_name_bench_ds
-    # TODO
-    # test1_ds, test1_ids = create_streaming_dataset(os.path.join(args.dataset_path, "test1.parquet"),
-    #                                      max_peptide_length, max_mhc_length, buffer_size=args.buffer_size)
-    # test1_ds = (test1_ds
-    #             .batch(args.batch)
-    #             .prefetch(tf.data.AUTOTUNE))
-    #
-    # test1_ids = np.array(list(test1_ids.as_numpy_iterator()))
-    #
-    # test2_ds, test2_ids = create_streaming_dataset(os.path.join(args.dataset_path, "test2.parquet"),
-    #                                      max_peptide_length, max_mhc_length, buffer_size=args.buffer_size)
-    # test2_ds = (test2_ds
-    #             .batch(args.batch)
-    #             .prefetch(tf.data.AUTOTUNE))
-    #
-    # test2_ids = np.array(list(test2_ids.as_numpy_iterator()))
+   # Set up benchmark directory paths
+    BENCHMARKS_DIR = [os.path.join(args.dataset_path, "benchmarks")]
+    bench_datasets = []
+    bench_ids = []
+
+    # Create benchmark datasets
+    for folder in BENCHMARKS_DIR:
+        if os.path.exists(folder):
+            bench_files = [f for f in os.listdir(folder) if f.endswith('.parquet')]
+            n_benchs = len(bench_files)
+            print(f"Found {n_benchs} benchmark files in {folder}")
+
+            for file in bench_files:
+                bench_path = os.path.join(folder, file)
+                bench_name = os.path.splitext(file)[0]
+                print(f"Creating benchmark dataset for {bench_name}...")
+
+                bench_ds, bench_id = create_streaming_dataset(
+                    bench_path,
+                    max_peptide_length,
+                    max_mhc_length,
+                    buffer_size=args.buffer_size,
+                    seq_map=SEQ_MAP
+                )
+
+                bench_ds = (bench_ds
+                            .batch(args.batch)
+                            .prefetch(tf.data.AUTOTUNE))
+
+                bench_ids.append(np.array(list(bench_id.as_numpy_iterator())))
+                bench_datasets.append((bench_ds, bench_name))
+                print(f"✓ Created benchmark dataset: {bench_name}")
+
 
 
     print(f"✓ Created {n_folds} fold datasets and {n_benchs} benchmark datasets")
@@ -859,8 +1242,9 @@ def main(argv=None):
         # Plot training curves
         print("📈 Plotting training curves...")
         plot_training_recon_curve(hist, run_dir, fold_id, model=encoder_decoder_model, val_dataset=val_loader)
-        #plot_training_curve(hist, run_dir, fold_id, model, val_loader)
-        #plot_attn(attn_model, val_loader, run_dir, fold_id)
+        plot_reconstruction(encoder_decoder_model, val_loader, run_dir, fold_id)
+        plot_cross_attn(encoder_decoder_model, val_loader, run_dir, fold_id)
+        plot_test_metrics(encoder_decoder_model, val_loader, run_dir, fold_id)
 
         # Save model and metadata
         encoder_decoder_model.save_weights(os.path.join(run_dir, f'model_fold_{fold_id}.weights.h5'))
@@ -876,21 +1260,34 @@ def main(argv=None):
         with open(os.path.join(run_dir, f'metadata_fold_{fold_id}.json'), 'w') as f:
             json.dump(metadata, f, indent=4)
 
-        # TODO evaluate on benchmarks
-        # # Evaluate on test sets
-        # print(f"\n📊 Evaluating fold {fold_id} on test sets...")
-        #
-        # # Test1 evaluation
-        # print("Evaluating on test1 (balanced alleles)...")
-        # plot_test_metrics(model, test1_ds, run_dir, fold_id, string="Test1_balanced_alleles")
-        #
-        # # Test2 evaluation
-        # print("Evaluating on test2 (rare alleles)...")
-        # plot_test_metrics(model, test2_ds, run_dir, fold_id, string="Test2_rare_alleles")
-        #
-        # # save cross_latents for test1 and test2
-        # save_cross_latent_npy(cross_latent_model, test1_ds, run_dir, name=f"cross_latent_test1_fold_{fold_id}", mhc_ids=test1_ids, labels_only=test1_labels_copy)
-        # save_cross_latent_npy(cross_latent_model, test2_ds, run_dir, name=f"cross_latent_test2_fold_{fold_id}", mhc_ids=test2_ids, labels_only=test2_labels_copy)
+        # Evaluate on benchmark datasets
+        print(f"\n📊 Evaluating fold {fold_id} on benchmark datasets...")
+
+        for bench_ds, bench_name in bench_datasets:
+            print(f"Evaluating on benchmark: {bench_name}...")
+
+            # Plot metrics for this benchmark
+            metrics_summary = plot_test_metrics(
+                encoder_decoder_model,
+                bench_ds,
+                run_dir,
+                fold_id,
+                string=f"bench_{bench_name}"
+            )
+
+            # Find the matching bench_id index
+            bench_idx = [i for i, (ds, name) in enumerate(bench_datasets) if name == bench_name][0]
+
+            # Save cross latents for this benchmark dataset
+            save_cross_latent_npy(
+                encoder_model,
+                bench_ds,
+                run_dir,
+                name=f"cross_latent_{bench_name}_fold_{fold_id}",
+                mhc_ids=bench_ids[bench_idx] if bench_idx < len(bench_ids) else None
+            )
+
+            print(f"✓ Completed evaluation on {bench_name}")
 
         print(f"✅ Fold {fold_id} completed successfully")
 
@@ -910,8 +1307,8 @@ if __name__ == "__main__":
     EMBEDDINGS_DIR = f"../data/mhc_{MHC_CLASS}/embeddings"
     main([
         "--dataset_path", dataset_path,
-        "--epochs", "5",
-        "--batch", "128",
-        "--buffer_size", "8192",
-        "--test_batches", "10",
+        "--epochs", "2",
+        "--batch", "256",
+        "--buffer_size", "1024",
+        "--debug_batches", "20",
     ])
