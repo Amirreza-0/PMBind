@@ -41,7 +41,7 @@ def OHE_to_seq(ohe: np.ndarray) -> list:
     Returns:
         sequence: Peptide sequence as a string. (B,)
     """
-    AA = "ACDEFGHIKLMNPQRSTVWY"
+    AA = "ACDEFGHIKLMNPQRSTVWY-"
     sequence = []
     for i in range(ohe.shape[0]):  # Iterate over batch dimension
         seq = []
@@ -55,7 +55,20 @@ def OHE_to_seq(ohe: np.ndarray) -> list:
     return sequence  # Return list of sequences
 
 
-
+def OHE_to_seq_single(ohe: np.ndarray) -> str:
+    """
+    Convert a one-hot encoded matrix back to a peptide sequence.
+    Args:
+        ohe: One-hot encoded matrix of shape (N, 21).
+    Returns:
+        sequence: Peptide sequence as a string.
+    """
+    AA = "ACDEFGHIKLMNPQRSTVWY"
+    seq = []
+    for j in range(ohe.shape[0]):  # Iterate over sequence length
+        aa_index = np.argmax(ohe[j])  # Get index of the max value in one-hot encoding
+        seq.append(AA[aa_index])
+    return ''.join(seq)  # Join the list into a string
 
 
 # Custom Attention Layer
@@ -514,3 +527,134 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
 #     output_dims = [79, 43, 19, 11]
 #     result = determine_ks_dict(initial_input, output_dims)
 #     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
+
+def masked_categorical_crossentropy(y_true, y_pred, mask):
+    """
+    Compute masked categorical cross-entropy loss.
+
+    Args:
+        y_true: True labels (tensor).
+        y_pred: Predicted probabilities (tensor).
+        mask: Mask tensor indicating positions to include in the loss.
+
+    Returns:
+        Mean masked loss (tensor).
+    """
+    MASK_TOKEN = -1.0  # Replace with your actual mask token value
+    loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+    mask_binary = tf.cast(mask == MASK_TOKEN, tf.float32)
+    masked_loss = loss * mask_binary
+    sum_masked_loss = tf.reduce_sum(masked_loss)
+    num_masked = tf.reduce_sum(mask_binary)
+    return tf.math.divide_no_nan(sum_masked_loss, num_masked)
+
+
+class CustomDense(keras.layers.Layer):
+    """
+    Custom dense layer that applies a linear transformation to the input.
+    """
+    def __init__(self, units, activation=None, name='custom_dense', mask_token=-1.0, pad_token=-2.0):
+        super().__init__(name=name)
+        self.units = units
+        self.mask_token = mask_token
+        self.pad_token = pad_token
+        self.activation = keras.activations.get(activation)
+
+    def build(self, input_shape):
+        self.w = self.add_weight(shape=(input_shape[-1], self.units),
+                                 initializer='random_normal',
+                                 trainable=True, name=f'w_{self.name}')
+        self.b = self.add_weight(shape=(self.units,),
+                                 initializer='zeros',
+                                 trainable=True, name=f'b_{self.name}')
+
+    def call(self, inputs, mask = None): # inputs: (B, N, D) mask: (B, N)
+        output = tf.matmul(inputs, self.w) + self.b
+        if self.activation is not None:
+            output = self.activation(output)
+        if mask is not None:
+            mask = tf.cast(mask, tf.float32)
+            mask = tf.where(mask == self.pad_token, 0.0, 1.0)
+            mask = tf.expand_dims(mask, axis=-1)  # (B, N, 1)
+            output *= mask
+        return output
+
+
+# TODO
+class SelfAttentionWith2DMask(keras.layers.Layer):
+    """
+    Custom self-attention layer that supports 2D masks.
+    """
+    def __init__(self, query_dim, context_dim, output_dim, heads=4,
+                 resnet=True, return_att_weights=False, name='SelfAttentionWith2DMask',
+                 epsilon=1e-6, mask_token=-1., pad_token=-2.):
+        super().__init__(name=name)
+        self.query_dim = query_dim
+        self.context_dim = context_dim
+        self.output_dim = output_dim
+        self.heads = heads
+        self.resnet = resnet
+        self.return_att_weights = return_att_weights
+        self.epsilon = epsilon
+        self.mask_token = mask_token
+        self.pad_token = pad_token
+        self.att_dim = output_dim // heads  # Attention dimension per head
+
+    def build(self, x):
+        # Projection weights
+        self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'q_proj_{self.name}')
+        self.k_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'k_proj_{self.name}')
+        self.v_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'v_proj_{self.name}')
+        self.norm = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_{self.name}')
+
+        if self.resnet:
+            self.norm_resnet = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_resnet_{self.name}')
+        self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
+                                     initializer='random_normal', trainable=True, name=f'outw_{self.name}')
+        self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
+                                     trainable=True, name=f'outb_{self.name}')
+        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.float32))
+
+    def call(self, x_pmhc, p_mask, m_mask):
+        """
+        Args:
+            x: Tensor of shape (B, N, query_dim) for query.
+            mask: Tensor of shape (B, N, M) for 2D mask.
+        :param x:
+        :param mask:
+        :return:
+        """
+        return
+
+    def mask_2d(self, p_mask, m_mask):
+        p_mask = tf.cast(p_mask, tf.float32)
+        m_mask = tf.cast(m_mask, tf.float32)
+        p_mask = tf.expand_dims(p_mask, axis=-1)
+        m_mask = tf.expand_dims(m_mask, axis=-1) # (B, N, 1), (B, M, 1)
+        # zero square masks
+        self_peptide_mask = tf.zeros_like(p_mask, dtype=tf.float32) # (B, N, 1)
+        self_peptide_mask_2d = tf.broadcast_to(self_peptide_mask, (
+            tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(p_mask)[1])) #(B, N, N)
+        self_mhc_mask = tf.zeros_like(m_mask, dtype=tf.float32)
+        self_mhc_mask_2d = tf.broadcast_to(self_mhc_mask, (
+            tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(m_mask)[1])) # (B, M, M)
+        # one and zero masks
+        pep_mhc_mask_secondpart = tf.broadcast_to(p_mask, (tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(m_mask)[-1])) # (B, N, M)
+        pep_mhc_mask_secondpart = pep_mhc_mask_secondpart * tf.transpose(m_mask, perm=[0, 2, 1]) # (B,N,M)*(B,1,M)=(B, N, M)
+        mhc_pep_mask_secondpart = tf.broadcast_to(m_mask, (tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(p_mask)[-1])) # (B, M, N)
+        mhc_pep_mask_secondpart = mhc_pep_mask_secondpart * tf.transpose(p_mask, perm=[0, 2, 1]) # (B,M,N)*(B,1,N)=(B, M, N)
+        # combined masks (B,N+M,N+M)
+        combined_mask_1 = tf.concat([self_peptide_mask_2d, pep_mhc_mask_secondpart], axis=2) # (B, N, N+M)
+        combined_mask_2 = tf.concat([mhc_pep_mask_secondpart, self_mhc_mask_2d], axis=2) # (B, M, N+M)
+        final_mask = tf.concat([combined_mask_1, combined_mask_2], axis=1) # (B, N+M, N+M)
+        return final_mask
+
+
+
+
+
+
+
