@@ -4,7 +4,7 @@ from tensorflow.keras import layers
 import numpy as np
 
 # Constants
-AA = "ACDEFGHIKLMNPQRSTVWY"
+AA = "ACDEFGHIKLMNPQRSTVWY-"
 AA_TO_INT = {a: i for i, a in enumerate(AA)}
 UNK_IDX = 20  # Index for "unknown"
 MASK_TOKEN = -1.0
@@ -653,8 +653,174 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         return final_mask
 
 
+class MaskedCategoricalCrossentropyLoss(layers.Layer):
+    """    # Define losses
+    # 1. reconstruction loss for barcode and MHC separately normalized by sequence length
+    # 2. reconstruction loss of masked peptide and MHC positions
+    # 3. (optional) reward function for attention weights with respect to anchor rules (eg. attention hotspots must be at least 2 positions apart)
+    """
+    def __init__(self, name=None, **kwargs):
+        super(MaskedCategoricalCrossentropyLoss, self).__init__(name=name, **kwargs)
+
+    def call(self, inputs):
+        y_pred, y_true, mask = inputs
+        loss_per_position = tf.keras.losses.categorical_crossentropy(y_true, y_pred, from_logits=False, axis=-1)
+        masked_loss = loss_per_position * mask
+        total_loss = tf.reduce_sum(masked_loss) / tf.reduce_sum(mask)
+        self.add_loss(total_loss)
+        return y_pred
 
 
 
+def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10):
+    # Generate synthetic data
+    # Define amino acids
+    # Define amino acids
+    AA = "ACDEFGHIKLMNPQRSTVWY-" # 21 amino acids including gap
 
+    # Position-specific amino acid frequencies for peptides
+    # Simplified frequencies where certain positions prefer specific amino acids
+    pep_pos_freq = {
+        0: {"A": 0.3, "G": 0.2, "M": 0.2},  # Position 1 prefers A, G, M
+        1: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 2 prefers hydrophobic
+        2: {"D": 0.2, "E": 0.2, "N": 0.2},  # Position 3 prefers charged/polar
+        3: {"S": 0.3, "T": 0.2, "Q": 0.2},  # Position 4 prefers polar
+        4: {"R": 0.3, "K": 0.2, "H": 0.2},  # Position 5 prefers basic
+        5: {"F": 0.3, "Y": 0.2, "W": 0.2},  # Position 6 prefers aromatic
+        6: {"C": 0.3, "P": 0.2, "A": 0.2},  # Position 7 prefers small residues
+        7: {"G": 0.3, "D": 0.2, "E": 0.2},  # Position 8 prefers small/charged
+        8: {"L": 0.3, "V": 0.2, "I": 0.2},  # Position 9 prefers hydrophobic
+    }
+    # Default distribution for other positions
+    default_aa_freq = {aa: 1/len(AA) for aa in AA}
+
+    # Generate peptides with position-specific preferences
+    pep_lengths = np.random.choice([8, 9, 10, 11, 12], size=batch_size, p=[0.1, 0.5, 0.2, 0.1, 0.1])  # More realistic length distribution
+    pep_seqs = []
+    for length in pep_lengths:
+        seq = []
+        for pos in range(length):
+            # Use position-specific frequencies if available, otherwise default
+            freq = pep_pos_freq.get(pos, default_aa_freq)
+            # Convert frequencies to probability array
+            aa_list = list(AA)
+            probs = [freq.get(aa, 0.01) for aa in aa_list]
+            probs = np.array(probs) / sum(probs)  # Normalize
+            seq.append(np.random.choice(aa_list, p=probs))
+        pep_seqs.append(''.join(seq))
+
+    # Convert peptide sequences to one-hot encoding
+    pep_OHE = np.array([seq_to_onehot(seq, max_pep_len) for seq in pep_seqs], dtype=np.float32)
+    mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
+    for i, length in enumerate(pep_lengths):
+        mask_pep[i, :length] = 1.0
+
+    # MHC alleles typically have conserved regions
+    mhc_pos_freq = {
+        0: {"G": 0.5, "D": 0.3},  # First position often G or D
+        1: {"S": 0.4, "H": 0.3, "F": 0.2},
+        2: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 3 prefers small residues
+        3: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 4 prefers basic residues
+        4: {"L": 0.3, "I": 0.3, "V": 0.2},  # Position 5 prefers hydrophobic residues
+        5: {"E": 0.4, "D": 0.3, "N": 0.2},  # Position 6 prefers charged residues
+        6: {"C": 0.3, "P": 0.3, "A": 0.2},  # Position 7 prefers small residues
+        7: {"Y": 0.4, "W": 0.3, "F": 0.2},  # Position 8 prefers aromatic residues
+        8: {"G": 0.3, "D": 0.3, "E": 0.2},  # Position 9 prefers small/charged residues
+        9: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 10 prefers hydrophobic residues
+        10: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 11 prefers basic residues
+        11: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 12 prefers small residues
+        12: {"S": 0.4, "H": 0.3, "F": 0.2},  # Position 13 prefers polar residues
+        13: {"G": 0.5, "D": 0.3},  # Position 14 often G or D
+        14: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 15 prefers small residues
+        15: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 16 prefers basic residues
+        16: {"L": 0.3, "I": 0.3, "V": 0.2},  # Position 17 prefers hydrophobic residues
+        17: {"E": 0.4, "D": 0.3, "N": 0.2},  # Position 18 prefers charged residues
+        18: {"C": 0.3, "P": 0.3, "A": 0.2},  # Position 19 prefers small residues
+        19: {"Y": 0.4, "W": 0.3, "F": 0.2},  # Position 20 prefers aromatic residues
+        20: {"G": 0.3, "D": 0.3, "E": 0.2},  # Position 21 prefers small/charged residues
+        21: {"-": 0.3, "V": 0.3, "I": 0.2},
+        22: {"-": 0.4, "K": 0.3, "Q": 0.2},
+        23: {"-": 0.3, "A": 0.3, "T": 0.2},  # Position 24 prefers small residues
+        24: {"-": 0.4, "S": 0.3, "H": 0.2},  # Position 25 prefers polar residues
+        25: {"-": 0.5, "F": 0.3},  # Position 26 often F
+        26: {"-": 0.3, "G": 0.3, "D": 0.2},  # Position 27 prefers small/charged residues
+        # Add more positions as needed
+    }
+
+    # Generate MHC sequences with more realistic properties
+    mhc_lengths = np.random.randint(340,342, size=batch_size)  # Less variation in length
+    mhc_seqs = []
+    for length in mhc_lengths:
+        seq = []
+        for pos in range(length):
+            freq = mhc_pos_freq.get(pos, default_aa_freq)
+            aa_list = list(AA)
+            probs = [freq.get(aa, 0.01) for aa in aa_list]
+            probs = np.array(probs) / sum(probs)
+            seq.append(np.random.choice(aa_list, p=probs))
+        mhc_seqs.append(''.join(seq))
+
+    # Generate MHC embeddings (simulating ESM or similar)
+    mhc_EMB = np.random.randn(batch_size, max_mhc_len, 1152).astype(np.float32)
+    mhc_OHE = np.array([seq_to_onehot(seq, max_mhc_len) for seq in mhc_seqs], dtype=np.float32)
+    print(mhc_OHE.shape)
+
+    # Create masks for MHC sequences
+    mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
+    for i, length in enumerate(mhc_lengths):
+        mask_mhc[i, :length] = 1.0
+        mhc_EMB[i, length:, :] = 0.0  # Zero out padding positions
+
+    # Generate MHC IDs (could represent allele types)
+    mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
+
+    # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
+    mask_pep[np.random.rand(batch_size, max_pep_len) < 0.15] = MASK_TOKEN
+    pep_OHE[mask_pep == MASK_TOKEN] = 0.0  # Zero out masked positions
+    # mask 0.15 of the MHC positions update the mask with MASK_TOKEN and zero out the corresponding positions in the EMB
+    mask_mhc[np.random.rand(batch_size, max_mhc_len) < 0.15] = MASK_TOKEN
+    mhc_EMB[mask_mhc == MASK_TOKEN] = 0.0  # Zero out masked positions
+
+    # convert all inputs tensors
+    # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=tf.float32)
+    # mask_pep = tf.convert_to_tensor(mask_pep, dtype=tf.float32)
+    # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=tf.float32)
+    # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=tf.float32)
+    # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=tf.float32)
+
+    # Cov layers
+    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20, max_kernel_size=60)
+    if ks_dict is None:
+        raise ValueError("Could not determine valid kernel sizes and strides for MHC Conv layers.")
+
+    return pep_OHE, mask_pep, mhc_EMB, mask_mhc, mhc_OHE, mhc_ids, ks_dict
+
+class MaskedCategoricalCELossLayer(keras.layers.Layer):
+    def __init__(self, pad_token=-2, mask_token=-1, name="masked_ce_loss", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.pad_token = pad_token
+        self.mask_token = mask_token
+    def call(self, inputs):
+        """
+        inputs: list or tuple of (y_true, y_pred, mask)
+        y_true … (B,L,21)  one-hot
+        y_pred … (B,L,21)  softmax
+        mask   … (B,L)     integer mask (1 = valid, pad_token = ignore, etc.)
+        """
+        y_true, y_pred, mask = inputs
+
+        loss_per_position = tf.keras.losses.categorical_crossentropy(
+            y_true, y_pred, from_logits=False, axis=-1
+        )
+        # Convert pad/mask tokens to zeros
+        mask = tf.where(
+            tf.logical_or(tf.equal(mask, self.pad_token), tf.equal(mask, self.mask_token)),
+            0.0,
+            1.0
+        )
+        masked_loss = loss_per_position * mask
+        total_loss = tf.reduce_sum(masked_loss) / tf.reduce_sum(mask + 1e-8)  # avoid /0
+        y_out = tf.expand_dims(tf.cast(mask, tf.float32), -1) * y_pred  # apply mask to predictions
+        self.add_loss(total_loss)
+        return y_out  # passthrough for prediction
 
