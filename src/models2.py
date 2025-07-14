@@ -284,8 +284,8 @@ if __name__ == "__main__":
     print("true :", mhc_orig[0][:60], "...")
     b = -1
     # ---------------- visualise attention --------------------------
-    visualize_cross_attention_weights(mhc_att[b], peptide_seq=pep_orig[b], mhc_seq=mhc_orig[b], top_n=5)
-    visualize_cross_attention_weights(mhc_to_pep_attn_score[b], peptide_seq=mhc_orig[b], mhc_seq=pep_orig[b], top_n=5)
+    visualize_cross_attention_weights(mhc_att[b], peptide_seq=pep_orig[b], mhc_seq=mhc_orig[b])
+    visualize_cross_attention_weights(mhc_to_pep_attn_score[b], peptide_seq=pep_orig[b], mhc_seq=mhc_orig[b])
     plot_1d_heatmap(pep_mask_vis[b])
     plot_1d_heatmap(mhc_mask_vis[b])
     # ---------------- save model -----------------------------------

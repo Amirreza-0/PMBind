@@ -2,6 +2,9 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
+import os
+# Disable GPU usage for compatibility with CPU-only environments
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # Constants
 AA = "ACDEFGHIKLMNPQRSTVWY-"
@@ -231,7 +234,8 @@ class PositionalEncoding(keras.layers.Layer):
         # Create (1, pos_range, embed_dim) encoding matrix
         pos = tf.range(self.pos_range, dtype=tf.float32)[:, tf.newaxis]  # (pos_range, 1)
         i = tf.range(self.embed_dim, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim)
-        angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, tf.float32))
+        #angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, tf.float32))
+        angle_rates = tf.pow(300.0, -(2 * tf.floor(i / 2)) / tf.cast(self.embed_dim, tf.float32))
         angle_rads = pos * angle_rates  # (pos_range, embed_dim)
 
         # Apply sin to even indices, cos to odd indices
@@ -714,6 +718,10 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
     for i, length in enumerate(pep_lengths):
         mask_pep[i, :length] = 1.0
+        # mask gaps with pad token
+        for pos in range(length):
+            if pep_seqs[i][pos] == '-':
+                mask_pep[i, pos] = PAD_TOKEN
 
     # MHC alleles typically have conserved regions
     mhc_pos_freq = {
@@ -748,7 +756,7 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     }
 
     # Generate MHC sequences with more realistic properties
-    mhc_lengths = np.random.randint(340,342, size=batch_size)  # Less variation in length
+    mhc_lengths = np.random.randint(max_mhc_len-5,max_mhc_len, size=batch_size)  # Less variation in length
     mhc_seqs = []
     for length in mhc_lengths:
         seq = []
@@ -769,17 +777,17 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
     for i, length in enumerate(mhc_lengths):
         mask_mhc[i, :length] = 1.0
-        mhc_EMB[i, length:, :] = 0.0  # Zero out padding positions
+        mhc_EMB[i, length:, :] = PAD_VALUE  # set padding positions
+        for pos in range(length):
+            if mhc_seqs[i][pos] == '-':
+                mask_mhc[i, pos] = PAD_TOKEN
 
     # Generate MHC IDs (could represent allele types)
     mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
 
     # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
-    mask_pep[np.random.rand(batch_size, max_pep_len) < 0.15] = MASK_TOKEN
-    pep_OHE[mask_pep == MASK_TOKEN] = 0.0  # Zero out masked positions
-    # mask 0.15 of the MHC positions update the mask with MASK_TOKEN and zero out the corresponding positions in the EMB
-    mask_mhc[np.random.rand(batch_size, max_mhc_len) < 0.15] = MASK_TOKEN
-    mhc_EMB[mask_mhc == MASK_TOKEN] = 0.0  # Zero out masked positions
+    mask_pep[(mask_pep != PAD_TOKEN) & (np.random.rand(batch_size, max_pep_len) < 0.15)] = MASK_TOKEN
+    mask_mhc[(mask_mhc != PAD_TOKEN) & (np.random.rand(batch_size, max_mhc_len) < 0.15)] = MASK_TOKEN
 
     # convert all inputs tensors
     # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=tf.float32)
