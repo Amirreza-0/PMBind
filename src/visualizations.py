@@ -58,7 +58,7 @@ def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
     )
 
 
-def visualize_cross_attention_weights(cross_attn_scores, peptide_seq, mhc_seq, top_n=5):
+def visualize_cross_attention_weights(cross_attn_scores, peptide_seq, mhc_seq):
     """
     Visualize cross-attention weights between peptide and MHC sequences.
 
@@ -79,13 +79,19 @@ def visualize_cross_attention_weights(cross_attn_scores, peptide_seq, mhc_seq, t
         cross_attn_scores = cross_attn_scores
 
     cross_attn_scores = cross_attn_scores.mean(axis=0)  # Average over heads dimension
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(cross_attn_scores, annot=True, fmt=".2f",
-                yticklabels=mhc_seq, xticklabels=peptide_seq,
-                cmap='viridis', cbar_kws={'label': 'Attention Score'})
+    plt.figure(figsize=(12, 8))
+    if cross_attn_scores.shape[0] == cross_attn_scores.shape[1]:
+        # If square matrix, use heatmap
+        sns.heatmap(cross_attn_scores, annot=True, fmt=".2f",
+                    yticklabels=peptide_seq, xticklabels=peptide_seq,
+                    cmap='viridis', cbar_kws={'label': 'Attention Score'})
+    else:
+        sns.heatmap(cross_attn_scores, annot=True, fmt=".2f",
+                    yticklabels=mhc_seq, xticklabels=peptide_seq,
+                    cmap='viridis', cbar_kws={'label': 'Attention Score'})
     plt.title(f'Cross-Attention Weights for Sample')
-    plt.xlabel('MHC Sequence')
-    plt.ylabel('Peptide Sequence')
+    plt.xlabel('Sequence')
+    plt.ylabel('Sequence')
     plt.show()
 
 # if __name__ == "__main__":

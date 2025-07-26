@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 import tensorflow as tf
+from tensorflow import keras
 
 from src.utils import OHE_to_seq_single
 
@@ -73,7 +74,8 @@ import pyarrow as pa, pyarrow.compute as pc
 from concurrent.futures import ProcessPoolExecutor
 import functools, itertools
 
-from models import bicross_recon
+# from models import bicross_recon
+from models2 import BiCrossModel, build_bicross_net
 from utils import seq_to_onehot, UNK_IDX, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE, OHE_to_seq, OHE_to_seq_single
 
 pa.set_cpu_count(os.cpu_count())
@@ -302,8 +304,13 @@ def _row_to_tensor_pack(row_dict: dict, max_pep_seq_len: int, max_mhc_len: int, 
     else:
         raise ValueError(f"Unexpected MHC value {mhc_emb}")
 
-    return (pep_one_hot, pep_mask_arr, mhc_emb, mhc_mask_arr), (mhc_one_hot,pep_one_hot), row_dict["allele"]
-
+    return {
+        "pep_onehot": pep_one_hot,
+        "pep_mask": pep_mask_arr,
+        "mhc_latent": mhc_emb,
+        "mhc_mask": mhc_mask_arr,
+        "mhc_onehot": mhc_one_hot,
+    }, row_dict["allele"]
 
 
 def streaming_data_generator(
@@ -363,24 +370,20 @@ def create_streaming_dataset(parquet_path: str,
                              max_pep_seq_len: int,
                              max_mhc_len: int,
                              buffer_size: int = 1000,
-                             seq_map = None):
+                             seq_map=None):
     """
     Same semantics as before, but the generator already does parallel
     preprocessing. We now ask tf.data to interleave multiple generator
     shards in parallel as well.
     """
     output_signature = (
-        (
-            tf.TensorSpec(shape=(max_pep_seq_len, 21),  dtype=tf.float32), # One-hot encoded peptide
-            tf.TensorSpec(shape=(max_pep_seq_len,),     dtype=tf.float32),  # Mask for peptide
-            tf.TensorSpec(shape=(max_mhc_len, 1152),    dtype=tf.float32), # MHC embedding
-            tf.TensorSpec(shape=(max_mhc_len,),         dtype=tf.float32),  # Mask for MHC
-        ),
-        (
-            # TODO WHy ODER changed?
-            tf.TensorSpec(shape=(max_mhc_len, 21), dtype=tf.float32),  # One-hot encoded MHC sequence target
-            tf.TensorSpec(shape=(max_pep_seq_len, 21), dtype=tf.float32),  # One-hot encoded peptide sequence target
-        ),
+        {
+            "pep_onehot": tf.TensorSpec(shape=(max_pep_seq_len, 21), dtype=tf.float32),
+            "pep_mask": tf.TensorSpec(shape=(max_pep_seq_len,), dtype=tf.float32),
+            "mhc_latent": tf.TensorSpec(shape=(max_mhc_len, 1152), dtype=tf.float32),
+            "mhc_mask": tf.TensorSpec(shape=(max_mhc_len,), dtype=tf.float32),
+            "mhc_onehot": tf.TensorSpec(shape=(max_mhc_len, 21), dtype=tf.float32),
+        },
         tf.TensorSpec(shape=(), dtype=tf.string),  # MHC allele ID
     )
 
@@ -392,7 +395,7 @@ def create_streaming_dataset(parquet_path: str,
             max_mhc_len,
             buffer_size,
             seq_map,
-            positive_only=True), # for reconstruction task
+            positive_only=True),  # for reconstruction task
         output_signature=output_signature,
     )
 
@@ -405,9 +408,9 @@ def create_streaming_dataset(parquet_path: str,
     )
 
     # Separate dataset and IDs
-    ds = raw_ds.map(lambda inputs, targets, allele_id: (inputs, targets),
+    ds = raw_ds.map(lambda inputs, allele_id: inputs,
                     num_parallel_calls=tf.data.AUTOTUNE)
-    ids_ds = raw_ds.map(lambda inputs, targets, allele_id: allele_id,
+    ids_ds = raw_ds.map(lambda inputs, allele_id: allele_id,
                         num_parallel_calls=tf.data.AUTOTUNE)
 
     return ds, ids_ds
@@ -435,9 +438,8 @@ def save_cross_latent_npy(encoder_model, ds, run_dir: str, name: str = "cross_la
 # Visualization utilities (keeping the same as original)
 # ----------------------------------------------------------------------------
 def plot_training_recon_curve(history: tf.keras.callbacks.History, run_dir: str, fold_id: int = None,
-                        model=None, val_dataset=None):
+                    model=None, val_dataset=None):
     """Plot training curves and validation metrics"""
-    # print history keys
     print("History keys:", history.history.keys())
     fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
     plot_dir = os.path.join(run_dir, f"plots{fold_str}")
@@ -446,71 +448,23 @@ def plot_training_recon_curve(history: tf.keras.callbacks.History, run_dir: str,
     # Extract history data
     hist_dict = history.history
 
-    # Plot loss curves
-    plt.figure(figsize=(14, 10))
+    # Dynamically create subplots for all keys
+    num_keys = len(hist_dict)
+    num_cols = 2
+    num_rows = (num_keys + 1) // num_cols
 
-    # Overall loss
-    plt.subplot(2, 2, 1)
-    plt.plot(hist_dict['loss'], label='Training Loss')
-    if 'val_loss' in hist_dict:
-        plt.plot(hist_dict['val_loss'], label='Validation Loss')
-    plt.title('Overall Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.figure(figsize=(14, 5 * num_rows))
 
-    # Component losses
-    plt.subplot(2, 2, 2)
-    plt.plot(hist_dict['pep_reconstruction_loss'], label='Peptide Loss')
-    plt.plot(hist_dict['mhc_reconstruction_loss'], label='MHC Loss')
-    if 'val_pep_reconstruction_loss' in hist_dict:
-        plt.plot(hist_dict['val_pep_reconstruction_loss'], label='Val Peptide Loss')
-    if 'val_mhc_reconstruction_loss' in hist_dict:
-        plt.plot(hist_dict['val_mhc_reconstruction_loss'], label='Val MHC Loss')
-    plt.title('Component Losses')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-
-    # Peptide accuracy (if available) or loss (as fallback)
-    plt.subplot(2, 2, 3)
-    if 'pep_reconstruction_accuracy' in hist_dict:
-        plt.plot(hist_dict['pep_reconstruction_accuracy'], label='Training')
-        if 'val_pep_reconstruction_accuracy' in hist_dict:
-            plt.plot(hist_dict['val_pep_reconstruction_accuracy'], label='Validation')
-        plt.title('Peptide Reconstruction Accuracy')
-        plt.ylabel('Accuracy')
-    else:
-        # Plot peptide loss when accuracy isn't available
-        plt.plot(hist_dict['pep_reconstruction_loss'], label='Training')
-        if 'val_pep_reconstruction_loss' in hist_dict:
-            plt.plot(hist_dict['val_pep_reconstruction_loss'], label='Validation')
-        plt.title('Peptide Reconstruction Loss')
-        plt.ylabel('Loss')
-    plt.xlabel('Epoch')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-
-    # MHC accuracy (if available) or loss (as fallback)
-    plt.subplot(2, 2, 4)
-    if 'mhc_reconstruction_accuracy' in hist_dict:
-        plt.plot(hist_dict['mhc_reconstruction_accuracy'], label='Training')
-        if 'val_mhc_reconstruction_accuracy' in hist_dict:
-            plt.plot(hist_dict['val_mhc_reconstruction_accuracy'], label='Validation')
-        plt.title('MHC Reconstruction Accuracy')
-        plt.ylabel('Accuracy')
-    else:
-        # Plot MHC loss when accuracy isn't available
-        plt.plot(hist_dict['mhc_reconstruction_loss'], label='Training')
-        if 'val_mhc_reconstruction_loss' in hist_dict:
-            plt.plot(hist_dict['val_mhc_reconstruction_loss'], label='Validation')
-        plt.title('MHC Reconstruction Loss')
-        plt.ylabel('Loss')
-    plt.xlabel('Epoch')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
+    for i, key in enumerate(hist_dict.keys(), start=1):
+        plt.subplot(num_rows, num_cols, i)
+        plt.plot(hist_dict[key], label=f'Training {key}')
+        if f'val_{key}' in hist_dict:
+            plt.plot(hist_dict[f'val_{key}'], label=f'Validation {key}')
+        plt.title(key.replace('_', ' ').title())
+        plt.xlabel('Epoch')
+        plt.ylabel(key.replace('_', ' ').title())
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.6)
 
     plt.tight_layout()
     loss_plot_path = os.path.join(plot_dir, f"training_curves{fold_str}.png")
@@ -520,161 +474,160 @@ def plot_training_recon_curve(history: tf.keras.callbacks.History, run_dir: str,
 
 
 # TODO verify
-def plot_test_metrics(model, test_dataset, run_dir: str, fold_id: int = None,
-                      history=None, string: str = None):
-    """Plot comprehensive evaluation metrics for test dataset"""
-    fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
-    test_str = f"_{string}" if string else ""
-    plot_dir = os.path.join(run_dir, f"plots{fold_str}")
-    pathlib.Path(plot_dir).mkdir(parents=True, exist_ok=True)
-
-    print(f"Evaluating model on test dataset...")
-
-    # Run predictions on test dataset
-    all_predictions = []
-    all_targets_pep = []
-    all_targets_mhc = []
-    all_masks_pep = []
-    all_masks_mhc = []
-
-    for i, ((x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_target, pep_target)) in enumerate(test_dataset):
-        predictions = model.predict([x_pep, pep_mask, mhc_emb, mhc_mask], verbose=0)
-
-        # Extract predictions and targets
-        pep_preds = predictions['pep_reconstruction']
-        mhc_preds = predictions['mhc_reconstruction']
-
-        # Store for metrics calculation
-        all_predictions.append((pep_preds, mhc_preds))
-        all_targets_pep.append(pep_target)
-        all_targets_mhc.append(mhc_target)
-        all_masks_pep.append(pep_mask)
-        all_masks_mhc.append(mhc_mask)
-
-        if i >= 10:  # Limit evaluation to 10 batches for efficiency
-            break
-
-    # Create figure for evaluation metrics
-    plt.figure(figsize=(16, 14))
-
-    # 1. Peptide reconstruction accuracy for masked positions
-    plt.subplot(2, 2, 1)
-    pep_accs = []
-    for i, ((pep_pred, _), pep_target, pep_mask) in enumerate(zip(all_predictions, all_targets_pep, all_masks_pep)):
-        # Only evaluate masked positions
-        mask = tf.cast(tf.equal(pep_mask, MASK_TOKEN), tf.float32).numpy()
-
-        # For each position, get the predicted amino acid (argmax)
-        pep_pred_class = np.argmax(pep_pred, axis=-1)
-        pep_target_class = np.argmax(pep_target, axis=-1)
-
-        # Calculate accuracy only at masked positions
-        correct = (pep_pred_class == pep_target_class) * mask
-        accuracy = np.sum(correct) / (np.sum(mask) + 1e-10)
-        pep_accs.append(accuracy)
-
-    plt.bar(range(len(pep_accs)), pep_accs)
-    plt.axhline(np.mean(pep_accs), color='r', linestyle='--', label=f'Mean: {np.mean(pep_accs):.3f}')
-    plt.xlabel('Batch')
-    plt.ylabel('Accuracy')
-    plt.title('Peptide Reconstruction Accuracy (Masked Positions)')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-
-    # 2. MHC reconstruction accuracy for masked positions
-    plt.subplot(2, 2, 2)
-    mhc_accs = []
-    for i, ((_, mhc_pred), mhc_target, mhc_mask) in enumerate(zip(all_predictions, all_targets_mhc, all_masks_mhc)):
-        # Only evaluate masked positions
-        mask = tf.cast(tf.equal(mhc_mask, MASK_TOKEN), tf.float32).numpy()
-
-        # For each position, get the predicted amino acid (argmax)
-        mhc_pred_class = np.argmax(mhc_pred, axis=-1)
-        mhc_target_class = np.argmax(mhc_target, axis=-1)
-
-        # Calculate accuracy only at masked positions
-        correct = (mhc_pred_class == mhc_target_class) * mask
-        accuracy = np.sum(correct) / (np.sum(mask) + 1e-10)
-        mhc_accs.append(accuracy)
-
-    plt.bar(range(len(mhc_accs)), mhc_accs)
-    plt.axhline(np.mean(mhc_accs), color='r', linestyle='--', label=f'Mean: {np.mean(mhc_accs):.3f}')
-    plt.xlabel('Batch')
-    plt.ylabel('Accuracy')
-    plt.title('MHC Reconstruction Accuracy (Masked Positions)')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-
-    # 3. Peptide reconstruction loss
-    plt.subplot(2, 2, 3)
-    # Calculate categorical cross-entropy loss for peptide reconstruction
-    pep_losses = []
-    for ((pep_pred, _), pep_target, pep_mask) in zip(all_predictions, all_targets_pep, all_masks_pep):
-        # Only compute loss for masked positions
-        mask = tf.cast(tf.equal(pep_mask, MASK_TOKEN), tf.float32).numpy()
-        mask = mask[:, :, np.newaxis]  # Add channel dimension for broadcasting
-
-        # Calculate cross entropy loss
-        epsilon = 1e-10
-        loss = -np.sum(pep_target * np.log(pep_pred + epsilon) * mask) / (np.sum(mask) + epsilon)
-        pep_losses.append(loss)
-
-    plt.bar(range(len(pep_losses)), pep_losses)
-    plt.axhline(np.mean(pep_losses), color='r', linestyle='--', label=f'Mean: {np.mean(pep_losses):.3f}')
-    plt.xlabel('Batch')
-    plt.ylabel('Loss')
-    plt.title('Peptide Reconstruction Loss (Masked Positions)')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-
-    # 4. MHC reconstruction loss
-    plt.subplot(2, 2, 4)
-    # Calculate categorical cross-entropy loss for MHC reconstruction
-    mhc_losses = []
-    for ((_, mhc_pred), mhc_target, mhc_mask) in zip(all_predictions, all_targets_mhc, all_masks_mhc):
-        # Only compute loss for masked positions
-        mask = tf.cast(tf.equal(mhc_mask, MASK_TOKEN), tf.float32).numpy()
-        mask = mask[:, :, np.newaxis]  # Add channel dimension for broadcasting
-
-        # Calculate cross entropy loss
-        epsilon = 1e-10
-        loss = -np.sum(mhc_target * np.log(mhc_pred + epsilon) * mask) / (np.sum(mask) + epsilon)
-        mhc_losses.append(loss)
-
-    plt.bar(range(len(mhc_losses)), mhc_losses)
-    plt.axhline(np.mean(mhc_losses), color='r', linestyle='--', label=f'Mean: {np.mean(mhc_losses):.3f}')
-    plt.xlabel('Batch')
-    plt.ylabel('Loss')
-    plt.title('MHC Reconstruction Loss (Masked Positions)')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.6)
-
-    plt.tight_layout()
-    metrics_plot_path = os.path.join(plot_dir, f"test_metrics{fold_str}{test_str}.png")
-    plt.savefig(metrics_plot_path, dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # Save metrics summary
-    metrics_summary = {
-        'peptide_reconstruction_accuracy_mean': float(np.mean(pep_accs)),
-        'peptide_reconstruction_accuracy_std': float(np.std(pep_accs)),
-        'mhc_reconstruction_accuracy_mean': float(np.mean(mhc_accs)),
-        'mhc_reconstruction_accuracy_std': float(np.std(mhc_accs)),
-        'peptide_reconstruction_loss_mean': float(np.mean(pep_losses)),
-        'mhc_reconstruction_loss_mean': float(np.mean(mhc_losses)),
-    }
-
-    with open(os.path.join(run_dir, f"metrics_summary{fold_str}{test_str}.json"), 'w') as f:
-        json.dump(metrics_summary, f, indent=4)
-
-    print(f"✓ Test metrics saved to {metrics_plot_path}")
-    return metrics_summary
+# def plot_test_metrics(model, test_dataset, run_dir: str, fold_id: int = None,
+#                       history=None, string: str = None):
+#     """Plot comprehensive evaluation metrics for test dataset"""
+#     fold_str = f"_fold_{fold_id}" if fold_id is not None else ""
+#     test_str = f"_{string}" if string else ""
+#     plot_dir = os.path.join(run_dir, f"plots{fold_str}")
+#     pathlib.Path(plot_dir).mkdir(parents=True, exist_ok=True)
+#
+#     print(f"Evaluating model on test dataset...")
+#
+#     # Run predictions on test dataset
+#     all_predictions = []
+#     all_targets_pep = []
+#     all_targets_mhc = []
+#     all_masks_pep = []
+#     all_masks_mhc = []
+#
+#     for i, (x_pep, pep_mask, mhc_emb, mhc_mask, mhc_target) in enumerate(test_dataset):
+#         predictions = model.predict([x_pep, pep_mask, mhc_emb, mhc_mask], verbose=0)
+#
+#         # Extract predictions and targets
+#         pep_preds = predictions['pep_reconstruction']
+#         mhc_preds = predictions['mhc_reconstruction']
+#
+#         # Store for metrics calculation
+#         all_predictions.append((pep_preds, mhc_preds))
+#         all_targets_mhc.append(mhc_target)
+#         all_masks_pep.append(pep_mask)
+#         all_masks_mhc.append(mhc_mask)
+#
+#         if i >= 10:  # Limit evaluation to 10 batches for efficiency
+#             break
+#
+#     # Create figure for evaluation metrics
+#     plt.figure(figsize=(16, 14))
+#
+#     # 1. Peptide reconstruction accuracy for masked positions
+#     plt.subplot(2, 2, 1)
+#     pep_accs = []
+#     for i, ((pep_pred, _), pep_target, pep_mask) in enumerate(zip(all_predictions, all_targets_pep, all_masks_pep)):
+#         # Only evaluate masked positions
+#         mask = tf.cast(tf.equal(pep_mask, MASK_TOKEN), tf.float32).numpy()
+#
+#         # For each position, get the predicted amino acid (argmax)
+#         pep_pred_class = np.argmax(pep_pred, axis=-1)
+#         pep_target_class = np.argmax(pep_target, axis=-1)
+#
+#         # Calculate accuracy only at masked positions
+#         correct = (pep_pred_class == pep_target_class) * mask
+#         accuracy = np.sum(correct) / (np.sum(mask) + 1e-10)
+#         pep_accs.append(accuracy)
+#
+#     plt.bar(range(len(pep_accs)), pep_accs)
+#     plt.axhline(np.mean(pep_accs), color='r', linestyle='--', label=f'Mean: {np.mean(pep_accs):.3f}')
+#     plt.xlabel('Batch')
+#     plt.ylabel('Accuracy')
+#     plt.title('Peptide Reconstruction Accuracy (Masked Positions)')
+#     plt.legend()
+#     plt.grid(True, linestyle='--', alpha=0.6)
+#
+#     # 2. MHC reconstruction accuracy for masked positions
+#     plt.subplot(2, 2, 2)
+#     mhc_accs = []
+#     for i, ((_, mhc_pred), mhc_target, mhc_mask) in enumerate(zip(all_predictions, all_targets_mhc, all_masks_mhc)):
+#         # Only evaluate masked positions
+#         mask = tf.cast(tf.equal(mhc_mask, MASK_TOKEN), tf.float32).numpy()
+#
+#         # For each position, get the predicted amino acid (argmax)
+#         mhc_pred_class = np.argmax(mhc_pred, axis=-1)
+#         mhc_target_class = np.argmax(mhc_target, axis=-1)
+#
+#         # Calculate accuracy only at masked positions
+#         correct = (mhc_pred_class == mhc_target_class) * mask
+#         accuracy = np.sum(correct) / (np.sum(mask) + 1e-10)
+#         mhc_accs.append(accuracy)
+#
+#     plt.bar(range(len(mhc_accs)), mhc_accs)
+#     plt.axhline(np.mean(mhc_accs), color='r', linestyle='--', label=f'Mean: {np.mean(mhc_accs):.3f}')
+#     plt.xlabel('Batch')
+#     plt.ylabel('Accuracy')
+#     plt.title('MHC Reconstruction Accuracy (Masked Positions)')
+#     plt.legend()
+#     plt.grid(True, linestyle='--', alpha=0.6)
+#
+#     # 3. Peptide reconstruction loss
+#     plt.subplot(2, 2, 3)
+#     # Calculate categorical cross-entropy loss for peptide reconstruction
+#     pep_losses = []
+#     for ((pep_pred, _), pep_target, pep_mask) in zip(all_predictions, all_targets_pep, all_masks_pep):
+#         # Only compute loss for masked positions
+#         mask = tf.cast(tf.equal(pep_mask, MASK_TOKEN), tf.float32).numpy()
+#         mask = mask[:, :, np.newaxis]  # Add channel dimension for broadcasting
+#
+#         # Calculate cross entropy loss
+#         epsilon = 1e-10
+#         loss = -np.sum(pep_target * np.log(pep_pred + epsilon) * mask) / (np.sum(mask) + epsilon)
+#         pep_losses.append(loss)
+#
+#     plt.bar(range(len(pep_losses)), pep_losses)
+#     plt.axhline(np.mean(pep_losses), color='r', linestyle='--', label=f'Mean: {np.mean(pep_losses):.3f}')
+#     plt.xlabel('Batch')
+#     plt.ylabel('Loss')
+#     plt.title('Peptide Reconstruction Loss (Masked Positions)')
+#     plt.legend()
+#     plt.grid(True, linestyle='--', alpha=0.6)
+#
+#     # 4. MHC reconstruction loss
+#     plt.subplot(2, 2, 4)
+#     # Calculate categorical cross-entropy loss for MHC reconstruction
+#     mhc_losses = []
+#     for ((_, mhc_pred), mhc_target, mhc_mask) in zip(all_predictions, all_targets_mhc, all_masks_mhc):
+#         # Only compute loss for masked positions
+#         mask = tf.cast(tf.equal(mhc_mask, MASK_TOKEN), tf.float32).numpy()
+#         mask = mask[:, :, np.newaxis]  # Add channel dimension for broadcasting
+#
+#         # Calculate cross entropy loss
+#         epsilon = 1e-10
+#         loss = -np.sum(mhc_target * np.log(mhc_pred + epsilon) * mask) / (np.sum(mask) + epsilon)
+#         mhc_losses.append(loss)
+#
+#     plt.bar(range(len(mhc_losses)), mhc_losses)
+#     plt.axhline(np.mean(mhc_losses), color='r', linestyle='--', label=f'Mean: {np.mean(mhc_losses):.3f}')
+#     plt.xlabel('Batch')
+#     plt.ylabel('Loss')
+#     plt.title('MHC Reconstruction Loss (Masked Positions)')
+#     plt.legend()
+#     plt.grid(True, linestyle='--', alpha=0.6)
+#
+#     plt.tight_layout()
+#     metrics_plot_path = os.path.join(plot_dir, f"test_metrics{fold_str}{test_str}.png")
+#     plt.savefig(metrics_plot_path, dpi=300, bbox_inches='tight')
+#     plt.close()
+#
+#     # Save metrics summary
+#     metrics_summary = {
+#         'peptide_reconstruction_accuracy_mean': float(np.mean(pep_accs)),
+#         'peptide_reconstruction_accuracy_std': float(np.std(pep_accs)),
+#         'mhc_reconstruction_accuracy_mean': float(np.mean(mhc_accs)),
+#         'mhc_reconstruction_accuracy_std': float(np.std(mhc_accs)),
+#         'peptide_reconstruction_loss_mean': float(np.mean(pep_losses)),
+#         'mhc_reconstruction_loss_mean': float(np.mean(mhc_losses)),
+#     }
+#
+#     with open(os.path.join(run_dir, f"metrics_summary{fold_str}{test_str}.json"), 'w') as f:
+#         json.dump(metrics_summary, f, indent=4)
+#
+#     print(f"✓ Test metrics saved to {metrics_plot_path}")
+#     return metrics_summary
 
 def plot_ablation_study(model, dataset, run_dir: str, fold_id: int = None):
     """
     Plot ablation study results for peptide and MHC reconstruction.
     :param model: Trained model for reconstruction.
-    :param dataset: dataset containing (x_pep, pep_mask, mhc_emb, mhc_mask) and (mhc_target, pep_target)
+    :param dataset: dataset containing (pep_OHE, pep_mask, mhc_emb, mhc_mask)
     :param run_dir: Save directory for plots
     :param fold_id: Fold ID for saving plots in fold-specific directory
     :return: None
@@ -688,35 +641,35 @@ def plot_ablation_study(model, dataset, run_dir: str, fold_id: int = None):
     sample_count = 0
     max_samples = 5
 
-    for ((x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_target, pep_target)), allele_ids in dataset:
+    for (pep_OHE, pep_mask, mhc_emb, mhc_mask, mhc_ohe), allele_ids in dataset:
         if sample_count >= max_samples:
             break
 
         # Process each sample in the batch
-        batch_size = x_pep.shape[0]
+        batch_size = pep_OHE.shape[0]
         for i in range(batch_size):
             if sample_count >= max_samples:
                 break
 
             # masked_pos: model_accuracy
             ablation_results = {}
-            for j in range(x_pep.shape[1]):
+            for j in range(pep_OHE.shape[1]):
                 # Mask the j-th amino acid in the peptide sequence
-                masked_x_pep = np.copy(x_pep)
-                masked_x_pep[i, j, :] = 0
+                masked_pep_OHE = np.copy(pep_OHE)
+                masked_pep_OHE[i, j, :] = 0
                 masked_pep_mask = np.copy(pep_mask)
                 masked_pep_mask[i, j] = MASK_TOKEN  # Mask the position
                 # Get predictions with the masked peptide
-                predictions = model.predict([masked_x_pep, masked_pep_mask, mhc_emb, mhc_mask], verbose=0)
+                predictions = model.predict([masked_pep_OHE, masked_pep_mask, mhc_emb, mhc_mask], verbose=0)
                 pep_pred_ohe = predictions['pep_reconstruction']
 
                 # get accuracy between pep_target[i] and pep_pred_ohe
-                pep_target_class = np.argmax(pep_target[i], axis=-1)
+                pep_target_class = np.argmax(pep_OHE[i], axis=-1)
                 pep_pred_class = np.argmax(pep_pred_ohe[i], axis=-1)
                 accuracy = np.mean(pep_target_class == pep_pred_class)
                 ablation_results[j] = accuracy
 
-            original_pep_seq = OHE_to_seq(pep_target[i])
+            original_pep_seq = OHE_to_seq(pep_OHE[i])
             # Get MHC allele ID if it's being passed with the dataset
             mhc_id = allele_ids[i]
             if isinstance(mhc_id, bytes):
@@ -778,7 +731,7 @@ def plot_reconstruction(model, dataset, SEQ_MAP, run_dir: str, fold_id: int = No
     """
     Plot reconstruction results for peptides and MHC sequences.
     :param model: Trained model for reconstruction.
-    :param dataset: dataset containing (x_pep, pep_mask, mhc_emb, mhc_mask) and (mhc_target, pep_target)
+    :param dataset: dataset containing (pep_OHE, pep_mask, mhc_emb, mhc_mask) and (mhc_target, pep_target)
     :param SEQ_MAP: {"key": "sequence"} mapping for MHC sequences, key is the allele ID
     :param run_dir: Save directory for plots
     :param fold_id: Fold ID for saving plots in fold-specific directory
@@ -799,23 +752,23 @@ def plot_reconstruction(model, dataset, SEQ_MAP, run_dir: str, fold_id: int = No
     sample_count = 0
     max_samples = 5
 
-    for ((x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_target, pep_target)), allele_ids in dataset:
+    for (pep_OHE, pep_mask, mhc_emb, mhc_mask, mhc_target), allele_ids in dataset:
         if sample_count >= max_samples:
             break
 
         # Get predictions
-        predictions = model.predict([x_pep, pep_mask, mhc_emb, mhc_mask], verbose=0)
+        predictions = model.predict([pep_OHE, pep_mask, mhc_emb, mhc_mask], verbose=0)
         pep_pred = predictions['pep_reconstruction']
         mhc_pred = predictions['mhc_reconstruction']
 
         # Process each sample in the batch
-        batch_size = x_pep.shape[0]
+        batch_size = pep_OHE.shape[0]
         for i in range(batch_size):
             if sample_count >= max_samples:
                 break
 
             # Get original peptide and MHC sequences
-            original_pep_seq = OHE_to_seq_single(pep_target[i])
+            original_pep_seq = OHE_to_seq_single(pep_OHE[i])
             original_mhc_seq = OHE_to_seq_single(mhc_target[i])
             # Get predicted peptide and MHC sequences
             pep_pred_seq = OHE_to_seq_single(pep_pred[i])
@@ -856,10 +809,10 @@ def plot_cross_attn(model, test_dataset, run_dir: str, fold_id: int = None):
     AA = "ACDEFGHIKLMNPQRSTVWY-"  # 20 standard AAs + gap
 
     # Process one batch from the dataset
-    for (x_pep, pep_mask, mhc_emb, mhc_mask), (mhc_OHE, pep_OHE) in test_dataset.take(1):
+    for (pep_OHE, pep_mask, mhc_emb, mhc_mask, mhc_OHE) in test_dataset.take(1):
         # Get model predictions including attention scores
         predictions = model.predict(
-            [x_pep, pep_mask, mhc_emb, mhc_mask],
+            [pep_OHE, pep_mask, mhc_emb, mhc_mask, mhc_OHE],
             verbose=0
         )
 
@@ -934,8 +887,8 @@ def main(argv=None):
                    help="Output dir (default: runs/run_YYYYmmdd-HHMMSS)")
     p.add_argument("--buffer_size", type=int, default=1000,
                    help="Buffer size for streaming data loading")
-    p.add_argument("--debug_batches", type=int, default=3,
-                   help="Number of batches to use for test dataset evaluation")
+    #p.add_argument("--debug_batches", type=int, default=3,
+    #               help="Number of batches to use for test dataset evaluation")
 
     args = p.parse_args(argv)
 
@@ -1031,7 +984,7 @@ def main(argv=None):
         train_ds = (train_ds
                     .shuffle(buffer_size=args.buffer_size, reshuffle_each_iteration=True)
                     .batch(args.batch)
-                    .take(args.debug_batches)
+                    #.take(args.debug_batches)
                     .prefetch(tf.data.AUTOTUNE))
 
         train_ids = np.asarray(val_ids)
@@ -1043,12 +996,12 @@ def main(argv=None):
 
         val_ds = (val_ds
                   .batch(args.batch)
-                  .take(args.debug_batches)
+                  #.take(args.debug_batches)
                   .prefetch(tf.data.AUTOTUNE))
 
         val_ds_combined = (val_ds_combined
                            .batch(args.batch)
-                           .take(args.debug_batches)
+                           #.take(args.debug_batches)
                            .prefetch(tf.data.AUTOTUNE))
 
 
@@ -1068,32 +1021,32 @@ def main(argv=None):
     bench_ids = []
 
     # Create benchmark datasets
-    for folder in BENCHMARKS_DIR:
-        if os.path.exists(folder):
-            bench_files = [f for f in os.listdir(folder) if f.endswith('.parquet')]
-            n_benchs = len(bench_files)
-            print(f"Found {n_benchs} benchmark files in {folder}")
-
-            for file in bench_files:
-                bench_path = os.path.join(folder, file)
-                bench_name = os.path.splitext(file)[0]
-                print(f"Creating benchmark dataset for {bench_name}...")
-
-                bench_ds, bench_id = create_streaming_dataset(
-                    bench_path,
-                    max_peptide_length,
-                    max_mhc_length,
-                    buffer_size=args.buffer_size,
-                    seq_map=SEQ_MAP
-                )
-
-                bench_ds = (bench_ds
-                            .batch(args.batch)
-                            .prefetch(tf.data.AUTOTUNE))
-
-                bench_ids.append(np.array(list(bench_id.as_numpy_iterator())))
-                bench_datasets.append((bench_ds, bench_name))
-                print(f"✓ Created benchmark dataset: {bench_name}")
+    # for folder in BENCHMARKS_DIR:
+    #     if os.path.exists(folder):
+    #         bench_files = [f for f in os.listdir(folder) if f.endswith('.parquet')]
+    #         n_benchs = len(bench_files)
+    #         print(f"Found {n_benchs} benchmark files in {folder}")
+    #
+    #         for file in bench_files:
+    #             bench_path = os.path.join(folder, file)
+    #             bench_name = os.path.splitext(file)[0]
+    #             print(f"Creating benchmark dataset for {bench_name}...")
+    #
+    #             bench_ds, bench_id = create_streaming_dataset(
+    #                 bench_path,
+    #                 max_peptide_length,
+    #                 max_mhc_length,
+    #                 buffer_size=args.buffer_size,
+    #                 seq_map=SEQ_MAP
+    #             )
+    #
+    #             bench_ds = (bench_ds
+    #                         .batch(args.batch)
+    #                         .prefetch(tf.data.AUTOTUNE))
+    #
+    #             bench_ids.append(np.array(list(bench_id.as_numpy_iterator())))
+    #             bench_datasets.append((bench_ds, bench_name))
+    #             print(f"✓ Created benchmark dataset: {bench_name}")
 
 
 
@@ -1114,15 +1067,18 @@ def main(argv=None):
 
         # Build fresh model for each fold
         print(f"Building model with max_pep_len={max_peptide_length}, max_mhc_len={max_mhc_length}")
-        encoder_model, encoder_decoder_model = bicross_recon(max_pep_len=max_peptide_length, max_mhc_len=max_mhc_length)
-        encoder_decoder_model.summary(print_fn=lambda x: print(x))
+        model = build_bicross_net(max_peptide_length, max_mhc_length, mask_token=MASK_TOKEN,
+                                  pad_token=PAD_TOKEN, pep_emb_dim=128, mhc_emb_dim=128, heads=4)
+
+        model.compile(optimizer=keras.optimizers.Adam(1e-3))
+
 
         # Callbacks
-        ckpt_cb = tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(run_dir, f'best_fold_{fold_id}.weights.h5'),
-            monitor='val_loss', save_best_only=True, mode='min', verbose=1)
-        early_cb = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss', patience=15, restore_best_weights=True, verbose=1)
+        # ckpt_cb = tf.keras.callbacks.ModelCheckpoint(
+        #     filepath=os.path.join(run_dir, f'best_fold_{fold_id}.weights.h5'),
+        #     monitor='val_loss', save_best_only=True, mode='min', verbose=1)
+        # early_cb = tf.keras.callbacks.EarlyStopping(
+        #     monitor='val_loss', patience=15, restore_best_weights=True, verbose=1)
 
         # Verify data shapes
         # for (x_pep, pep_mask_arr, mhc_embed, mhc_mask_arr), allele in train_loader.take(1):
@@ -1132,13 +1088,22 @@ def main(argv=None):
         print("Memory before training:")
         monitor_memory()
 
+        if not train_loader:
+            raise ValueError("The train_loader dataset is empty. Check dataset path or preprocessing logic.")
+        batch = next(iter(train_loader))
+        pep_OHE = batch["pep_onehot"]
+        pep_mask = batch["pep_mask"]
+        mhc_emb  = batch["mhc_latent"]
+        mhc_mask = batch["mhc_mask"]
+        mhc_OHE  = batch["mhc_onehot"]
         # Train model
         print("🚀 Starting training...")
-        hist = encoder_decoder_model.fit(
-            train_loader,
+
+        hist = model.fit(
+            x=train_loader,
             validation_data=val_loader,
             epochs=args.epochs,
-            callbacks=[ckpt_cb, early_cb],
+            # callbacks=[ckpt_cb, early_cb],
             verbose=1,
         )
 
@@ -1147,14 +1112,14 @@ def main(argv=None):
 
         # Plot training curves
         print("📈 Plotting training curves...")
-        plot_training_recon_curve(hist, run_dir, fold_id, model=encoder_decoder_model, val_dataset=val_loader)
-        plot_reconstruction(model=encoder_decoder_model,dataset=val_comb_loader, run_dir=run_dir, SEQ_MAP=SEQ_MAP, fold_id=fold_id)
-        plot_ablation_study(model=encoder_decoder_model,dataset=val_comb_loader, run_dir=run_dir, fold_id=fold_id)
-        plot_cross_attn(encoder_decoder_model, val_comb_loader, run_dir, fold_id)
-        plot_test_metrics(encoder_decoder_model, val_comb_loader, run_dir, fold_id)
+        plot_training_recon_curve(hist, run_dir, fold_id, model=model, val_dataset=val_loader)
+        # plot_reconstruction(model=encoder_decoder_model,dataset=val_comb_loader, run_dir=run_dir, SEQ_MAP=SEQ_MAP, fold_id=fold_id)
+        # plot_ablation_study(model=encoder_decoder_model,dataset=val_comb_loader, run_dir=run_dir, fold_id=fold_id)
+        # plot_cross_attn(encoder_decoder_model, val_comb_loader, run_dir, fold_id)
+        # plot_test_metrics(encoder_decoder_model, val_comb_loader, run_dir, fold_id)
 
         # Save model and metadata
-        encoder_decoder_model.save_weights(os.path.join(run_dir, f'model_fold_{fold_id}.weights.h5'))
+        model.save_weights(os.path.join(run_dir, f'model_fold_{fold_id}.weights.h5'))
         metadata = {
             "fold_id": fold_id,
             "epochs": args.epochs,
@@ -1168,38 +1133,38 @@ def main(argv=None):
             json.dump(metadata, f, indent=4)
 
         # Evaluate on benchmark datasets
-        print(f"\n📊 Evaluating fold {fold_id} on benchmark datasets...")
-
-        for bench_ds, bench_name in bench_datasets:
-            print(f"Evaluating on benchmark: {bench_name}...")
-
-            # Plot metrics for this benchmark
-            metrics_summary = plot_test_metrics(
-                encoder_decoder_model,
-                bench_ds,
-                run_dir,
-                fold_id,
-                string=f"bench_{bench_name}"
-            )
-
-            # Find the matching bench_id index
-            bench_idx = [i for i, (ds, name) in enumerate(bench_datasets) if name == bench_name][0]
-
-            # Save cross latents for this benchmark dataset
-            save_cross_latent_npy(
-                encoder_model,
-                bench_ds,
-                run_dir,
-                name=f"cross_latent_{bench_name}_fold_{fold_id}",
-                mhc_ids=bench_ids[bench_idx] if bench_idx < len(bench_ids) else None
-            )
-
-            print(f"✓ Completed evaluation on {bench_name}")
+        # print(f"\n📊 Evaluating fold {fold_id} on benchmark datasets...")
+        #
+        # for bench_ds, bench_name in bench_datasets:
+        #     print(f"Evaluating on benchmark: {bench_name}...")
+        #
+        #     # Plot metrics for this benchmark
+        #     # metrics_summary = plot_test_metrics(
+        #     #     model,
+        #     #     bench_ds,
+        #     #     run_dir,
+        #     #     fold_id,
+        #     #     string=f"bench_{bench_name}"
+        #     # )
+        #
+        #     # Find the matching bench_id index
+        #     bench_idx = [i for i, (ds, name) in enumerate(bench_datasets) if name == bench_name][0]
+        #
+        #     # Save cross latents for this benchmark dataset
+        #     save_cross_latent_npy(
+        #         model,
+        #         bench_ds,
+        #         run_dir,
+        #         name=f"cross_latent_{bench_name}_fold_{fold_id}",
+        #         mhc_ids=bench_ids[bench_idx] if bench_idx < len(bench_ids) else None
+        #     )
+        #
+        #     print(f"✓ Completed evaluation on {bench_name}")
 
         print(f"✅ Fold {fold_id} completed successfully")
 
         # Cleanup
-        del encoder_model, encoder_decoder_model, hist
+        del model, hist
         cleanup_memory()
 
     print("\n🎉 Training completed successfully!")
@@ -1214,8 +1179,8 @@ if __name__ == "__main__":
     EMBEDDINGS_DIR = f"../data/mhc_{MHC_CLASS}/embeddings"
     main([
         "--dataset_path", dataset_path,
-        "--epochs", "2",
+        "--epochs", "10",
         "--batch", "256",
         "--buffer_size", "1024",
-        "--debug_batches", "2",
+        #"--debug_batches", "3",
     ])
