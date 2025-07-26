@@ -101,10 +101,16 @@ def collect_id_pdbs(id_name: str, root_dir: Path, id_to_pep: dict) -> tuple[List
     pdb_files = []
     peptides = []
     for sample_dir in root_dir.iterdir():
+        alphafold_input = sample_dir / "alphafold_input_file.tsv"
         id_name_sample = split_folder_name(sample_dir)
         if sample_dir.is_dir() and id_name == id_name_sample:
+            if not alphafold_input.exists():
+                print(f"Skipping {sample_dir} – no alphafold_input_file.tsv found")
+                continue
+            alphafold_input = pd.read_csv(alphafold_input, sep="\t")
+            peptide = alphafold_input["target_chainseq"].iloc[0].split("/")[
+                -1] if "target_chainseq" in alphafold_input.columns else None
             pdb_files.extend(sample_dir.glob("*.pdb"))
-            peptide = id_to_pep.get(sample_dir.name, "")
             if peptide:
                 peptides.append(peptide)
 
