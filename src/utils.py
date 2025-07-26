@@ -2,15 +2,22 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
+from typing import Dict
+import numpy as np
+from Bio.PDB import PDBParser
+from scipy.spatial.distance import pdist, squareform
+from scipy.special import softmax
 
 # Constants
 AA = "ACDEFGHIKLMNPQRSTVWY-"
 AA_TO_INT = {a: i for i, a in enumerate(AA)}
 UNK_IDX = 20  # Index for "unknown"
 MASK_TOKEN = -1.0
+NORM_TOKEN = 1.0
 PAD_TOKEN = -2.0
 PAD_VALUE = 0.0
 MASK_VALUE = 0.0
+
 
 # Helper function to one-hot encode peptide sequences
 # def seq_to_onehot(seq: str, max_len: int) -> np.ndarray:
@@ -26,13 +33,15 @@ def seq_to_onehot(sequence: str, max_seq_len: int) -> np.ndarray:
     for j, aa in enumerate(sequence.upper()[:max_seq_len]):
         arr[j, AA_TO_INT.get(aa, UNK_IDX)] = 1.0
         # print number of UNKs in the sequence
-    num_unks = np.sum(arr[:, UNK_IDX])
-    if num_unks > 0:
-        print(f"Warning: {num_unks} unknown amino acids in sequence '{sequence}'")
+    # num_unks = np.sum(arr[:, UNK_IDX])
+    # zero out gaps
+    arr[:, AA_TO_INT['-']] = PAD_VALUE  # Set gaps to PAD_VALUE
+    # if num_unks > 0:
+    #     print(f"Warning: {num_unks} unknown amino acids in sequence '{sequence}'")
     return arr
 
 
-def OHE_to_seq(ohe: np.ndarray) -> list:
+def OHE_to_seq(ohe: np.ndarray, gap: bool = False) -> list:
     """
     Convert a one-hot encoded matrix back to a peptide sequence.
     # (B, max_pep_len, 21) -> (B, max_pep_len)
@@ -41,21 +50,23 @@ def OHE_to_seq(ohe: np.ndarray) -> list:
     Returns:
         sequence: Peptide sequence as a string. (B,)
     """
-    AA = "ACDEFGHIKLMNPQRSTVWY-"
     sequence = []
     for i in range(ohe.shape[0]):  # Iterate over batch dimension
         seq = []
         for j in range(ohe.shape[1]):  # Iterate over sequence length
-            aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
-            if aa_index < len(AA):  # Check if it's a valid amino acid index
-                seq.append(AA[aa_index])
+            if gap and np.all(ohe[i, j] == 0):
+                seq.append('-')
             else:
-                seq.append('X')  # Use 'X' for unknown amino acids
+                aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
+                if aa_index < len(AA):  # Check if it's a valid amino acid index
+                    seq.append(AA[aa_index])
+                else:
+                    seq.append('X')  # Use 'X' for unknown amino acids
         sequence.append(''.join(seq))  # Join the list into a string
     return sequence  # Return list of sequences
 
 
-def OHE_to_seq_single(ohe: np.ndarray) -> str:
+def OHE_to_seq_single(ohe: np.ndarray, gap=False) -> str:
     """
     Convert a one-hot encoded matrix back to a peptide sequence.
     Args:
@@ -63,11 +74,13 @@ def OHE_to_seq_single(ohe: np.ndarray) -> str:
     Returns:
         sequence: Peptide sequence as a string.
     """
-    AA = "ACDEFGHIKLMNPQRSTVWY"
     seq = []
     for j in range(ohe.shape[0]):  # Iterate over sequence length
-        aa_index = np.argmax(ohe[j])  # Get index of the max value in one-hot encoding
-        seq.append(AA[aa_index])
+        if gap and np.all(ohe[j] == 0):
+            seq.append('-')
+        else:
+            aa_index = np.argmax(ohe[j])  # Get index of the max value in one-hot encoding
+            seq.append(AA[aa_index])
     return ''.join(seq)  # Join the list into a string
 
 
@@ -231,7 +244,8 @@ class PositionalEncoding(keras.layers.Layer):
         # Create (1, pos_range, embed_dim) encoding matrix
         pos = tf.range(self.pos_range, dtype=tf.float32)[:, tf.newaxis]  # (pos_range, 1)
         i = tf.range(self.embed_dim, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim)
-        angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, tf.float32))
+        #angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, tf.float32))
+        angle_rates = tf.pow(300.0, -(2 * tf.floor(i / 2)) / tf.cast(self.embed_dim, tf.float32))
         angle_rads = pos * angle_rates  # (pos_range, embed_dim)
 
         # Apply sin to even indices, cos to odd indices
@@ -674,10 +688,6 @@ class MaskedCategoricalCrossentropyLoss(layers.Layer):
 
 def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10):
     # Generate synthetic data
-    # Define amino acids
-    # Define amino acids
-    AA = "ACDEFGHIKLMNPQRSTVWY-" # 21 amino acids including gap
-
     # Position-specific amino acid frequencies for peptides
     # Simplified frequencies where certain positions prefer specific amino acids
     pep_pos_freq = {
@@ -714,6 +724,10 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
     for i, length in enumerate(pep_lengths):
         mask_pep[i, :length] = 1.0
+        # mask gaps with pad token
+        for pos in range(length):
+            if pep_seqs[i][pos] == '-':
+                mask_pep[i, pos] = PAD_TOKEN
 
     # MHC alleles typically have conserved regions
     mhc_pos_freq = {
@@ -748,7 +762,7 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     }
 
     # Generate MHC sequences with more realistic properties
-    mhc_lengths = np.random.randint(340,342, size=batch_size)  # Less variation in length
+    mhc_lengths = np.random.randint(max_mhc_len-5,max_mhc_len, size=batch_size)  # Less variation in length
     mhc_seqs = []
     for length in mhc_lengths:
         seq = []
@@ -769,17 +783,17 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
     for i, length in enumerate(mhc_lengths):
         mask_mhc[i, :length] = 1.0
-        mhc_EMB[i, length:, :] = 0.0  # Zero out padding positions
+        mhc_EMB[i, length:, :] = PAD_VALUE  # set padding positions
+        for pos in range(length):
+            if mhc_seqs[i][pos] == '-':
+                mask_mhc[i, pos] = PAD_TOKEN
 
     # Generate MHC IDs (could represent allele types)
     mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
 
     # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
-    mask_pep[np.random.rand(batch_size, max_pep_len) < 0.15] = MASK_TOKEN
-    pep_OHE[mask_pep == MASK_TOKEN] = 0.0  # Zero out masked positions
-    # mask 0.15 of the MHC positions update the mask with MASK_TOKEN and zero out the corresponding positions in the EMB
-    mask_mhc[np.random.rand(batch_size, max_mhc_len) < 0.15] = MASK_TOKEN
-    mhc_EMB[mask_mhc == MASK_TOKEN] = 0.0  # Zero out masked positions
+    mask_pep[(mask_pep != PAD_TOKEN) & (np.random.rand(batch_size, max_pep_len) < 0.15)] = MASK_TOKEN
+    mask_mhc[(mask_mhc != PAD_TOKEN) & (np.random.rand(batch_size, max_mhc_len) < 0.15)] = MASK_TOKEN
 
     # convert all inputs tensors
     # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=tf.float32)
@@ -824,3 +838,89 @@ class MaskedCategoricalCELossLayer(keras.layers.Layer):
         self.add_loss(total_loss)
         return y_out  # passthrough for prediction
 
+
+class MaskPaddingLayer(layers.Layer):
+    """
+    Layer that sets the last index to 1.0
+    mask: (B, N) tensor with -2.0 as padding token
+    tensor: (B, N, D) tensor to be masked
+    set the D[-1] to 1.0 if the mask is -2.0
+    """
+
+    def __init__(self, pad_token=-2.0, **kwargs):
+        super().__init__(**kwargs)
+        self.pad_token = pad_token
+
+    def call(self, inputs):
+        tensor, mask = inputs
+        mask_exp = tf.equal(mask, self.pad_token)
+        mask_exp = tf.expand_dims(mask_exp, axis=-1)
+        # Create a tensor of zeros except for the last feature, which is 1.0 where mask is True
+        update = tf.one_hot(tf.shape(tensor)[-1] - 1, tf.shape(tensor)[-1], on_value=1.0, off_value=0.0)
+        update = tf.reshape(update, (1, 1, -1))
+        update = tf.cast(update, tensor.dtype)
+        update = tf.tile(update, [tf.shape(tensor)[0], tf.shape(tensor)[1], 1])
+        result = tf.where(mask_exp, update, tensor)
+        return result
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"pad_token": self.pad_token})
+        return config
+
+def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str:
+    """
+    Get the embedding key for a given allele key.
+    If the key is not found in the embedding dictionary, return None.
+    # find the matching emb key in the emb_dict.
+    Sometimes the emb key is longer than the allele key, so we need to check if the key is a substring of the emb key.
+    """
+    # Use a generator expression for efficient lookup
+    return next((emb_key for emb_key in emb_dict if emb_key.startswith(key)), None)
+
+
+
+def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
+    # Parse PDB file
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure('protein', pdb_path)
+    chain = structure[0][chainid]  # Assumes single chain 'A'
+    # Extract CB (or CA for Glycine) coordinates
+    coords = []
+    carbon_not = 'CA' if carbon == 'CB' else 'CB'
+    for res in chain:
+        if res.get_resname() == 'GLY':  # Glycine
+            atom = res['CA']
+        else:
+            atom = res[carbon] if carbon in res else res[carbon_not]
+        coords.append(atom.get_coord())
+    coords = np.array(coords)
+    # Compute distance matrix
+    dist_matrix = squareform(pdist(coords, metric='euclidean'))
+    mask = np.where(dist_matrix < threshold, 0., 1)
+    mask += np.eye(mask.shape[0], dtype=np.float32) # all masks are==1
+    mask = np.where(mask==1, 0, 1) # all masks are==0 now
+    dist_matrix = 1 / (dist_matrix + 1e-9)
+    result = dist_matrix * mask
+    result = result[len(result)-len(peptide):, :len(result)-len(peptide)]
+    result = (result - np.min(result)) / (np.max(result) - np.min(result))
+    return result
+
+# res = process_pdb_distance_matrix('../pdbs/MHCI_ref_4U6Y.pdb', 9, "FLNKDLEVDGHFVTM", 'C', 1.5)
+
+
+# # How to use
+# thr = 9
+# chain = 'A'
+# carbons = ['CA', 'CB']
+# final_dict = {}
+# for i, row in df.iterrows():
+#     allele = row['allale']
+#     peptide = row['peptide']
+#     pdb_path = row['pdb_path']
+#     out = []
+#     for carbon in carbons:
+#         res = process_pdb_distance_matrix(pdb_path, thr, peptide, chain, carbon)
+#         out.append(np.expand_dims(res, axis=-1))
+#     out = np.concatenate(out, axis=-1) #(P,M,2)
+#     final_dict[allele] = out
