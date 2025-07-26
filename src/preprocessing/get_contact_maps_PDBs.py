@@ -160,7 +160,13 @@ def main(
                             axis=-1
                         )
                     )
-                combined = np.concatenate(channel_mats, axis=-1)  # (*, *, 2)
+
+                combined = np.concatenate(channel_mats, axis=-1) # shape: (*, *, 2)
+                # average over peptide (axis=0) and stack channels
+                # # (**, *, 2) to (shape: (*, 2)
+                # where * is the number of residues in the mhc)
+                # and ** is the number of residues in the rest of the protein
+                combined = np.mean(combined, axis=0).astype(np.float32)
                 per_pdb_arrays.append(combined)
             except Exception as exc:
                 print(f"   -> failed on {pdb.name}: {exc}")
