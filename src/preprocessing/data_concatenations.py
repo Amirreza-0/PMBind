@@ -11,15 +11,23 @@ from typing import Sequence, Dict
 ROOT_DIR = Path("../../data/binding_affinity_data")  # parent folder that contains 1/, 2/, ...
 CLASSES = (1, 2)  # run both class I and class II by default
 SEQ_DIR = Path("../../data/ESM/esmc_600m/PMGen_whole_seq")  # where mhc1_sequences.csv, mhc2_sequences.csv live
-
+# SEQ_DIR = Path("../../data/alleles")  # this is the path to get alignment sequences
 
 # helper – build MHC-embedding key (exactly the same rule you used before)
-def build_key(allele: str) -> str:
+def build_key(allele: str, seq_map: Dict = None) -> str:
     """Remove ':', '*', white-space; replace '/' with '_' and upper-case."""
-    key = allele.replace(":", "").replace("*", "").replace(" ", "")
+    key = allele.replace(":", "").replace("*", "").replace(" ", "").replace("mice-", "").replace("-", "")
     key = key.replace("/", "_").upper()
+    # get the seq_map keys that start with key
+    if seq_map is not None:
+        # if key is in seq_map, return it
+        if key in seq_map:
+            return key
+        # else, find the first key that starts with key
+        for k in seq_map.keys():
+            if k.startswith(key):
+                return k
     return key
-
 
 # 1) concatenate all TSV + Parquet files from one directory
 def concatenate_files(one_class_dir: Path) -> pd.DataFrame:
@@ -96,21 +104,24 @@ def attach_mhc_sequences(stats_df: pd.DataFrame,
     """
     key2seq: Dict[str, str] = dict(zip(seq_map["key"], seq_map["mhc_sequence"]))
 
+    # harmonize key2seq
+    key2seq = {build_key(k, key2seq): v for k, v in key2seq.items()}
+
     def fetch(allele: str) -> str | None:
         # strip, upper etc.
-        cleaned = allele.replace(":", "").replace("*", "").replace(" ", "")
+        # cleaned = allele.replace(":", "").replace("*", "").replace(" ", "")
         # multi-chain?  e.g. DRB1_0401/DRA_0101
-        if "/" in cleaned or "_" in cleaned:
-            cleaned = cleaned.replace("/", "_")
+        if "/" in allele or "_" in allele:
+            cleaned = allele.replace("/", "_")
             parts = cleaned.split("_")
             if len(parts) != 2:
                 return None
-            seqs = [key2seq.get(build_key(p), None) for p in parts]
+            seqs = [key2seq.get(build_key(p, key2seq), None) for p in parts]
             if None in seqs:
                 return None
             return "/".join(seqs)
         else:
-            return key2seq.get(build_key(cleaned), None)
+            return key2seq.get(build_key(allele, key2seq), None)
 
     stats_df["sequence"] = stats_df["allele"].map(fetch)
     return stats_df
@@ -119,26 +130,35 @@ def attach_mhc_sequences(stats_df: pd.DataFrame,
 # main loop
 def main(mhc_classes: Sequence[int] = CLASSES) -> None:
     for cls in mhc_classes:
-        print(f"\n=== MHC class {cls} ===")
-        one_dir = ROOT_DIR / f"mhc{cls}"  # e.g. ../../data/binding_affinity_data/mhc1/
-        if not one_dir.is_dir():
-            print(f"  WARNING: directory {one_dir} does not exist – skipped.")
+        # print(f"\n=== MHC class {cls} ===")
+        # one_dir = ROOT_DIR / f"mhc{cls}"  # e.g. ../../data/binding_affinity_data/mhc1/
+        # if not one_dir.is_dir():
+        #     print(f"  WARNING: directory {one_dir} does not exist – skipped.")
+        #     continue
+        #
+        # # 1) concatenate
+        # concat_df = concatenate_files(one_dir)
+        # concat_out = ROOT_DIR / f"concatenated_class{cls}.parquet"
+        # concat_df.to_parquet(concat_out, index=False)
+        # print(f"  • concatenated data -> {concat_out}")
+        #
+        # # 2) statistics
+        # stats = allele_statistics(concat_df)
+        # stats_out = ROOT_DIR / f"allele_stats_class{cls}.csv"
+        # stats.to_csv(stats_out, index=False)
+        # print(f"  • allele statistics  -> {stats_out}")
+
+        ## Debug -
+        # load stats
+        stats_csv = ROOT_DIR / f"allele_stats_class{cls}.csv"
+        if not stats_csv.exists():
+            print(f"  WARNING: stats file {stats_csv} does not exist – skipped.")
             continue
-
-        # 1) concatenate
-        concat_df = concatenate_files(one_dir)
-        concat_out = ROOT_DIR / f"concatenated_class{cls}.parquet"
-        concat_df.to_parquet(concat_out, index=False)
-        print(f"  • concatenated data -> {concat_out}")
-
-        # 2) statistics
-        stats = allele_statistics(concat_df)
-        stats_out = ROOT_DIR / f"allele_stats_class{cls}.csv"
-        stats.to_csv(stats_out, index=False)
-        print(f"  • allele statistics  -> {stats_out}")
+        stats = pd.read_csv(stats_csv)
 
         # 3) add sequences (if mapping file exists)
         seq_csv = SEQ_DIR / f"mhc{cls}_encodings.csv"
+        # seq_csv = SEQ_DIR / f"aligned_PMGen_class_{cls}.csv"
         if seq_csv.exists():
             seq_map = pd.read_csv(seq_csv)
             stats = attach_mhc_sequences(stats, seq_map)
