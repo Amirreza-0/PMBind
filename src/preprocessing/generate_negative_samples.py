@@ -3,6 +3,15 @@
 #
 # Build extra negatives for alleles whose negative:positive ratio is < 5,
 # using positive samples from the most distant (furthest) sequence clusters.
+# We have a dataset of all positive samples.
+# we want to generate negative samples for the alleles that have lower than 5 times the positive values.
+#
+# data frames are csv files with allele and sequence columns.
+#
+# write the complete python code
+
+# create a phylogeny of all alleles in based on their sequences
+# generate negatives for alleles without negative sample pairs by taking samples from furthest trees
 
 import json
 import os
@@ -23,7 +32,7 @@ from src.utils import cluster_aa_sequences   # import the earlier function
 # ----------------------------------------------------------------------
 ANALYSIS_CSV   = "../../data/binding_affinity_data/allele_stats_class1_with_seq.csv"
 BINDING_CSV    = "../../data/binding_affinity_data/concatenated_class1.parquet"
-UPDATED_BIND   = "../../data/binding_affinity_data/binding_dataset_with_synthetic_negatives_class1.csv"
+UPDATED_BIND   = "../../data/binding_affinity_data/binding_dataset_with_synthetic_negatives_class1.parquet"
 SAMPLING_DICT  = "../../data/binding_affinity_data/sampling_dict_class1.json"
 
 TARGET_RATIO   = 5          # want negatives ≥ TARGET_RATIO × positives
@@ -166,19 +175,7 @@ df_extra = pd.concat(extra_rows, ignore_index=True)
 # 5) Concatenate and save the updated binding dataset
 # ----------------------------------------------------------------------
 df_updated = pd.concat([df_bind, df_extra], ignore_index=True)
-df_updated.to_csv(UPDATED_BIND, index=False)
+df_updated.to_parquet(UPDATED_BIND, index=False)
 print(f"Updated binding file written to {UPDATED_BIND}")
 
-# TODO create a phylogeny of all alleles in df1 and df2
-# TODO generate negatives for alleles without negative sample pairs by taking samples from furthest trees
-
-# We have a dataset of all positive samples.
-# we want to generate negative samples for the alleles that have lower than 5 times the positive values.
-#
-# data frames are csv files with allele and sequence columns.
-#
-# write the complete python code
-
-# TODO create a phylogeny of all alleles in df1 and df2 based on their sequences
-# TODO generate negatives for alleles without negative sample pairs by taking samples from furthest trees
 
