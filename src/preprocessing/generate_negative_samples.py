@@ -30,14 +30,17 @@ from src.utils import cluster_aa_sequences   # import the earlier function
 # ----------------------------------------------------------------------
 # PARAMETERS
 # ----------------------------------------------------------------------
-ANALYSIS_CSV   = "../../data/binding_affinity_data/allele_stats_class1_with_seq.csv"
-BINDING_CSV    = "../../data/binding_affinity_data/concatenated_class1.parquet"
-UPDATED_BIND   = "../../data/binding_affinity_data/binding_dataset_with_synthetic_negatives_class1.parquet"
-SAMPLING_DICT  = "../../data/binding_affinity_data/sampling_dict_class1.json"
+MHC_CLASS     = 1          # 1 or 2
+ANALYSIS_CSV   = f"../../data/binding_affinity_data/allele_stats_class{MHC_CLASS}_with_seq.csv"
+BINDING_CSV    = f"../../data/binding_affinity_data/concatenated_class{MHC_CLASS}.parquet"
+UPDATED_BIND   = f"../../data/binding_affinity_data/binding_dataset_with_synthetic_negatives_class{MHC_CLASS}.parquet"
+SAMPLING_DICT  = f"../../data/binding_affinity_data/sampling_dict_class{MHC_CLASS}.json"
+SYNTH_NEGS      = f"../../data/binding_affinity_data/mhc{MHC_CLASS}/synthetic_negatives_class{MHC_CLASS}.csv"  # file to save synthetic negatives
 
+# These parameters has influence on output of leave one cluster out cross-validation from utils.py
 TARGET_RATIO   = 5          # want negatives ≥ TARGET_RATIO × positives
-LINKAGE_K      = 8          # number of clusters for the sequence tree
-MAX_CLUSTERS_TO_SEARCH = None   # None = search *all* clusters
+LINKAGE_K      = 10          # number of clusters for the sequence tree
+MAX_CLUSTERS_TO_SEARCH = 5   # None = search *all* clusters, eg. 5 will limit to 5 furthest clusters
 
 
 # ----------------------------------------------------------------------
@@ -170,6 +173,8 @@ if not extra_rows:
     exit(0)
 
 df_extra = pd.concat(extra_rows, ignore_index=True)
+# save extra rows to a DataFrame seperately for testing with binding prediction tools
+df_extra.to_csv(SYNTH_NEGS, index=False)
 
 # ----------------------------------------------------------------------
 # 5) Concatenate and save the updated binding dataset
