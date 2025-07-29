@@ -3,10 +3,19 @@ from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
 from typing import Dict
-import numpy as np
 from Bio.PDB import PDBParser
 from scipy.spatial.distance import pdist, squareform
 from scipy.special import softmax
+import os, tempfile
+from io import StringIO
+from typing import Literal, Union, Tuple
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+from Bio import AlignIO
+from Bio.Align.Applications import MafftCommandline
+
 
 # Constants
 AA = "ACDEFGHIKLMNPQRSTVWY-"
@@ -879,7 +888,6 @@ def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str:
     return next((emb_key for emb_key in emb_dict if emb_key.startswith(key)), None)
 
 
-
 def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
     # Parse PDB file
     parser = PDBParser(QUIET=True)
@@ -897,12 +905,12 @@ def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbo
     coords = np.array(coords)
     # Compute distance matrix
     dist_matrix = squareform(pdist(coords, metric='euclidean'))
-    mask = np.where(dist_matrix < threshold, 0., 1)
-    mask += np.eye(mask.shape[0], dtype=np.float32) # all masks are==1
+    #mask = np.where(dist_matrix < threshold, 0., 1)
+    mask = np.eye(dist_matrix.shape[0], dtype=np.float32) # all masks are==1
     mask = np.where(mask==1, 0, 1) # all masks are==0 now
     dist_matrix = 1 / (dist_matrix + 1e-9)
     result = dist_matrix * mask
-    result = result[len(result)-len(peptide):, :len(result)-len(peptide)]
+    #result = result[len(result)-len(peptide):, :len(result)-len(peptide)]
     result = (result - np.min(result)) / (np.max(result) - np.min(result))
     return result
 
@@ -924,3 +932,138 @@ def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbo
 #         out.append(np.expand_dims(res, axis=-1))
 #     out = np.concatenate(out, axis=-1) #(P,M,2)
 #     final_dict[allele] = out
+
+
+def cluster_aa_sequences(
+    csv_path: str,
+    *,
+    id_col: str = "allele",
+    seq_col: str = "sequence",
+    linkage_method: str = "average",
+    gap_mode: Literal["count_gaps", "ignore_gaps"] = "ignore_gaps",
+    k: int | None = None,
+    distance_threshold: float | None = None,
+    plot: bool = True,
+    mafft_extra: str | None = None,
+) -> Tuple[pd.DataFrame, np.ndarray]:
+    """
+    Cluster amino-acid sequences contained in `csv_path`.
+
+    Parameters
+    ----------
+    csv_path : str
+        CSV file with at least columns `id_col` and `seq_col`.
+    id_col, seq_col : str
+        Column names for sequence IDs and sequences.
+    linkage_method : str
+        Method for scipy.cluster.hierarchy.linkage.
+    gap_mode : {"count_gaps", "ignore_gaps"}
+        How gaps are treated in the pair-wise distance.
+    k : int, optional
+        If given, returns exactly k clusters (criterion="maxclust").
+    distance_threshold : float, optional
+        If given, cut the dendrogram at this height (criterion="distance").
+    plot : bool
+        If True, show a dendrogram.
+    mafft_extra : str, optional
+        Extra options appended to the MAFFT command line.
+
+    Returns
+    -------
+    df_out : pandas.DataFrame
+        Original columns plus a new column "Cluster".
+    Z : numpy.ndarray
+        The linkage matrix from `scipy.cluster.hierarchy.linkage`.
+    """
+    df = pd.read_csv(csv_path)
+    if id_col not in df.columns or seq_col not in df.columns:
+        raise ValueError(f"CSV must contain columns '{id_col}' and '{seq_col}'")
+
+    ids  = df[id_col].astype(str).tolist()
+    seqs = df[seq_col].astype(str).tolist()
+
+    # 2. Write sequences to a temporary FASTA file
+    with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".fasta") as tmp_fa:
+        for ident, seq in zip(ids, seqs):
+            tmp_fa.write(f">{ident}\n{seq}\n")
+        fasta_path = tmp_fa.name
+
+    # 3. Run MAFFT
+    extra = mafft_extra if mafft_extra else ""
+    mafft_cline = MafftCommandline(input=fasta_path, auto=True)
+    if extra:
+        mafft_cline.cline += f" {extra}"
+    print("Running MAFFT …")
+    mafft_stdout, _ = mafft_cline()
+    os.unlink(fasta_path)                      # clean up temp file
+    aln = AlignIO.read(StringIO(mafft_stdout), "fasta")
+    aligned_ids  = [rec.id  for rec in aln]
+    aligned_seqs = [str(rec.seq) for rec in aln]
+    print(f"Alignment length = {aln.get_alignment_length()} aa")
+
+    # 4. Pair-wise distances on aligned sequences
+    def dist_count_gaps(a, b):
+        return sum(c1 != c2 for c1, c2 in zip(a, b)) / len(a)
+
+    def dist_ignore_gaps(a, b):
+        same = diff = 0
+        for c1, c2 in zip(a, b):
+            if c1 == "-" or c2 == "-":
+                continue
+            same += 1
+            if c1 != c2:
+                diff += 1
+        return 0.0 if same == 0 else diff / same
+
+    seq_dist = dist_count_gaps if gap_mode == "count_gaps" else dist_ignore_gaps
+
+    X = np.array(aligned_seqs, dtype=object)[:, None]            # shape (N,1)
+    dist_vector = pdist(X, lambda u, v: seq_dist(u[0], v[0]))
+
+    # 5. Hierarchical clustering
+    Z = linkage(dist_vector, method=linkage_method)
+
+    # 6. Retrieve flat clusters
+    if k is None and distance_threshold is None:
+        raise ValueError("Specify either `k` or `distance_threshold`")
+
+    if k is not None:
+        clusters = fcluster(Z, t=k, criterion="maxclust")
+    else:
+        clusters = fcluster(Z, t=distance_threshold, criterion="distance")
+
+    # 7. Optional dendrogram
+    if plot:
+        plt.figure(figsize=(25, 5))
+        dendrogram(
+            Z,
+            labels=aligned_ids,
+            leaf_rotation=90,
+            leaf_font_size=9,
+            color_threshold=distance_threshold if distance_threshold else None,
+        )
+        plt.title("Hierarchical clustering (MAFFT aligned)")
+        plt.ylabel("Distance")
+        plt.tight_layout()
+        plt.show()
+
+
+    df_out = df.copy()
+    df_out["cluster"] = clusters
+    return df_out, Z
+
+
+# # ------------------------------------------------------------------
+# # Example usage
+# # ------------------------------------------------------------------
+# if __name__ == "__main__":
+#     # Cluster into *exactly* 4 clusters and show a dendrogram
+#     df_clusters, Z = cluster_aa_sequences(
+#         "allele_stats_class2_with_seq.csv",
+#         k=8,
+#         linkage_method="average",
+#         gap_mode="ignore_gaps",
+#         plot=True,
+#     )
+#
+#     print(df_clusters[["allele", "cluster"]].head())
