@@ -604,21 +604,19 @@ class CustomDense(keras.layers.Layer):
             output *= mask
         return output
 
-
 # TODO
 class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     Custom self-attention layer that supports 2D masks.
     """
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
-                 resnet=True, return_att_weights=False, name='SelfAttentionWith2DMask',
+                 return_att_weights=False, name='SelfAttentionWith2DMask',
                  epsilon=1e-6, mask_token=-1., pad_token=-2.):
         super().__init__(name=name)
         self.query_dim = query_dim
         self.context_dim = context_dim
         self.output_dim = output_dim
         self.heads = heads
-        self.resnet = resnet
         self.return_att_weights = return_att_weights
         self.epsilon = epsilon
         self.mask_token = mask_token
@@ -627,16 +625,18 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
 
     def build(self, x):
         # Projection weights
+        self.norm1 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln1_{self.name}')
         self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
                                       initializer='random_normal', trainable=True, name=f'q_proj_{self.name}')
         self.k_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
                                       initializer='random_normal', trainable=True, name=f'k_proj_{self.name}')
         self.v_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
                                       initializer='random_normal', trainable=True, name=f'v_proj_{self.name}')
-        self.norm = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_{self.name}')
+        self.g_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
+                                      initializer='random_uniform', trainable=True, name=f'g_proj_{self.name}')
+        self.norm2 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln2_{self.name}')
 
-        if self.resnet:
-            self.norm_resnet = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_resnet_{self.name}')
+
         self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
                                      initializer='random_normal', trainable=True, name=f'outw_{self.name}')
         self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
@@ -646,13 +646,40 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
     def call(self, x_pmhc, p_mask, m_mask):
         """
         Args:
-            x: Tensor of shape (B, N, query_dim) for query.
+            x: Tensor of shape (B, N+M, query_dim) for query.
             mask: Tensor of shape (B, N, M) for 2D mask.
         :param x:
         :param mask:
         :return:
         """
-        return
+        x_pmhc = self.norm1(x_pmhc)  # Normalize input
+        p_mask = tf.cast(p_mask, tf.float32)
+        m_mask = tf.cast(m_mask, tf.float32)
+        p_mask = tf.where(p_mask==self.pad_token, x=0., y=1.)  # (B, N)
+        m_mask = tf.where(m_mask==self.pad_token, x=0., y=1.)  # (B, M)
+
+        q = tf.einsum('bxd,hde->bhxe', x_pmhc , self.q_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        g = tf.einsum('bxd,hde->bhxe', x_pmhc, self.g_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+
+        att = tf.matmul(q, k, transpose_b=True) * self.scale  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
+        # Create 2D mask
+        mask_2d = self.mask_2d(p_mask, m_mask)
+        mask_2d = tf.cast(mask_2d, tf.float32)  # (B, N+M, N+M)
+        mask_2d_neg = (1.0 - mask_2d) * -1e9  # Apply mask to attention scores
+        att = tf.nn.softmax(att + tf.expand_dims(mask_2d_neg, axis=1), axis=-1)  # Apply softmax to attention scores
+        att *= tf.expand_dims(mask_2d, axis=1) # remove the impact of row wise attention of padded tokens. since all are 1e-9
+        out = tf.matmul(att, v)  # (B, H, N+M, N+M) * (B, H, N+M, D) -> (B, H, N+M, D)
+        out *= tf.nn.sigmoid(g)  # Apply gating mechanism
+        out = tf.transpose(out, [0, 2, 1, 3])
+        out = tf.reshape(out, [tf.shape(x_pmhc)[0], tf.shape(x_pmhc)[1], self.heads * self.att_dim])
+        out = tf.matmul(out, self.out_w) + self.out_b
+        out = self.norm2(out)
+        if self.return_att_weights:
+            return out, att
+        else:
+            return out
 
     def mask_2d(self, p_mask, m_mask):
         p_mask = tf.cast(p_mask, tf.float32)
@@ -695,6 +722,13 @@ class MaskedCategoricalCrossentropyLoss(layers.Layer):
         self.add_loss(total_loss)
         return y_pred
 
+
+class AddGaussianNoise(layers.Layer):
+    def __init__(self, std=0.1, **kw): super().__init__(**kw); self.std = std
+
+    def call(self, x, training=None):
+        if training: return x + tf.random.normal(tf.shape(x), stddev=self.std)
+        return x
 
 
 def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10):
