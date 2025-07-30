@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from keras.layers import Conv1D
 from src.utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
-                       ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict)
-
+                       ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict,
+                       SelfAttentionWith2DMask, AddGaussianNoise)
 
 
 MASK_TOKEN = -1.0
@@ -52,7 +52,7 @@ def bicross_recon(max_pep_len: int,
     # Embedding layer ------------------------------------------------
     # zero out the mask positions in the embeddings
     pep_OHE = MaskedEmbedding(mask_token=mask_token, pad_token=pad_token, name="pep_masked_OHE")(pep_OHE_inp, mask_pep_inp)
-    mhc_EMB = MaskedEmbedding(mask_token=mask_token, pad_token=pad_token, name="mhc_masked_embedding")(mhc_EMB_inp, mask_mhc_inp)
+    mhc_EMB = MaskedEmbedding(mask_token=mask_token, pad_token=pad_token, name="mhc_masked_embedding1")(mhc_EMB_inp, mask_mhc_inp)
 
     # add positional encoding and project pep_OHE to embedding dimension also zero out the mask positions in the embeddings
     pep_OHE_m = PositionalEncoding(embed_dim=21 ,pos_range=int(max_pep_len * 3) , name="pep_pos_OHE")(pep_OHE, mask_pep_inp)
@@ -146,6 +146,99 @@ def bicross_recon(max_pep_len: int,
     )
 
     return encoder, encoder_decoder
+
+
+#################################### Minimal BiCross Model ###################################
+def bicross_recon_mini(max_pep_len: int,
+                       max_mhc_len: int,
+                       emb_dim: int = 96,
+                       heads: int = 4,
+                       mask_token: float = MASK_TOKEN,
+                       pad_token: float = PAD_TOKEN):
+
+    # -------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------
+    pep_OHE_in = keras.Input((max_pep_len, 21), name="pep_onehot")
+    pep_mask_in = keras.Input((max_pep_len,), name="pep_mask")
+
+    mhc_emb_in = keras.Input((max_mhc_len, 1152), name="mhc_latent")
+    mhc_mask_in = keras.Input((max_mhc_len,), name="mhc_mask")
+
+    # -------------------------------------------------------------------
+    # MASKED  EMBEDDING  +  PE
+    # -------------------------------------------------------------------
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
+    pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
+    pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
+
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
+    mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
+    mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
+
+    # -------------------------------------------------------------------
+    # Add Gaussian Noise
+    # -------------------------------------------------------------------
+    pep = AddGaussianNoise(0.1, name="pep_gaussian_noise")(pep)
+    mhc = AddGaussianNoise(0.1, name="mhc_gaussian_noise")(mhc)
+
+    # -------------------------------------------------------------------
+    # DUAL CROSS-ATTENTION
+    # -------------------------------------------------------------------
+    pmhc = layers.Concatenate(name="pmhc_concat", axis=-2)([pep, mhc])
+    latent_pmhc, att_pmhc = SelfAttentionWith2DMask(query_dim=emb_dim,
+                                          context_dim=emb_dim,
+                                          output_dim=emb_dim, heads=heads,
+                                          return_att_weights=True,
+                                          name='SelfAttentionWith2DMask',
+                                          epsilon=1e-6,
+                                          mask_token=mask_token,
+                                          pad_token=-pad_token)(
+        pmhc, pep_mask_in, mhc_mask_in
+    )
+    # -------------------------------------------------------------------
+    # RECONSTRUCTION  HEADS
+    # -------------------------------------------------------------------
+    # Encoder down convolution
+    latent_pmhc1 = layers.Dense(32, activation='relu', name='latent_pmhc')(latent_pmhc)
+
+    # variational bottleneck using TensorFlow layers
+    mu = layers.Dense(8, name='mu')(latent_pmhc1)
+    sigma = layers.Dense(8, activation='softplus', name='sigma')(latent_pmhc1)
+    epsilon = layers.Lambda(lambda x: tf.random.normal(tf.shape(x)), name='epsilon')(mu)
+    z = layers.Multiply(name="sigma_epsilon_multiply")([sigma, epsilon])
+
+    # up convolution
+    latent_pmhc2 = layers.Dense(32, activation='relu', name='latent_pmhc2')(z)
+    decoder_out = layers.Dense(emb_dim, activation='relu', name='decoder_out')(latent_pmhc2)
+
+    pmhc_recon = layers.Dense(emb_dim, activation='relu', name='pmhc_recon')(decoder_out)
+    # Split the pmhc_recon into peptide and MHC reconstructions
+    tf.print(max_mhc_len, mhc_mask_in)
+    pep_split, mhc_split = SplitLayer([max_pep_len, max_mhc_len], name="pmhc_split")(pmhc_recon)
+    pep_softmax = layers.Dense(21, activation='softmax', name="pep_reconstruction")(pep_split)
+    mhc_softmax = layers.Dense(21, activation='softmax', name="mhc_reconstruction")(mhc_split)
+
+    # -------------------------------------------------------------------
+    # MODELS
+    # -------------------------------------------------------------------
+    # The encoder for clustering uses the MHC-queried latent space
+    encoder = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in],
+                          {"latent_mhc_q": latent_pmhc2, "attention_pmhc": att_pmhc},
+                          name="encoder1")
+
+    enc_dec = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in],
+                          {"pep_reconstruction": pep_softmax,
+                           "mhc_reconstruction": mhc_softmax},
+                          name="encoder_decoder")
+
+    enc_dec.compile(
+        optimizer=keras.optimizers.Adam(1e-3),
+        loss={"pep_reconstruction": "categorical_crossentropy",
+              "mhc_reconstruction": "categorical_crossentropy"}
+    )
+    return encoder, enc_dec
+##############################################################################################
 
 
 ########################################## MoE ###############################################
