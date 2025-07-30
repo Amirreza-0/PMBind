@@ -1,8 +1,10 @@
 import tensorflow as tf
+from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit
+from sklearn.utils import resample
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
-from typing import Dict
+from typing import Dict, List, Hashable
 from Bio.PDB import PDBParser
 from scipy.spatial.distance import pdist, squareform
 from scipy.special import softmax
@@ -877,7 +879,7 @@ class MaskPaddingLayer(layers.Layer):
         config.update({"pad_token": self.pad_token})
         return config
 
-def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str:
+def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str: # why ndarray?
     """
     Get the embedding key for a given allele key.
     If the key is not found in the embedding dictionary, return None.
@@ -885,7 +887,7 @@ def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str:
     Sometimes the emb key is longer than the allele key, so we need to check if the key is a substring of the emb key.
     """
     # Use a generator expression for efficient lookup
-    return next((emb_key for emb_key in emb_dict if emb_key.startswith(key)), None)
+    return next((emb_key for emb_key in emb_dict if emb_key.upper().startswith(key.upper())), None)
 
 
 def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
@@ -1053,9 +1055,7 @@ def cluster_aa_sequences(
     return df_out, Z
 
 
-# # ------------------------------------------------------------------
 # # Example usage
-# # ------------------------------------------------------------------
 # if __name__ == "__main__":
 #     # Cluster into *exactly* 4 clusters and show a dendrogram
 #     df_clusters, Z = cluster_aa_sequences(
@@ -1067,3 +1067,190 @@ def cluster_aa_sequences(
 #     )
 #
 #     print(df_clusters[["allele", "cluster"]].head())
+
+
+def create_k_fold_leave_one_cluster_out_stratified_cv(
+    df: pd.DataFrame,
+    k: int = 5,
+    target_col: str = "label",
+    cluster_col: str = "cluster",
+    id_col: str = "allele",
+    subset_prop: float = 1.0,
+    train_size: float = 0.8,
+    random_state: int = 42,
+    augmentation: str = "down_sampling",  # {"down_sampling", "GNUSS", None}
+    keep_val_only_cluster: bool = True,   # set False if you do NOT want to have a cluster that is only in validation
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, Hashable]]:
+    """
+    Build *k* folds where ***one whole sequence cluster is left out*** of
+    both train and validation.
+
+    Workflow for every fold
+    -----------------------
+    1. Choose one cluster -> `left_out_cluster` (never in train or val).
+    2. If `keep_val_only_cluster` is True:
+       pick one additional cluster -> `val_only_cluster`
+       (present only in validation).
+    3. Split remaining rows into train / extra-validation stratified on
+       `target_col` with proportion `train_size`.
+    4. Apply class-balancing augmentation (down-sampling or GNUSS).
+
+    Returns
+    -------
+    list[(train_df, val_df, left_out_cluster)]
+    """
+
+    rng = np.random.RandomState(random_state)
+
+    # ------------------------------------------------------------
+    # (optional) take a subset of the whole frame
+    # ------------------------------------------------------------
+    if subset_prop < 1.0:
+        if not (0.0 < subset_prop <= 1.0):
+            raise ValueError("subset_prop must be in (0,1]")
+        df = df.sample(frac=subset_prop, random_state=random_state).reset_index(drop=True)
+        print(f"Using a {subset_prop:.2%} random subset of the data.")
+
+    # ------------------------------------------------------------
+    # 0) basic sanity checks
+    # ------------------------------------------------------------
+    if cluster_col not in df.columns:
+        raise ValueError(f"{cluster_col=} not found in DataFrame")
+    if target_col not in df.columns:
+        raise ValueError(f"{target_col=} not found in DataFrame")
+
+    unique_clusters = df[cluster_col].unique()
+    if k > len(unique_clusters):
+        raise ValueError(f"k={k} > #unique clusters ({len(unique_clusters)})")
+
+    left_out_clusters = rng.choice(unique_clusters, size=k, replace=False)
+    left_out_ids = df[df[cluster_col].isin(left_out_clusters)][id_col].unique()
+
+    # save the left out ids to a txt file
+    with open("left_out_ids.txt", "w") as f:
+        for left_out_id in left_out_ids:
+            f.write(f"{left_out_id}\n")
+
+    # ------------------------------------------------------------
+    # augmentation helpers
+    # ------------------------------------------------------------
+    def _balance_down_sampling(frame: pd.DataFrame, seed: int):
+        min_count = frame[target_col].value_counts().min()
+        parts = [
+            resample(
+                frame[frame[target_col] == lbl],
+                replace=False,
+                n_samples=min_count,
+                random_state=seed,
+            )
+            for lbl in frame[target_col].unique()
+        ]
+        return pd.concat(parts, ignore_index=True)
+
+    def _balance_GNUSS(frame: pd.DataFrame, seed: int):
+        counts = frame[target_col].value_counts()
+        max_count = counts.max()
+
+        numeric_cols = frame.select_dtypes(include="number").columns
+        parts = [frame]  # originals
+
+        for label, cnt in counts.items():
+            if cnt == max_count:
+                continue
+            need = max_count - cnt
+            sampled = frame[frame[target_col] == label].sample(
+                n=need, replace=True, random_state=seed
+            )
+            # very small noise
+            noise = rng.normal(loc=0.0, scale=1e-6, size=(need, len(numeric_cols)))
+            sampled.loc[:, numeric_cols] += noise
+            parts.append(sampled)
+
+        return pd.concat(parts, ignore_index=True)
+
+    # ------------------------------------------------------------
+    # build each fold
+    # ------------------------------------------------------------
+    folds: List[Tuple[pd.DataFrame, pd.DataFrame, Hashable]] = []
+
+    for fold_idx, left_out_cluster in enumerate(left_out_clusters, 1):
+        fold_seed = random_state + fold_idx
+
+        # remove the left-out cluster
+        mask_left_out = df[cluster_col] == left_out_cluster
+        working_df = df.loc[~mask_left_out].copy()
+
+        # pick ONE cluster that will be *only* in validation
+        if keep_val_only_cluster:
+            gss = GroupShuffleSplit(n_splits=1, test_size=1, random_state=fold_seed)
+            (__, val_only_idx), = gss.split(
+                X=np.zeros(len(working_df)),
+                groups=working_df[cluster_col],
+            )
+            val_only_cluster = working_df.iloc[val_only_idx][cluster_col].unique()[0]
+
+            mask_val_only = working_df[cluster_col] == val_only_cluster
+            df_val_only = working_df[mask_val_only]
+            df_eligible = working_df[~mask_val_only]
+        else:
+            val_only_cluster = None
+            df_val_only = pd.DataFrame(columns=df.columns)
+            df_eligible = working_df
+
+        # stratified split of the remaining rows
+        sss = StratifiedShuffleSplit(
+            n_splits=1, train_size=train_size, random_state=fold_seed
+        )
+        train_idx, extra_val_idx = next(
+            sss.split(df_eligible, df_eligible[target_col])
+        )
+        df_train = df_eligible.iloc[train_idx]
+        df_val   = pd.concat(
+            [df_val_only, df_eligible.iloc[extra_val_idx]],
+            ignore_index=True,
+        )
+
+        # ---------------------------------------------------- #
+        #  balance
+        # ---------------------------------------------------- #
+        if augmentation == "GNUSS":
+            df_train_bal = _balance_GNUSS(df_train, fold_seed)
+            df_val_bal   = _balance_GNUSS(df_val, fold_seed)
+        elif augmentation == "down_sampling":
+            df_train_bal = _balance_down_sampling(df_train, fold_seed)
+            df_val_bal   = _balance_down_sampling(df_val, fold_seed)
+        elif augmentation is None or augmentation.lower() == "none":
+            df_train_bal = df_train.copy()
+            df_val_bal   = df_val.copy()
+        else:
+            raise ValueError(f"Unknown augmentation: {augmentation}")
+
+        df_train_bal = (
+            df_train_bal.sample(frac=1.0, random_state=fold_seed).reset_index(drop=True)
+        )
+        df_val_bal = (
+            df_val_bal.sample(frac=1.0, random_state=fold_seed).reset_index(drop=True)
+        )
+
+        folds.append((df_train_bal, df_val_bal, left_out_cluster))
+
+        print(
+            f"[fold {fold_idx}/{k}] left-out cluster={left_out_cluster} | "
+            f"val-only cluster={val_only_cluster} | "
+            f"train={len(df_train_bal)}, val={len(df_val_bal)}"
+        )
+
+    return folds
+
+# Usage example
+#
+# df_analysis = pd.read_csv("analysis_dataset_with_clusters.csv")
+#
+# folds = create_k_fold_leave_one_cluster_out_stratified_cv(
+#     df_analysis,
+#     k=5,
+#     target_col="assigned_label",
+#     cluster_col="cluster",
+#     id_col="allele",
+#     augmentation="down_sampling",
+# )
