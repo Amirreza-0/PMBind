@@ -1,4 +1,6 @@
 import tensorflow as tf
+from keras.src.api_export import keras_export
+from keras.src.losses import LossFunctionWrapper
 from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit
 from sklearn.utils import resample
 from tensorflow import keras
@@ -135,7 +137,7 @@ class AttentionLayer(keras.layers.Layer):
         self.pad_token = pad_token
         self.att_dim = output_dim // heads  # Attention dimension per head
 
-    def build(self, x):
+    def build(self, input_shape):
         # Projection weights
         self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
                                       initializer='random_normal', trainable=True, name=f'q_proj_{self.name}')
@@ -214,6 +216,126 @@ class AttentionLayer(keras.layers.Layer):
         return (out, att) if self.return_att_weights else out
 
 
+class SubtractAttentionLayer(keras.layers.Layer):
+    """
+    Multi-head self-attention for the subtraction tensor  (B, M, P·D).
+
+    Inputs
+    ──────
+        x_sub          : (B, M, P*D)
+        combined_mask  : (B, M, P*D)   (True = valid, False = padding)
+
+    All other arguments / behaviour are identical to the original
+    `AttentionLayer` (projection sizes, heads, residual, gating, …).
+    """
+    def __init__(self,
+                 feature_dim,          # == P*D   (input & output dim)
+                 heads=4,
+                 resnet=True,
+                 return_att_weights=False,
+                 name="sub_attention",
+                 epsilon=1e-6,
+                 gate=True):
+        super().__init__(name=name)
+
+        assert feature_dim % heads == 0, "feature_dim must be divisible by heads"
+        self.feature_dim = feature_dim
+        self.output_dim  = feature_dim
+        self.heads       = heads
+        self.resnet      = resnet
+        self.return_att  = return_att_weights
+        self.epsilon     = epsilon
+        self.gate        = gate
+        self.att_dim     = feature_dim // heads          # per-head dim
+        self.scale       = 1.0 / tf.math.sqrt(tf.cast(self.att_dim,
+                                                      tf.float32))
+
+    # ------------------------------------------------------------------
+    # build
+    # ------------------------------------------------------------------
+    def build(self, _):
+        hd, fd = self.heads, self.feature_dim
+
+        self.q_proj = self.add_weight(name="q_proj", shape=(hd, fd, self.att_dim), initializer="random_normal")
+        self.k_proj = self.add_weight(name="k_proj", shape=(hd, fd, self.att_dim), initializer="random_normal")
+        self.v_proj = self.add_weight(name="v_proj", shape=(hd, fd, self.att_dim), initializer="random_normal")
+
+        if self.gate:
+            self.g = self.add_weight(name="gate", shape=(hd, fd, self.att_dim), initializer="random_uniform")
+
+        self.ln_in   = layers.LayerNormalization(epsilon=self.epsilon,
+                                                 name="ln_in")
+        self.ln_out  = layers.LayerNormalization(epsilon=self.epsilon,
+                                                 name="ln_out")
+        if self.resnet:
+            self.ln_res = layers.LayerNormalization(epsilon=self.epsilon,
+                                                    name="ln_res")
+
+        self.out_w = self.add_weight(name="out_w", shape=(hd * self.att_dim, fd), initializer="random_normal")
+        self.out_b = self.add_weight(name="out_b", shape=(fd,), initializer="zeros")
+
+    # ------------------------------------------------------------------
+    # forward
+    # ------------------------------------------------------------------
+    def call(self, x_sub, combined_mask):
+        """
+        x_sub         : (B, M, P*D)
+        combined_mask : (B, M, P*D)  (bool)
+        """
+        B = tf.shape(x_sub)[0]
+        M = tf.shape(x_sub)[1]
+
+        # ── token-level mask (B,M) – “is *any* feature in this row valid?” ──
+        token_mask = tf.reduce_any(combined_mask, axis=-1)            # bool
+        token_mask_f = tf.cast(token_mask, tf.float32)                # 1/0
+
+        # ── layer-norm on valid data only (invalid features are already 0) ──
+        x_norm = self.ln_in(x_sub)
+
+        # ── project Q K V ──────────────────────────────────────────────
+        #    x_norm : (B, M, F) ;  proj  : (H, F, d)  →  (B, H, M, d)
+        q = tf.einsum('bmd,hdf->bhmf', x_norm, self.q_proj)
+        k = tf.einsum('bmd,hdf->bhmf', x_norm, self.k_proj)
+        v = tf.einsum('bmd,hdf->bhmf', x_norm, self.v_proj)
+
+        # ── scaled dot-product attention ───────────────────────────────
+        att = tf.einsum('bhmf,bhnf->bhmn', q, k) * self.scale  # (B,H,M,M)
+
+        # build broadcast mask  (B,H,M,M)
+        mask_q = tf.expand_dims(token_mask_f, axis=1)          # (B,1,M)
+        mask_k = tf.expand_dims(token_mask_f, axis=1)          # (B,1,M)
+        att_mask = tf.einsum('bqm,bkn->bqmn', mask_q, mask_k)  # (B,1,M,M)
+        att_mask = tf.broadcast_to(att_mask, tf.shape(att))
+
+        att += (1.0 - att_mask) * -1e9
+        att  = tf.nn.softmax(att, axis=-1) * att_mask          # masked softmax
+
+        # ── attention output ───────────────────────────────────────────
+        out = tf.einsum('bhmn,bhnf->bhmf', att, v)             # (B,H,M,d)
+
+        # optional gating
+        if self.gate:
+            g = tf.einsum('bmd,hdf->bhmf', x_norm, self.g)
+            out *= tf.nn.sigmoid(g)
+
+        # ── merge heads ────────────────────────────────────────────────
+        out = tf.transpose(out, [0, 2, 1, 3])                  # (B,M,H,d)
+        out = tf.reshape(out, [B, M, self.heads * self.att_dim])  # (B,M,F)
+        out = tf.matmul(out, self.out_w) + self.out_b
+
+        # residual + norms
+        if self.resnet:
+            out = self.ln_res(out + x_sub)
+        out = self.ln_out(out)
+
+        # finally zero-out padded tokens again (safety)
+        out *= token_mask_f[..., tf.newaxis]
+
+        if self.return_att:
+            return out, att
+        return out
+
+
 class MaskedEmbedding(keras.layers.Layer):
     def __init__(self, mask_token=-1., pad_token=-2., name='masked_embedding'):
         super().__init__(name=name)
@@ -232,6 +354,64 @@ class MaskedEmbedding(keras.layers.Layer):
         mask = tf.where((mask == self.pad_token) | (mask == self.mask_token), 0., 1.)
         return x * mask[:, :, tf.newaxis]  # Apply mask to zero out positions
 
+class RotaryPositionalEncoding(keras.layers.Layer):
+    """
+    Rotary Positional Encoding layer for transformer models.
+    Applies rotary embeddings to the last two dimensions of the input.
+    Args:
+    embed\_dim (int): Embedding dimension (must be even).
+    max\_len (int): Maximum sequence length.
+    """
+
+    def __init__(self, embed_dim, max_len: int = 100, mask_token: float = -1., pad_token: float = -2., name: str = 'rotary_positional_encoding'):
+        super().__init__(name=name)
+        assert embed_dim % 2 == 0, "embed_dim must be even for rotary encoding"
+        self.embed_dim = embed_dim
+        self.max_len = max_len
+        self.mask_token = mask_token
+        self.pad_token = pad_token
+
+    def build(self, x):
+        # Precompute rotary frequencies
+        pos = tf.range(self.max_len, dtype=tf.float32)[:, tf.newaxis]  # (max_len, 1)
+        dim = tf.range(self.embed_dim // 2, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim//2)
+        inv_freq = 1.0 / (10000 ** (dim / (self.embed_dim // 2)))
+        freqs = pos * inv_freq  # (max_len, embed_dim//2)
+        self.cos_cached = tf.cast(tf.cos(freqs), tf.float32)  # (max_len, embed_dim//2)
+        self.sin_cached = tf.cast(tf.sin(freqs), tf.float32)  # (max_len, embed_dim//2)
+
+    def call(self, x, mask):
+        """
+        Args:
+            x: Input tensor of shape (B, N, D)
+            mask: Tensor of shape (B, N)
+        Returns:
+            Tensor with rotary positional encoding applied.
+        """
+        seq_len = tf.shape(x)[1]
+        cos = self.cos_cached[:seq_len, :]  # (N, D//2)
+        sin = self.sin_cached[:seq_len, :]  # (N, D//2)
+        cos = tf.expand_dims(cos, 0)  # (1, N, D//2)
+        sin = tf.expand_dims(sin, 0)  # (1, N, D//2)
+
+        x1, x2 = tf.split(x, 2, axis=-1)  # (B, N, D//2), (B, N, D//2)
+        x_rot = tf.concat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)  # (B, N, D)
+
+        mask = tf.cast(mask[:, :, tf.newaxis], tf.float32)  # (B, N, 1)
+        mask = tf.where(mask == self.pad_token, 0., 1.)
+        x_rot = x_rot * mask  # zero out positions where mask is 0
+
+        return x_rot
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'embed_dim': self.embed_dim,
+            'max_len': self.max_len,
+            'mask_token': self.mask_token,
+            'pad_token': self.pad_token,
+        })
+        return config
 
 
 class PositionalEncoding(keras.layers.Layer):
@@ -553,7 +733,7 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
 #     result = determine_ks_dict(initial_input, output_dims)
 #     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
 
-def masked_categorical_crossentropy(y_true, y_pred, mask):
+def masked_categorical_crossentropy(y_true_y_pred, mask, pad_token=-2.0):
     """
     Compute masked categorical cross-entropy loss.
 
@@ -565,13 +745,62 @@ def masked_categorical_crossentropy(y_true, y_pred, mask):
     Returns:
         Mean masked loss (tensor).
     """
-    MASK_TOKEN = -1.0  # Replace with your actual mask token value
-    loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
-    mask_binary = tf.cast(mask == MASK_TOKEN, tf.float32)
-    masked_loss = loss * mask_binary
-    sum_masked_loss = tf.reduce_sum(masked_loss)
-    num_masked = tf.reduce_sum(mask_binary)
-    return tf.math.divide_no_nan(sum_masked_loss, num_masked)
+    y_true, y_pred = tf.split(y_true_y_pred, num_or_size_splits=2, axis=-1)
+    # loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
+    loss = -tf.reduce_sum(y_true * tf.math.log(tf.clip_by_value(y_pred, 1e-7, 1.0)), axis=-1) #(B,N)
+    mask = tf.cast(mask, tf.float32)  # Ensure mask is float
+    mask = tf.where(mask == pad_token, 0.0, 1.0)  # Convert pad token to 0.0 and others to 1.0
+    if tf.rank(mask) > tf.rank(loss):
+        mask = tf.squeeze(mask, axis=-1)
+    loss = loss * mask
+    loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
+    return loss
+
+
+def split_y_true_y_pred(y_true_y_pred):
+    """
+    Split concatenated y_true and y_pred tensor into separate tensors.
+
+    Args:
+        y_true_y_pred: Tensor of shape (B, N, 2 * C) where C is the number of classes.
+
+    Returns:
+        Tuple of (y_true, y_pred) tensors.
+    """
+    y_true, y_pred = tf.split(y_true_y_pred, num_or_size_splits=2, axis=-1)
+    return y_true, y_pred
+
+
+class MaskedCategoricalCrossentropy(tf.keras.losses.Loss):
+    """
+    Cross‑entropy that **ignores padded tokens via `sample_weight`.**
+
+    Expected shapes
+    ----------------
+    y_pred : (B, N, 21)  – logits / probabilities for 21 classes
+    y_true : (B, N, 21)  – one‑hot labels
+    sample_weight : (B, N) – 1 for real token, 0 for pad (passed by Keras)
+    """
+
+    def __init__(self, *, pad_token=-2., masktoken=-.1, from_logits: bool = True, name: str = "masked_categorical_crossentropy"):
+        # We let Keras do the masking & **reduction**; so we pick SUM_OVER_BATCH_SIZE.
+        super().__init__(name=name, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
+        self._from_logits = from_logits
+        self.pad_token = pad_token
+        self.mask_token = masktoken
+
+def call(self, y_true, y_pred):
+    # Compute per-token cross-entropy
+    ce = tf.keras.losses.categorical_crossentropy(
+        y_true,
+        y_pred,
+        from_logits=self._from_logits,
+        axis=-1,
+    )
+    # Mask padded tokens (tokens with zero label vectors)
+    mask = tf.cast(tf.reduce_sum(y_true, axis=-1) > 0, ce.dtype)
+    # Apply mask and average over valid tokens
+    return tf.reduce_sum(ce * mask) / (tf.reduce_sum(mask) + 1e-8)
 
 
 class CustomDense(keras.layers.Layer):
@@ -604,7 +833,6 @@ class CustomDense(keras.layers.Layer):
             output *= mask
         return output
 
-# TODO
 class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     Custom self-attention layer that supports 2D masks.
@@ -913,7 +1141,72 @@ class MaskPaddingLayer(layers.Layer):
         config.update({"pad_token": self.pad_token})
         return config
 
-def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str: # why ndarray?
+
+class SamplingMuMean(keras.layers.Layer):
+    '''
+    Reparameterization Trick
+    '''
+    def __init__(self, latent_dim, **kwargs):
+        super(SamplingMuMean, self).__init__(**kwargs)
+        self.latent_dim = latent_dim
+
+    def call(self, inputs):
+        '''
+        Args:
+            inputs - A tuple containing (mean, variance)
+            output - A vector of shape (batch_size, latent_dim)
+        '''
+        mean, log_var = inputs
+        batch = tf.shape(mean)[0]
+        sample = tf.random.normal([batch, self.latent_dim]) * tf.exp(log_var / 2) + mean
+
+        return sample
+
+
+class SubtractLayer(keras.layers.Layer):
+    """
+    Custom layer to subtract a tensor from another tensor.
+    Tensor1: (B, P, D) -> (B, P*D) -> (B, M, P*D)
+    Tensor2: (B, M, D) -> (B, M, P*D)
+    Output: = Tensor2 - Tensor1
+    """
+    def __init__(self, mask_token=-1., pad_token=-2., **kwargs):
+        """Initialize the layer."""
+        super(SubtractLayer, self).__init__(**kwargs)
+        self.mask_token = mask_token
+        self.pad_token = pad_token
+
+    def call(self, peptide, pep_mask, mhc, mhc_mask):
+        B = tf.shape(peptide)[0]
+        P = tf.shape(peptide)[1]
+        D = tf.shape(peptide)[2]
+        M = tf.shape(mhc)[1]
+        P_D = P * D
+
+        pep_mask = tf.cast(pep_mask, tf.float32)
+        mhc_mask = tf.cast(mhc_mask, tf.float32)
+
+        pep_mask = tf.where(pep_mask == self.pad_token, x=0., y=1.)  # (B,P)
+        mhc_mask = tf.where(mhc_mask == self.pad_token, x=0., y=1.)
+
+        # peptide  (B,P,D) -> (B,P*D) -> (B,M,P*D)
+        peptide_flat = tf.reshape(peptide, (B, P_D))
+        peptide_exp = tf.repeat(peptide_flat[:, tf.newaxis, :], repeats=M, axis=1)
+        # mhc       (B,M,D) -> tile last axis P times -> (B,M,P*D)
+        mhc_exp = tf.tile(mhc, [1, 1, P])
+        result = mhc_exp - peptide_exp  # (B,M,P*D)
+        # peptide mask  (B,P) -> (B,P,D) -> flatten -> (B,P*D) -> (B,M,P*D)
+        pep_mask_PD = tf.tile(pep_mask[:, :, tf.newaxis], [1, 1, D])  # (B,P,D)
+        pep_mask_PD = tf.reshape(pep_mask_PD, (B, P_D))  # (B,P*D)
+        pep_mask_PD = tf.repeat(pep_mask_PD[:, tf.newaxis, :], repeats=M, axis=1)  # (B,M,P*D)
+        # mhc mask      (B,M) -> (B,M,1) -> repeat P*D along last axis
+        mhc_mask_PD = tf.repeat(mhc_mask[:, :, tf.newaxis], repeats=P_D, axis=2)  # (B,M,P*D)
+        combined_mask = tf.logical_and(tf.cast(pep_mask_PD, tf.bool), tf.cast(mhc_mask_PD, tf.bool))
+        masked_result = tf.where(combined_mask, result, tf.zeros_like(result))
+        return masked_result
+
+
+def get_embed_key(key: str, emb_dict: Dict[str, str]) -> str: # why ndarray?
     """
     Get the embedding key for a given allele key.
     If the key is not found in the embedding dictionary, return None.
@@ -922,6 +1215,15 @@ def get_embed_key(key: str, emb_dict: Dict[str, np.ndarray]) -> str: # why ndarr
     """
     # Use a generator expression for efficient lookup
     return next((emb_key for emb_key in emb_dict if emb_key.upper().startswith(key.upper())), None)
+
+
+def clean_key(allele_key: str) -> str:
+    """
+    Clean allele keys by removing special characters and converting to uppercase.
+    This is useful for matching keys in embedding dictionaries.
+    """
+    mapping = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})
+    return allele_key.translate(mapping).upper()
 
 
 def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
