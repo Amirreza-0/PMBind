@@ -18,7 +18,9 @@ import seaborn as sns
 from keras.layers import Conv1D
 from src.utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
                        ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict,
-                       SelfAttentionWith2DMask, AddGaussianNoise)
+                       SelfAttentionWith2DMask, AddGaussianNoise, RotaryPositionalEncoding,
+                       SubtractLayer, SubtractAttentionLayer, MaskedCategoricalCrossentropy,
+                       masked_categorical_crossentropy)
 
 
 MASK_TOKEN = -1.0
@@ -171,10 +173,12 @@ def bicross_recon_mini(max_pep_len: int,
     pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
     pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
     pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
+    pep = layers.Dropout(0.1, name="pep_Dropout1")(pep)
 
     mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
     mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
     mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
+    mhc = layers.Dropout(0.1, name="mhc_Dropout1")(mhc)
 
     # -------------------------------------------------------------------
     # Add Gaussian Noise
@@ -182,9 +186,9 @@ def bicross_recon_mini(max_pep_len: int,
     pep = AddGaussianNoise(0.1, name="pep_gaussian_noise")(pep)
     mhc = AddGaussianNoise(0.1, name="mhc_gaussian_noise")(mhc)
 
-    # -------------------------------------------------------------------
-    # DUAL CROSS-ATTENTION
-    # -------------------------------------------------------------------
+    # # -------------------------------------------------------------------
+    # # Custom Masked Self-Attention Layer
+    # # -------------------------------------------------------------------
     pmhc = layers.Concatenate(name="pmhc_concat", axis=-2)([pep, mhc])
     latent_pmhc, att_pmhc = SelfAttentionWith2DMask(query_dim=emb_dim,
                                           context_dim=emb_dim,
@@ -196,23 +200,19 @@ def bicross_recon_mini(max_pep_len: int,
                                           pad_token=-pad_token)(
         pmhc, pep_mask_in, mhc_mask_in
     )
+
+    # -------------------------------------------------------------------
+    # Custom Latent reduction Layer
+    # -------------------------------------------------------------------
+
     # -------------------------------------------------------------------
     # RECONSTRUCTION  HEADS
     # -------------------------------------------------------------------
     # Encoder down convolution
-    latent_pmhc1 = layers.Dense(32, activation='relu', name='latent_pmhc')(latent_pmhc)
+    latent_pmhc2 = layers.Dense(32, activation='relu', name='latent_pmhc2')(latent_pmhc)
+    latent_pmhc = layers.Dense(emb_dim, activation='relu', name='latent_pmhc3')(latent_pmhc2)
+    pmhc_recon = layers.Dense(emb_dim, activation='relu', name='pmhc_recon')(latent_pmhc)
 
-    # variational bottleneck using TensorFlow layers
-    mu = layers.Dense(8, name='mu')(latent_pmhc1)
-    sigma = layers.Dense(8, activation='softplus', name='sigma')(latent_pmhc1)
-    epsilon = layers.Lambda(lambda x: tf.random.normal(tf.shape(x)), name='epsilon')(mu)
-    z = layers.Multiply(name="sigma_epsilon_multiply")([sigma, epsilon])
-
-    # up convolution
-    latent_pmhc2 = layers.Dense(32, activation='relu', name='latent_pmhc2')(z)
-    decoder_out = layers.Dense(emb_dim, activation='relu', name='decoder_out')(latent_pmhc2)
-
-    pmhc_recon = layers.Dense(emb_dim, activation='relu', name='pmhc_recon')(decoder_out)
     # Split the pmhc_recon into peptide and MHC reconstructions
     tf.print(max_mhc_len, mhc_mask_in)
     pep_split, mhc_split = SplitLayer([max_pep_len, max_mhc_len], name="pmhc_split")(pmhc_recon)
@@ -224,7 +224,7 @@ def bicross_recon_mini(max_pep_len: int,
     # -------------------------------------------------------------------
     # The encoder for clustering uses the MHC-queried latent space
     encoder = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in],
-                          {"latent_mhc_q": latent_pmhc2, "attention_pmhc": att_pmhc},
+                          {"cross_latent": latent_pmhc2, "attention_pmhc": att_pmhc},
                           name="encoder1")
 
     enc_dec = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in],
@@ -233,12 +233,109 @@ def bicross_recon_mini(max_pep_len: int,
                           name="encoder_decoder")
 
     enc_dec.compile(
-        optimizer=keras.optimizers.Adam(1e-3),
+        optimizer=keras.optimizers.Adam(1e-4),
         loss={"pep_reconstruction": "categorical_crossentropy",
               "mhc_reconstruction": "categorical_crossentropy"}
     )
     return encoder, enc_dec
-##############################################################################################
+
+
+#################################################################################################
+def pmclust_subtract(max_pep_len: int,
+                       max_mhc_len: int,
+                       emb_dim: int = 96,
+                       heads: int = 4,
+                       mask_token: float = MASK_TOKEN,
+                       pad_token: float = PAD_TOKEN):
+
+    # -------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------
+    pep_OHE_in = keras.Input((max_pep_len, 21), name="pep_onehot")
+    pep_mask_in = keras.Input((max_pep_len,), name="pep_mask")
+
+    mhc_emb_in = keras.Input((max_mhc_len, 1152), name="mhc_emb")
+    mhc_mask_in = keras.Input((max_mhc_len,), name="mhc_mask")
+
+    mhc_OHE_in = keras.Input((max_mhc_len, 21), name="mhc_onehot")  # Optional input for MHC one-hot encoding
+
+    # -------------------------------------------------------------------
+    # MASKED  EMBEDDING  +  PE
+    # -------------------------------------------------------------------
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
+    pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
+    pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
+    pep = layers.Dropout(0.1, name="pep_Dropout1")(pep)
+
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
+    mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
+    mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
+    mhc = layers.Dropout(0.1, name="mhc_Dropout1")(mhc)
+
+    # -------------------------------------------------------------------
+    # Subtract Layer
+    # -------------------------------------------------------------------
+    mhc_subtracted_p = SubtractLayer(name="pmhc_subtract")(pep, pep_mask_in, mhc, mhc_mask_in) # (B, M, P*D) = mhc_expanded – peptide_expanded
+    tf.print("mhc_subtracted_p shape:", mhc_subtracted_p.shape)
+
+    # -------------------------------------------------------------------
+    # Add Gaussian Noise
+    # -------------------------------------------------------------------
+    mhc_subtracted_p = AddGaussianNoise(0.1, name="pmhc_gaussian_noise")(mhc_subtracted_p)
+
+    query_dim = int(emb_dim*max_pep_len)
+
+    # # -------------------------------------------------------------------
+    # Normal Self-Attention Layer
+    # # -------------------------------------------------------------------
+    mhc_subtracted_p_attn, mhc_subtracted_p_attn_scores = AttentionLayer(
+        query_dim=query_dim, context_dim=query_dim, output_dim=query_dim,
+        type="self", heads=heads, resnet=True,
+        return_att_weights=True, name='mhc_subtracted_p_attn',
+        mask_token=mask_token,
+        pad_token=pad_token
+    )(mhc_subtracted_p, mhc_mask_in)
+    peptide_cross_att, peptide_cross_attn_scores = AttentionLayer(
+        query_dim=int(emb_dim), context_dim=query_dim, output_dim=int(emb_dim),
+        type="cross", heads=heads, resnet=False,
+        return_att_weights=True, name='peptide_cross_att',
+        mask_token=mask_token,
+        pad_token=pad_token
+    )(pep, pep_mask_in, mhc_subtracted_p_attn, mhc_mask_in)
+
+    # -------------------------------------------------------------------
+    # RECONSTRUCTION  HEADS
+    # -------------------------------------------------------------------
+    latent_pmhc = layers.Dense(emb_dim*max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(mhc_subtracted_p_attn)
+    latent_pmhc = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_pmhc)
+    latent_pmhc = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_pmhc)
+    latent_pmhc_d = layers.Dropout(0.2, name='latent_mhc_dropout2')(latent_pmhc)
+    mhc_recon = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(latent_pmhc_d)
+    pep_recon = layers.Dense(emb_dim, activation='relu', name='pep_latent')(peptide_cross_att)
+    pep_recon = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
+
+    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon]) #(B,P,42)
+    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon]) #(B,M,42)
+
+    # -------------------------------------------------------------------
+    # MODELS
+    # -------------------------------------------------------------------
+
+    enc_dec = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in],
+                          {"pep_ytrue_ypred": pep_out, "mhc_ytrue_ypred": mhc_out,
+                          "cross_latent": latent_pmhc, "attention_scores_CA": mhc_subtracted_p_attn_scores},
+                          name="encoder_decoder")
+
+    loss_fn = masked_categorical_crossentropy
+
+    enc_dec.compile(
+        optimizer=keras.optimizers.Adam(1e-4),
+        loss={"pep_ytrue_ypred": loss_fn,
+              "mhc_ytrue_ypred": loss_fn},
+    )
+    return enc_dec
+
+
 
 
 ########################################## MoE ###############################################
