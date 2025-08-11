@@ -302,9 +302,9 @@ if __name__ == "__main__":
     pooling = "mean"
 
     for mhc_class in (1, 2):            # ← run class-I then class-II
-        dat_path = f"../../data/alleles/aligned_PMGen_class_{mhc_class}.csv"
+        dat_path = f"/scratch-scc/users/u15472/PMBind/data/alleles/aligned_PMGen_class_{mhc_class}.csv"
         out_path = (
-            f"../../data/ESM/{model}/PMGen_whole_seq/mhc{mhc_class}_encodings.npz"
+            f"/scratch-scc/users/u15472/PMBind/data/ESM/{model}/PMGen_whole_seq/mhc{mhc_class}_encodings.npz"
         )
 
         main(

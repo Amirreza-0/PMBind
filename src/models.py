@@ -16,11 +16,11 @@ from tensorflow.keras import layers
 import matplotlib.pyplot as plt
 import seaborn as sns
 from keras.layers import Conv1D
-from src.utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
+from utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
                        ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict,
                        SelfAttentionWith2DMask, AddGaussianNoise, RotaryPositionalEncoding,
                        SubtractLayer, SubtractAttentionLayer, MaskedCategoricalCrossentropy,
-                       masked_categorical_crossentropy)
+                       masked_categorical_crossentropy, RotaryPositionalEncoding)
 
 
 MASK_TOKEN = -1.0
@@ -245,6 +245,7 @@ def pmclust_subtract(max_pep_len: int,
                        max_mhc_len: int,
                        emb_dim: int = 96,
                        heads: int = 4,
+                       noise_std: float = 0.1,
                        mask_token: float = MASK_TOKEN,
                        pad_token: float = PAD_TOKEN):
 
@@ -281,7 +282,7 @@ def pmclust_subtract(max_pep_len: int,
     # -------------------------------------------------------------------
     # Add Gaussian Noise
     # -------------------------------------------------------------------
-    mhc_subtracted_p = AddGaussianNoise(0.1, name="pmhc_gaussian_noise")(mhc_subtracted_p)
+    mhc_subtracted_p = AddGaussianNoise(noise_std, name="pmhc_gaussian_noise")(mhc_subtracted_p)
 
     query_dim = int(emb_dim*max_pep_len)
 
@@ -306,11 +307,19 @@ def pmclust_subtract(max_pep_len: int,
     # -------------------------------------------------------------------
     # RECONSTRUCTION  HEADS
     # -------------------------------------------------------------------
-    latent_pmhc = layers.Dense(emb_dim*max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(mhc_subtracted_p_attn)
-    latent_pmhc = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_pmhc)
-    latent_pmhc = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_pmhc)
-    latent_pmhc_d = layers.Dropout(0.2, name='latent_mhc_dropout2')(latent_pmhc)
-    mhc_recon = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(latent_pmhc_d)
+    latent_sequence = layers.Dense(emb_dim*max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(mhc_subtracted_p_attn)
+    latent_sequence = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_sequence)
+    latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence) # Shape: (B, M, D)
+
+    # --- Latent Vector for Clustering (pooled) ---
+    latent_vector = layers.GlobalAveragePooling1D(name="gap_latent")(latent_sequence) # Shape: (B, D)
+    latent_vector = layers.Dense(emb_dim * 2, activation='relu', name='latent_dense2')(latent_vector)
+    latent_vector = layers.Dropout(0.2, name='latent_vector_dropout')(latent_vector)
+    latent_vector = layers.Dense(emb_dim, activation='relu', name='latent_vector_output')(latent_vector) # Shape: (B, D)
+
+    # --- Reconstruction Heads ---
+    mhc_recon_head = layers.Dropout(0.2, name='latent_mhc_dropout2')(latent_sequence)
+    mhc_recon = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon_head)
     pep_recon = layers.Dense(emb_dim, activation='relu', name='pep_latent')(peptide_cross_att)
     pep_recon = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
 
@@ -322,8 +331,11 @@ def pmclust_subtract(max_pep_len: int,
     # -------------------------------------------------------------------
 
     enc_dec = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in],
-                          {"pep_ytrue_ypred": pep_out, "mhc_ytrue_ypred": mhc_out,
-                          "cross_latent": latent_pmhc, "attention_scores_CA": mhc_subtracted_p_attn_scores},
+                          {"pep_ytrue_ypred": pep_out,
+                           "mhc_ytrue_ypred": mhc_out,
+                          "cross_latent": latent_sequence,
+                          "latent_vector": latent_vector,
+                            "attention_scores_CA": mhc_subtracted_p_attn_scores},
                           name="encoder_decoder")
 
     loss_fn = masked_categorical_crossentropy
@@ -336,6 +348,141 @@ def pmclust_subtract(max_pep_len: int,
     return enc_dec
 
 
+def pmclust_cross_attn(max_pep_len: int,
+                            max_mhc_len: int,
+                            emb_dim: int = 96,
+                            heads: int = 4,
+                            noise_std: float = 0.1,
+                            mask_token: float = MASK_TOKEN,
+                            pad_token: float = PAD_TOKEN):
+    """
+    Builds a pMHC interaction model using self-attention followed by cross-attention.
+
+    This architecture first creates rich, context-aware representations of the peptide
+    and MHC sequences independently using self-attention. It then models their
+    interaction using two cross-attention layers, allowing the model to learn which
+    parts of each sequence are most relevant to the other.
+    """
+    # -------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------
+    pep_OHE_in = keras.Input((max_pep_len, 21), name="pep_onehot")
+    pep_mask_in = keras.Input((max_pep_len,), dtype=tf.float32, name="pep_mask")
+
+    mhc_emb_in = keras.Input((max_mhc_len, 1152), name="mhc_emb")
+    mhc_mask_in = keras.Input((max_mhc_len,), dtype=tf.float32, name="mhc_mask")
+
+    # This input is required for the loss function and final output concatenation
+    mhc_OHE_in = keras.Input((max_mhc_len, 21), name="mhc_onehot")
+
+    # -------------------------------------------------------------------
+    # 1. INITIAL EMBEDDING + POSITIONAL ENCODING
+    # -------------------------------------------------------------------
+    # Process peptide input
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_OHE_in, pep_mask_in)
+    pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)
+    pep = layers.Dense(emb_dim, name="pep_dense_embed")(pep)
+    pep = layers.Dropout(0.1, name="pep_dropout_embed")(pep)
+
+    # Process MHC input
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc_emb_in, mhc_mask_in)
+    mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)
+    mhc = layers.Dense(emb_dim, name="mhc_dense_embed")(mhc)
+    mhc = layers.Dropout(0.1, name="mhc_dropout_embed")(mhc)
+
+    # -------------------------------------------------------------------
+    # 2. INDEPENDENT PROCESSING (SELF-ATTENTION)
+    # -------------------------------------------------------------------
+    # Create rich representations of each sequence independently
+    pep_self_attn = AttentionLayer(
+        query_dim=emb_dim, context_dim=emb_dim, output_dim=emb_dim,
+        type="self", heads=heads, resnet=True, return_att_weights=False,
+        name='pep_self_attention', mask_token=mask_token, pad_token=pad_token
+    )(pep, pep_mask_in)
+
+    mhc_self_attn = AttentionLayer(
+        query_dim=emb_dim, context_dim=emb_dim, output_dim=emb_dim,
+        type="self", heads=heads, resnet=True, return_att_weights=False,
+        name='mhc_self_attention', mask_token=mask_token, pad_token=pad_token
+    )(mhc, mhc_mask_in)
+
+    # -------------------------------------------------------------------
+    # 3. INTERACTION MODELING (CROSS-ATTENTION)
+    # -------------------------------------------------------------------
+    # Peptide queries the MHC to get a contextualized representation
+    contextual_peptide, pep_x_mhc_scores = AttentionLayer(
+        query_dim=emb_dim, context_dim=emb_dim, output_dim=emb_dim,
+        type="cross", heads=heads, resnet=False, return_att_weights=True,
+        name='peptide_cross_attention', mask_token=mask_token, pad_token=pad_token
+    )(pep_self_attn, pep_mask_in, mhc_self_attn, mhc_mask_in)
+
+    # MHC queries the peptide to get its own contextualized representation
+    contextual_mhc, mhc_x_pep_scores = AttentionLayer(
+        query_dim=emb_dim, context_dim=emb_dim, output_dim=emb_dim,
+        type="cross", heads=heads, resnet=False, return_att_weights=True,
+        name='mhc_cross_attention', mask_token=mask_token, pad_token=pad_token
+    )(mhc_self_attn, mhc_mask_in, pep_self_attn, pep_mask_in)
+
+    # -------------------------------------------------------------------
+    # 4. LATENT SPACE & RECONSTRUCTION HEADS
+    # -------------------------------------------------------------------
+    # Add optional noise for robustness, similar to a VAE
+    contextual_peptide_noisy = AddGaussianNoise(noise_std, name="pep_gaussian_noise")(contextual_peptide)
+    contextual_mhc_noisy = AddGaussianNoise(noise_std, name="mhc_gaussian_noise")(contextual_mhc)
+
+    # --- Latent Space for Visualization (keeps sequence dimension) ---
+    # This will be the main latent output for heatmaps and detailed analysis.
+    latent_sequence = layers.Dense(emb_dim, activation='relu', name='latent_sequence_output')(contextual_mhc_noisy)
+
+    # --- Latent Vector for Clustering (pooled) ---
+    # Create a single vector per sample by pooling the sequence latent.
+    latent_vector_pooled = layers.GlobalAveragePooling1D(name="gap_latent")(latent_sequence)
+    latent_vector_pooled = layers.Dense(emb_dim * 2, activation='relu', name='latent_dense1')(latent_vector_pooled)
+    latent_vector_pooled = layers.Dropout(0.2, name='latent_dropout')(latent_vector_pooled)
+    latent_vector_pooled = layers.Dense(emb_dim, activation='relu', name='latent_vector_output')(latent_vector_pooled)
+
+    # --- Reconstruction Heads ---
+    # Reconstruct the peptide from its contextual representation
+    pep_recon = layers.Dense(emb_dim, activation='relu', name='pep_recon_dense')(contextual_peptide_noisy)
+    pep_recon = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
+
+    # Reconstruct the MHC from its contextual representation
+    mhc_recon = layers.Dense(emb_dim, activation='relu', name='mhc_recon_dense')(contextual_mhc_noisy)
+    mhc_recon = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon)
+
+    # --- Prepare Outputs for Loss Calculation ---
+    # Concatenate true and predicted values for the custom loss function
+    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon])
+    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon])
+
+    # -------------------------------------------------------------------
+    # 5. MODEL DEFINITION
+    # -------------------------------------------------------------------
+    # Define the full encoder-decoder model
+    enc_dec = keras.Model(
+        inputs=[pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in],
+        outputs={
+            "pep_ytrue_ypred": pep_out,
+            "mhc_ytrue_ypred": mhc_out,
+            "cross_latent": latent_sequence,          # Use the pre-pooled latent for visualization
+            "latent_vector": latent_vector_pooled,    # Use the pooled vector for UMAP
+            "pep_x_mhc_scores": pep_x_mhc_scores,
+            "mhc_x_pep_scores": mhc_x_pep_scores
+        },
+        name="pmhc_cross_attention_model"
+    )
+
+    # Compile the model
+    enc_dec.compile(
+        optimizer=keras.optimizers.Adam(1e-4),
+        loss={
+            "pep_ytrue_ypred": masked_categorical_crossentropy,
+            "mhc_ytrue_ypred": masked_categorical_crossentropy
+        },
+        # You can define loss weights if needed
+        # loss_weights={"pep_ytrue_ypred": 1.0, "mhc_ytrue_ypred": 1.0}
+    )
+    return enc_dec
 
 
 ########################################## MoE ###############################################

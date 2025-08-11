@@ -354,56 +354,89 @@ class MaskedEmbedding(keras.layers.Layer):
         mask = tf.where((mask == self.pad_token) | (mask == self.mask_token), 0., 1.)
         return x * mask[:, :, tf.newaxis]  # Apply mask to zero out positions
 
+
 class RotaryPositionalEncoding(keras.layers.Layer):
     """
     Rotary Positional Encoding layer for transformer models.
-    Applies rotary embeddings to the last two dimensions of the input.
+    Applies rotary embeddings to the last dimension of the input.
     Args:
-    embed\_dim (int): Embedding dimension (must be even).
-    max\_len (int): Maximum sequence length.
+        embed_dim (int): Embedding dimension (must be even).
+        max_len (int): Maximum sequence length.
+        mask_token (float): Value representing a masked token in the mask.
+        pad_token (float): Value representing a padded token in the mask.
     """
 
-    def __init__(self, embed_dim, max_len: int = 100, mask_token: float = -1., pad_token: float = -2., name: str = 'rotary_positional_encoding'):
+    def __init__(self, embed_dim=None, max_len: int = 100, mask_token: float = -1., pad_token: float = -2., name: str = 'rotary_positional_encoding'):
         super().__init__(name=name)
-        assert embed_dim % 2 == 0, "embed_dim must be even for rotary encoding"
+        if embed_dim is not None:
+            assert embed_dim % 2 == 0, "embed_dim must be even for rotary encoding"
         self.embed_dim = embed_dim
         self.max_len = max_len
         self.mask_token = mask_token
         self.pad_token = pad_token
 
-    def build(self, x):
+    def build(self, input_shape):
+        """Precomputes the rotary frequency sinusoids."""
+        if self.embed_dim is None:
+            self.embed_dim = input_shape[-1]
+        assert self.embed_dim % 2 == 0, f"Input feature dimension {self.embed_dim} must be even for rotary encoding"
+
         # Precompute rotary frequencies
         pos = tf.range(self.max_len, dtype=tf.float32)[:, tf.newaxis]  # (max_len, 1)
         dim = tf.range(self.embed_dim // 2, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim//2)
-        inv_freq = 1.0 / (10000 ** (dim / (self.embed_dim // 2)))
+        
+        # Using a base of 10000 is common in RoPE implementations
+        inv_freq = tf.pow(10000.0, -(2 * dim) / tf.cast(self.embed_dim, tf.float32))
         freqs = pos * inv_freq  # (max_len, embed_dim//2)
+        
         self.cos_cached = tf.cast(tf.cos(freqs), tf.float32)  # (max_len, embed_dim//2)
         self.sin_cached = tf.cast(tf.sin(freqs), tf.float32)  # (max_len, embed_dim//2)
+        super().build(input_shape)
 
     def call(self, x, mask):
         """
+        Applies the rotary positional encoding to the input tensor.
         Args:
             x: Input tensor of shape (B, N, D)
             mask: Tensor of shape (B, N)
         Returns:
             Tensor with rotary positional encoding applied.
         """
+        # --- FIX STARTS HERE ---
+        # Add a runtime assertion to ensure the last dimension of the input is even.
+        # This provides a clearer error if an incorrectly shaped tensor is passed.
+        input_shape = tf.shape(x)
+        last_dim = input_shape[-1]
+        tf.Assert(tf.equal(last_dim % 2, 0), 
+                  [f"The last dimension of the input tensor to RotaryPositionalEncoding must be even, but received shape {input_shape}."])
+        # --- FIX ENDS HERE ---
+
         seq_len = tf.shape(x)[1]
+        
+        # Slice the precomputed frequencies to match the sequence length
         cos = self.cos_cached[:seq_len, :]  # (N, D//2)
         sin = self.sin_cached[:seq_len, :]  # (N, D//2)
+        
+        # Add a batch dimension for broadcasting
         cos = tf.expand_dims(cos, 0)  # (1, N, D//2)
         sin = tf.expand_dims(sin, 0)  # (1, N, D//2)
 
+        # Split the input tensor into two halves along the feature dimension
         x1, x2 = tf.split(x, 2, axis=-1)  # (B, N, D//2), (B, N, D//2)
+        
+        # Apply the rotary transformation
         x_rot = tf.concat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)  # (B, N, D)
 
-        mask = tf.cast(mask[:, :, tf.newaxis], tf.float32)  # (B, N, 1)
-        mask = tf.where(mask == self.pad_token, 0., 1.)
-        x_rot = x_rot * mask  # zero out positions where mask is 0
+        # Apply the padding mask to zero out padded positions
+        mask_expanded = tf.cast(mask[:, :, tf.newaxis], tf.float32)  # (B, N, 1)
+        # Create a binary mask where padded tokens are 0 and others are 1
+        binary_mask = tf.where(mask_expanded == self.pad_token, 0.0, 1.0)
+        x_rot = x_rot * binary_mask  # Zero out positions where mask is 0
 
         return x_rot
 
     def get_config(self):
+        """Serializes the layer's configuration."""
         config = super().get_config()
         config.update({
             'embed_dim': self.embed_dim,
