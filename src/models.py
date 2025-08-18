@@ -676,6 +676,148 @@ class EnhancedMoEModel(tf.keras.Model):
         return results
 #######################################################################################
 
+
+####
+def pmbind_subtract_moe_auto(max_pep_len: int,
+                               max_mhc_len: int,
+                               emb_dim: int = 96,
+                               heads: int = 4,
+                               noise_std: float = 0.1,
+                               num_experts: int = 5,
+                               use_hard_clustering: bool = True,
+                               mask_token: float = MASK_TOKEN,
+                               pad_token: float = PAD_TOKEN):
+    """
+    Builds a pMHC autoencoder model with a Mixture-of-Experts (MoE) classifier head.
+
+    This model performs two tasks:
+    1. Autoencoding: Reconstructs peptide and MHC sequences from a latent representation.
+    2. Classification: Predicts a binary label using an MoE head, where experts are
+       selected based on an internally generated clustering of the latent space.
+    """
+    # -------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------
+    pep_OHE_in = keras.Input((max_pep_len, 21), name="pep_onehot")
+    pep_mask_in = keras.Input((max_pep_len,), name="pep_mask")
+    mhc_emb_in = keras.Input((max_mhc_len, 1152), name="mhc_emb")
+    mhc_mask_in = keras.Input((max_mhc_len,), name="mhc_mask")
+    mhc_OHE_in = keras.Input((max_mhc_len, 21), name="mhc_onehot")
+    # Input for the classification label, not used in model graph but needed for training
+    y_in = keras.Input(shape=(1,), name="label")
+
+    # -------------------------------------------------------------------
+    # MASKED EMBEDDING + POSITIONAL ENCODING
+    # -------------------------------------------------------------------
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
+    pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
+    pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
+    pep = layers.Dropout(0.1, name="pep_Dropout1")(pep)
+
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
+    mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
+    mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
+    mhc = layers.Dropout(0.1, name="mhc_Dropout1")(mhc)
+
+    # -------------------------------------------------------------------
+    # INTERACTION & LATENT SPACE
+    # -------------------------------------------------------------------
+    mhc_subtracted_p = SubtractLayer(name="pmhc_subtract")(pep, pep_mask_in, mhc, mhc_mask_in)
+    mhc_subtracted_p = AddGaussianNoise(noise_std, name="pmhc_gaussian_noise")(mhc_subtracted_p)
+
+    query_dim = int(emb_dim * max_pep_len)
+    mhc_subtracted_p_attn, mhc_subtracted_p_attn_scores = AttentionLayer(
+        query_dim=query_dim, context_dim=query_dim, output_dim=query_dim,
+        type="self", heads=heads, resnet=True, return_att_weights=True,
+        name='mhc_subtracted_p_attn', mask_token=mask_token, pad_token=pad_token
+    )(mhc_subtracted_p, mhc_mask_in)
+
+    latent_sequence = layers.Dense(emb_dim * max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(mhc_subtracted_p_attn)
+    latent_sequence = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_sequence)
+    latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence)
+
+    latent_vector = layers.GlobalAveragePooling1D(name="gap_latent")(latent_sequence)
+    latent_vector = layers.Dense(emb_dim * 2, activation='relu', name='latent_dense2')(latent_vector)
+    latent_vector = layers.Dropout(0.2, name='latent_vector_dropout')(latent_vector)
+    latent_vector = layers.Dense(emb_dim, activation='relu', name='latent_vector_output')(latent_vector)
+
+    # -------------------------------------------------------------------
+    # RECONSTRUCTION HEADS
+    # -------------------------------------------------------------------
+    peptide_cross_att, _ = AttentionLayer(
+        query_dim=int(emb_dim), context_dim=query_dim, output_dim=int(emb_dim),
+        type="cross", heads=heads, resnet=False, return_att_weights=True,
+        name='peptide_cross_att', mask_token=mask_token, pad_token=pad_token
+    )(pep, pep_mask_in, mhc_subtracted_p_attn, mhc_mask_in)
+
+    mhc_recon_head = layers.Dropout(0.2, name='latent_mhc_dropout2')(latent_sequence)
+    mhc_recon = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon_head)
+    pep_recon = layers.Dense(emb_dim, activation='relu', name='pep_latent')(peptide_cross_att)
+    pep_recon = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
+
+    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon])
+    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon])
+
+    # -------------------------------------------------------------------
+    # CLASSIFIER HEAD (MIXTURE OF EXPERTS)
+    # -------------------------------------------------------------------
+    # 1. Gating network: Generate soft cluster assignments from the latent vector
+    soft_cluster_probs = layers.Dense(num_experts, activation='softmax', name='gating_network')(latent_vector)
+
+    # 2. MoE layer: Get weighted prediction from experts
+    moe_layer = EnhancedMixtureOfExperts(
+        input_dim=emb_dim,
+        hidden_dim=emb_dim // 2,
+        num_experts=num_experts,
+        output_dim=1,
+        use_hard_clustering=use_hard_clustering,
+        dropout_rate=0.2
+    )
+    y_pred = moe_layer((latent_vector, soft_cluster_probs))
+    y_pred = layers.Activation('sigmoid', name='classification_output')(y_pred)
+
+    # -------------------------------------------------------------------
+    # MODEL DEFINITION
+    # -------------------------------------------------------------------
+    model = keras.Model(
+        inputs=[pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in, y_in],
+        outputs={
+            "pep_ytrue_ypred": pep_out,
+            "mhc_ytrue_ypred": mhc_out,
+            "classification_output": y_pred,
+            "cross_latent": latent_sequence,
+            "latent_vector": latent_vector,
+            "soft_cluster_probs": soft_cluster_probs,
+            "attention_scores_CA": mhc_subtracted_p_attn_scores
+        },
+        name="pmbind_subtract_moe_autoencoder"
+    )
+
+    # Compile the model with multiple losses
+    model.compile(
+        optimizer=keras.optimizers.Adam(1e-4),
+        loss={
+            "pep_ytrue_ypred": masked_categorical_crossentropy,
+            "mhc_ytrue_ypred": masked_categorical_crossentropy,
+            "classification_output": 'binary_crossentropy'
+        },
+        loss_weights={
+            "pep_ytrue_ypred": 0.5,  # Weight reconstruction loss
+            "mhc_ytrue_ypred": 0.5,
+            "classification_output": 1.0  # Weight classification loss higher
+        },
+        metrics={
+            "classification_output": ['accuracy', tf.keras.metrics.AUC(name='auc')]
+        }
+    )
+    # Add the label to the loss calculation for the classification output
+    model.add_loss(model.loss_functions[2](y_in, y_pred))
+
+    return model
+
+####
+
+
 # Test run with synthetic data
 if __name__ == "__main__":
     tf.random.set_seed(0)

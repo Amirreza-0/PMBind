@@ -36,6 +36,7 @@ from utils import seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKE
 # Assuming this is in a 'models' directory
 from models import pmclust_subtract, pmclust_cross_attn
 from sklearn.cluster import DBSCAN
+from scipy.spatial.distance import cdist
 
 # ──────────────────────────────────────────────────────────────────────
 # 4. DATA PREPARATION & TRAINING LOOP
@@ -93,8 +94,16 @@ def rows_to_tensors(rows: pd.DataFrame, max_pep_len: int, max_mhc_len: int, seq_
         ### MHC
         # print(f"Peptide mask for sample {i}: {batch_data['pep_mask'][i]}")  # Debugging line to check peptide mask
         # Process MHC embeddings and sequence
-        embd_key = get_embed_key(clean_key(r["mhc_embedding_key"]), embed_map)
-        emb = EMB_DB[embd_key]
+        if MHC_CLASS == 2:
+            key_parts = r["mhc_embedding_key"].split("_")
+            embd_key1 = get_embed_key(clean_key(key_parts[0]), embed_map)
+            embd_key2 = get_embed_key(clean_key(key_parts[1]), embed_map)
+            emb1 = EMB_DB[embd_key1]
+            emb2 = EMB_DB[embd_key2]
+            emb = np.concatenate([emb1, emb2], axis=0)
+        else:
+            embd_key = get_embed_key(clean_key(r["mhc_embedding_key"]), embed_map)
+            emb = EMB_DB[embd_key]
         L = emb.shape[0]
         batch_data["mhc_emb"][i, :L] = emb
         # Set padding positions in embeddings to PAD_VALUE
@@ -121,14 +130,21 @@ def rows_to_tensors(rows: pd.DataFrame, max_pep_len: int, max_mhc_len: int, seq_
         # print(f"MHC mask for sample {i}: {batch_data['mhc_mask'][i]}")  # Debugging line to check MHC mask
         
         # Get MHC sequence and convert to one-hot
-        key_norm = get_embed_key(clean_key(r["mhc_embedding_key"]), seq_map)
-        mhc_seq = seq_map[key_norm]
-        batch_data["mhc_onehot"][i] = seq_to_onehot(mhc_seq, max_seq_len=max_mhc_len)
+        if MHC_CLASS == 2:
+            key_parts = r["mhc_embedding_key"].split("_")
+            key_norm1 = get_embed_key(clean_key(key_parts[0]), seq_map)
+            key_norm2 = get_embed_key(clean_key(key_parts[1]), seq_map)
+            mhc_seq = seq_map[key_norm1] + seq_map[key_norm2]
+            batch_data["mhc_onehot"][i] = seq_to_onehot(mhc_seq, max_seq_len=max_mhc_len)
+        else:
+            key_norm = get_embed_key(clean_key(r["mhc_embedding_key"]), seq_map)
+            mhc_seq = seq_map[key_norm]
+            batch_data["mhc_onehot"][i] = seq_to_onehot(mhc_seq, max_seq_len=max_mhc_len)
 
     return {k: tf.convert_to_tensor(v) for k, v in batch_data.items()}
 
 
-def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir):
+def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, dataset_name: str):
     """
     Generates and saves a series of visualizations for model analysis.
     """
@@ -178,9 +194,9 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
         
     allele_color_map = {allele: colors[i] for i, allele in enumerate(unique_alleles)}
     
-    # Choose 3 random unique alleles to highlight
-    random_alleles_to_mark = np.random.choice(unique_alleles, min(3, len(unique_alleles)), replace=False)
-    print(f"Highlighting alleles: {list(random_alleles_to_mark)}")
+    # Choose top 5 most frequent alleles to highlight
+    top_5_alleles_to_mark = allele_counts.head(5).index.tolist()
+    print(f"Highlighting top 5 alleles: {top_5_alleles_to_mark}")
 
     # --- Visualization 1: UMAP of FLATTENED SEQUENTIAL latents ---
     print("Running UMAP on FLATTENED SEQUENTIAL latents...")
@@ -196,10 +212,10 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
                    c=[allele_color_map[allele]], label=allele, 
                    s=5, alpha=0.7)
     
-    # Highlight the 3 random alleles with distinct markers
-    for i, allele in enumerate(random_alleles_to_mark):
+    # Highlight the 5 top alleles with distinct markers
+    for i, allele in enumerate(top_5_alleles_to_mark):
         mask = alleles == allele
-        markers = ['*', 'D', 'X']  # More publication-friendly markers
+        markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
         plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1], 
                    c='gray', marker=markers[i], s=25, 
                    edgecolor='black', linewidth=0.3, 
@@ -257,10 +273,10 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
                    c=[allele_color_map[allele]], label=allele, 
                    s=5, alpha=0.7)
     
-    # Highlight the 3 random alleles with distinct markers
-    for i, allele in enumerate(random_alleles_to_mark):
+    # Highlight the 5 top alleles with distinct markers
+    for i, allele in enumerate(top_5_alleles_to_mark):
         mask = alleles == allele
-        markers = ['*', 'D', 'X']  # More publication-friendly markers
+        markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
         plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1], 
                    c='gray', marker=markers[i], s=25, 
                    edgecolor='black', linewidth=0.3, 
@@ -340,7 +356,14 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     n_noise = np.sum(clusters == -1)
     print(f"✓ DBSCAN found {n_clusters} clusters and {n_noise} noise points.")
 
-    # --- Step 3: Visualize the clustering results ---
+    # --- Step 3: Add cluster labels to DataFrame and save ---
+    df['cluster_id'] = clusters
+    output_parquet_path = os.path.join(out_dir, f"{dataset_name}_with_clusters.parquet")
+    df.to_parquet(output_parquet_path)
+    print(f"✓ Saved dataset with cluster IDs to {output_parquet_path}")
+
+
+    # --- Step 4: Visualize the clustering results ---
     plt.figure(figsize=(14, 10))
     
     # Create publication-friendly color map for clusters
@@ -368,10 +391,10 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
                    c=[cluster_color_map[cluster]], label=label, 
                    s=5, alpha=0.7)
     
-    # Highlight the 3 random alleles with distinct markers
-    for i, allele in enumerate(random_alleles_to_mark):
+    # Highlight the 5 top alleles with distinct markers
+    for i, allele in enumerate(top_5_alleles_to_mark):
         mask = alleles == allele
-        markers = ['*', 'D', 'X'] 
+        markers = ['*', 'D', 'X', 's', 'p'] 
         plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1], 
                    c='gray', marker=markers[i], s=25, 
                    edgecolor='black', linewidth=0.3, 
@@ -506,6 +529,32 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
 
     print("\n✓ Visualizations complete.")
 
+# Helper function for inference and visualization
+def run_inference_and_visualizations(df, dataset_name, original_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size=32, embed_dim=32):
+    print(f"\n--- Running Inference & Visualization on {dataset_name.upper()} SET ---")
+    dataset_out_dir = os.path.join(out_dir, f"visuals_{dataset_name}")
+    os.makedirs(dataset_out_dir, exist_ok=True)
+
+    indices = np.arange(len(df))
+    # These will store the outputs from the model
+    latents_seq = np.zeros((len(df), max_mhc_len, embed_dim), np.float32)
+    latents_pooled = np.zeros((len(df), embed_dim), np.float32)
+    
+    for step in range(0, len(indices), batch_size):
+        batch_idx = indices[step:step + batch_size]
+        batch_df = df.iloc[batch_idx]
+        batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+        true_preds = enc_dec(batch_data, training=False)
+        latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
+        latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
+
+    # Save the sequential latents (for heatmaps, etc.)
+    latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.npy")
+    np.save(latents_seq_path, latents_seq)
+    print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
+
+    # Pass both latent types to the visualization function
+    run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
 
 def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str, seq_csv: str, embd_key_path: str,
           out_dir: str, epochs: int = 3, batch_size: int = 32,
@@ -530,7 +579,10 @@ def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str
 
     # Calculate max lengths across all datasets to ensure consistency
     max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"], df_test["long_mer"]]).str.len().max())
-    max_mhc_len = int(next(iter(EMB_DB.values())).shape[0])
+    if MHC_CLASS == 2:
+        max_mhc_len = 400 # manually set
+    else:
+        max_mhc_len = int(next(iter(EMB_DB.values())).shape[0])
     print(f"Max peptide length: {max_pep_len}, Max MHC length: {max_mhc_len}")
 
     # Initialize model and optimizer
@@ -545,6 +597,18 @@ def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str
     
     opt = keras.optimizers.Adam(lr)
     loss_fn = masked_categorical_crossentropy
+
+    # Save model configuration
+    config = {
+        'max_pep_len': max_pep_len, 
+        'max_mhc_len': max_mhc_len, 
+        'embed_dim': embed_dim,
+        'heads': heads,
+        'noise_std': noise_std
+    }
+    with open(os.path.join(out_dir, "model_config.json"), 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"\n✓ Model configuration saved.")
 
     # Get indices for training and validation
     train_indices = np.arange(len(df_train))
@@ -650,47 +714,14 @@ def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str
     print(f"\nLoading best weights from {best_weights_path} for final analysis.")
     enc_dec.load_weights(best_weights_path)
 
-    # Helper function for inference and visualization
-    def run_inference_and_visualizations(df, dataset_name):
-        print(f"\n--- Running Inference & Visualization on {dataset_name.upper()} SET ---")
-        dataset_out_dir = os.path.join(out_dir, f"visuals_{dataset_name}")
-        os.makedirs(dataset_out_dir, exist_ok=True)
-
-        indices = np.arange(len(df))
-        # These will store the outputs from the model
-        latents_seq = np.zeros((len(df), max_mhc_len, embed_dim), np.float32)
-        latents_pooled = np.zeros((len(df), embed_dim), np.float32)
-        
-        for step in range(0, len(indices), batch_size):
-            batch_idx = indices[step:step + batch_size]
-            batch_df = df.iloc[batch_idx]
-            batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
-            true_preds = enc_dec(batch_data, training=False)
-            latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
-            latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
-
-        # Save the sequential latents (for heatmaps, etc.)
-        latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.npy")
-        np.save(latents_seq_path, latents_seq)
-        print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
-
-        # Pass both latent types to the visualization function
-        run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir)
-
     # Run analysis on all three datasets
-    run_inference_and_visualizations(df_train, "train")
-    run_inference_and_visualizations(df_val, "validation")
-    run_inference_and_visualizations(df_test, "test")
+    run_inference_and_visualizations(df_train, "train", train_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+    run_inference_and_visualizations(df_val, "validation", validation_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+    run_inference_and_visualizations(df_test, "test", test_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
 
-    # Save model configuration
-    config = {'max_pep_len': max_pep_len, 'max_mhc_len': max_mhc_len, 'embed_dim': embed_dim}
-    with open(os.path.join(out_dir, "model_config.json"), 'w') as f:
-        json.dump(config, f, indent=4)
-    print(f"\n✓ Model configuration saved.")
-
-
+    
 def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
-          out_dir: str, batch_size: int = 32):
+          out_dir: str, batch_size: int = 256, df_name="inference"):
     """
     Run inference on a dataset using a pre-trained model.
     Loads model configuration and best weights from the output directory.
@@ -707,6 +738,7 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
 
     # Extract all necessary parameters from the config file
     try:
+        print("Extracting model configuration...")
         max_pep_len = config['max_pep_len']
         max_mhc_len = config['max_mhc_len']
         embed_dim = config['embed_dim']
@@ -748,7 +780,7 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
     # --- INFERENCE & LATENT EXTRACTION ---
     print("\nRunning inference to extract latents...")
     # Create a dedicated directory for inference results
-    infer_out_dir = os.path.join(out_dir, "inference_visuals")
+    infer_out_dir = os.path.join(out_dir, df_name)
     os.makedirs(infer_out_dir, exist_ok=True)
 
     indices = np.arange(len(df_infer))
@@ -769,24 +801,164 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
     print(f"✓ Sequential latents from inference saved to {latents_seq_path}")
 
     # --- CALL THE VISUALIZATION FUNCTION ---
-    run_visualizations(df_infer, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, infer_out_dir)
+    run_visualizations(df_infer, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, infer_out_dir, df_name)
     print("\n✓ Inference and visualization complete.")
 
+
+def generate_negatives(model_out_dir: str, positives_train: str, positives_validation: str, embed_npz: str, seq_csv: str, embd_key_path: str, batch_size: int = 256):
+    """
+    Generates a dataset of negative samples using a trained model.
+
+    This function works by:
+    1. Running inference on a complete dataset of peptide-MHC pairs to get latent representations.
+    2. Clustering these samples in the latent space using DBSCAN (performed inside `infer`).
+    3. Calculating the centroid (mean latent vector) for each cluster.
+    4. For each cluster, identifying the most distant clusters based on centroid distance.
+    5. Creating new "negative" pairs by swapping the MHC alleles of samples with alleles from these distant clusters.
+    6. Saving the newly generated negative dataset.
+
+    Args:
+        model_out_dir (str): Path to the output directory of a trained model, containing weights and config.
+        whole_dataset_pq (str): Path to the Parquet file containing the entire dataset to be clustered.
+        embed_npz (str): Path to the NPZ file with MHC embeddings.
+        seq_csv (str): Path to the CSV file with MHC sequences.
+        embd_key_path (str): Path to the CSV file mapping embedding keys.
+        batch_size (int): Batch size for the inference process.
+    """
+    print("\n--- Starting Negative Sample Generation ---")
+
+    # Load the positive samples
+    positives_train = pd.read_parquet(positives_train)
+    positives_validation = pd.read_parquet(positives_validation)
+
+    positives_comb = pd.concat([positives_train, positives_validation], axis=0)
+
+    # 1. Run inference and clustering on the entire dataset
+    # The `infer` function will create a subdirectory and save a parquet file with cluster IDs.
+    df_name = "positives_combined"
+    infer(
+        parquet_path=positives_comb,
+        embed_npz=embed_npz,
+        seq_csv=seq_csv,
+        embd_key_path=embd_key_path,
+        out_dir=model_out_dir,
+        batch_size=batch_size,
+        df_name=df_name
+    )
+
+    # 2. Load the clustered data and the corresponding latent vectors
+    infer_dir = os.path.join(model_out_dir, df_name)
+    clustered_df_path = os.path.join(infer_dir, f"{df_name}_with_clusters.parquet")
+    latents_path = os.path.join(infer_dir, "mhc_latents_sequential_infer.npy") # TODO check
+
+    if not os.path.exists(clustered_df_path) or not os.path.exists(latents_path):
+        raise FileNotFoundError("Clustered data or latent vectors not found. Ensure the `infer` function ran successfully.")
+
+    df_clustered = pd.read_parquet(clustered_df_path)
+    # Let's assume `run_inference_and_visualizations` saves pooled latents.
+    # For now, let's re-calculate the pooled latent as the mean of the sequential one.
+    latents_seq = np.load(latents_path)
+
+    print(f"✓ Loaded {len(df_clustered)} samples with cluster IDs.")
+
+    # Exclude noise points from negative generation logic
+    df_clustered = df_clustered[df_clustered['cluster_id'] != -1].copy()
+    print(f"  Proceeding with {len(df_clustered)} non-noise samples.")
+
+    # 3. Calculate the centroid for each cluster
+    cluster_ids = df_clustered['cluster_id'].unique()
+    cluster_centroids = {}
+    for cid in cluster_ids:
+        mask = df_clustered['cluster_id'] == cid
+        cluster_centroids[cid] = latents_seq[mask].mean(axis=0)
+    
+    print(f"✓ Calculated centroids for {len(cluster_centroids)} clusters.")
+
+    # 4. For each cluster, find the most distant cluster
+    
+    sorted_cids = sorted(cluster_centroids.keys())
+    centroid_matrix = np.array([cluster_centroids[cid] for cid in sorted_cids])
+    dist_matrix = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
+    
+    # Set diagonal to a large value to ignore self-distance
+    np.fill_diagonal(dist_matrix, np.inf)
+    
+    # Find the index of the most distant cluster for each cluster
+    farthest_cluster_indices = np.argmin(dist_matrix, axis=1)
+    
+    farthest_cluster_map = {
+        source_cid: sorted_cids[farthest_cluster_indices[i]]
+        for i, source_cid in enumerate(sorted_cids)
+    }
+    print("✓ Determined the most distant cluster for each cluster.")
+
+    # 5. Generate negative samples
+    new_negatives = []
+    # Get a representative set of alleles from each cluster
+    alleles_per_cluster = df_clustered.groupby('cluster_id')['mhc_embedding_key'].apply(
+        lambda x: x.unique().tolist()
+    ).to_dict()
+
+    for _, row in df_clustered.iterrows():
+        source_cluster = row['cluster_id']
+        target_cluster = farthest_cluster_map.get(source_cluster)
+
+        if target_cluster is None:
+            continue
+
+        # Get available alleles from the target cluster
+        target_alleles = alleles_per_cluster.get(target_cluster)
+        if not target_alleles:
+            continue
+            
+        # Pick a random allele from the target cluster
+        new_mhc_key = np.random.choice(target_alleles)
+
+        # Create a new negative sample record
+        new_negatives.append({
+            'long_mer': row['long_mer'],
+            'mhc_embedding_key': new_mhc_key,
+            'origin_peptide': row['long_mer'],
+            'origin_mhc': row['mhc_embedding_key'],
+            'origin_cluster': source_cluster,
+            'target_cluster': target_cluster,
+            'assigned_label': 0  # Explicitly label as negative
+        })
+
+    df_negatives = pd.DataFrame(new_negatives)
+    print(f"✓ Generated {len(df_negatives)} new negative samples.")
+
+    # 6. Save the new dataset
+    negatives_output_path = os.path.join(model_out_dir, f"generated_negatives{MHC_CLASS}.parquet")
+    df_negatives.to_parquet(negatives_output_path, index=False)
+    print(f"✓ Saved generated negatives to {negatives_output_path}")
+
+    # save positives_dataset with negatives
+    positives_comb = pd.concat([df_clustered, df_negatives], axis=0)
+    positives_comb_path = os.path.join(model_out_dir, f"binding_affinity_dataset_with_swapped_negatives{MHC_CLASS}.parquet")
+    positives_comb.to_parquet(positives_comb_path, index=False)
+    print(f"✓ Saved whole dataset to {positives_comb_path}")
 
 
 if __name__ == "__main__":
     # Suppress verbose TensorFlow logging, but keep errors.
+    MHC_CLASS = 2
     noise_std = 0.1
     heads = 4
     embed_dim = 96
+    batch_size = 512
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-    train_path = "../data/binding_affinity_data/positives_class1_train.parquet"
-    validate_path = "../data/binding_affinity_data/positives_class1_val.parquet"
-    test_path = "../data/binding_affinity_data/positives_class1_test.parquet"
-    embed_npz_path = "../data/ESM/esmc_600m/PMGen_whole_seq/mhc1_encodings.npz"
-    embd_key_path = "../data/ESM/esmc_600m/PMGen_whole_seq/mhc1_encodings.csv"
-    seq_csv_path = "../data/alleles/aligned_PMGen_class_1.csv"
-    base_out_dir = f"../results/run_PMClust_ns_{noise_std}_hds_{heads}_zdim_{embed_dim}/"
+    train_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_train.parquet"
+    validate_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_val.parquet"
+    test_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_test.parquet"
+    embed_npz_path = f"../data/ESM/esmc_600m/PMGen_whole_seq/mhc{MHC_CLASS}_encodings.npz"
+    embd_key_path = f"../data/ESM/esmc_600m/PMGen_whole_seq/mhc{MHC_CLASS}_encodings.csv"
+    seq_csv_path = f"../data/alleles/aligned_PMGen_class_{MHC_CLASS}.csv"
+    base_out_dir = f"../results/run_PMClust_ns_{noise_std}_hds_{heads}_zdim_{embed_dim}_L{MHC_CLASS}/"
+    whole_dataset = f"../../data/binding_affinity_data/concatenated_class{MHC_CLASS}_all.parquet"
+
+
+    # Training
     counter = 1
     while True:
         out_dir = f"{base_out_dir}{counter}"
@@ -803,19 +975,24 @@ if __name__ == "__main__":
         seq_csv=seq_csv_path,
         embd_key_path=embd_key_path,
         out_dir=out_dir,
-        epochs=2,
-        batch_size=128,
-        lr=1e-3,
+        epochs=4,
+        batch_size=batch_size,
+        lr=1e-5,
         embed_dim=96,
         heads=4,
         noise_std=noise_std
     )
 
+    # out_dir = f"{base_out_dir}4"
     # infer(
-    #     parquet_path=validate_path,
+    #     parquet_path=test_path,
     #     embed_npz=embed_npz_path,
     #     seq_csv=seq_csv_path,
     #     embd_key_path=embd_key_path,
     #     out_dir=out_dir,
-    #     batch_size=256,  # Reduced for faster dummy run
+    #     batch_size=256,
+    #     df_name="inference_validation"
     # )
+
+    # generate negatives
+    generate_negatives(model_out_dir=model_out_dir, whole_dataset_pq=whole_dataset_path, embed_npz=embed_npz_path, seq_csv=seq_csv_path, embd_key_path=embd_key_path, batch_size=batch_size)
