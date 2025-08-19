@@ -17,6 +17,7 @@ from tensorflow import keras
 import pyarrow.parquet as pq
 import json
 import os
+from tqdm import tqdm
 
 
 # Added for visualizations
@@ -144,7 +145,7 @@ def rows_to_tensors(rows: pd.DataFrame, max_pep_len: int, max_mhc_len: int, seq_
     return {k: tf.convert_to_tensor(v) for k, v in batch_data.items()}
 
 
-def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, dataset_name: str):
+def run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, dataset_name: str):
     """
     Generates and saves a series of visualizations for model analysis.
     """
@@ -175,11 +176,12 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     print(f"Found {len(unique_alleles)} unique alleles.")
 
     # Flatten the sequential latents for UMAP and DBSCAN
-    n_samples = latents_seq.shape[0]
-    latents_seq_flat = latents_seq.reshape(n_samples, -1)
+    #n_samples = latents_seq.shape[0]
+    #latents_seq_flat = latents_seq.reshape(n_samples, -1)
+    latents_seq_flat = latents_pooled
 
     # Create a publication-friendly color palette for all alleles
-    np.random.seed(42)  # for reproducibility
+    np.random.seed(10)  # for reproducibility
     
     # Use colorblind-friendly palettes appropriate for scientific publications
     if len(unique_alleles) <= 8:
@@ -198,70 +200,70 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     top_5_alleles_to_mark = allele_counts.head(5).index.tolist()
     print(f"Highlighting top 5 alleles: {top_5_alleles_to_mark}")
 
-    # --- Visualization 1: UMAP of FLATTENED SEQUENTIAL latents ---
-    print("Running UMAP on FLATTENED SEQUENTIAL latents...")
-    reducer_seq = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
-    embedding_seq = reducer_seq.fit_transform(latents_seq_flat)
-
-    plt.figure(figsize=(14, 10))
-    
-    # Plot all points with assigned colors
-    for allele in unique_alleles:
-        mask = alleles == allele
-        plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1], 
-                   c=[allele_color_map[allele]], label=allele, 
-                   s=5, alpha=0.7)
-    
-    # Highlight the 5 top alleles with distinct markers
-    for i, allele in enumerate(top_5_alleles_to_mark):
-        mask = alleles == allele
-        markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
-        plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1], 
-                   c='gray', marker=markers[i], s=25, 
-                   edgecolor='black', linewidth=0.3, 
-                   label=f'{allele} (highlighted)')
-    
-    plt.title(f'UMAP of Flattened Sequential Latents ({len(df)} Samples)\nColored by {len(unique_alleles)} Unique Alleles')
-    plt.xlabel('UMAP Dimension 1')
-    plt.ylabel('UMAP Dimension 2')
-    
-    # Create a better legend for scientific publication
-    if len(unique_alleles) > 20:
-        # For many alleles, create a compact legend with multiple columns
-        handles, labels = plt.gca().get_legend_handles_labels()
-        
-        # Separate highlighted alleles from regular alleles
-        highlight_handles = [h for h, l in zip(handles, labels) if 'highlighted' in l]
-        highlight_labels = [l for l in labels if 'highlighted' in l]
-        
-        regular_handles = [h for h, l in zip(handles, labels) if 'highlighted' not in l]
-        regular_labels = [l for l in labels if 'highlighted' not in l]
-        
-        # First legend for highlighted alleles
-        first_legend = plt.legend(highlight_handles, highlight_labels, 
-                                 title='Highlighted Alleles',
-                                 bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.gca().add_artist(first_legend)
-        
-        # Second legend for regular alleles in multiple columns
-        plt.legend(regular_handles, regular_labels, 
-                  title='All Alleles',
-                  bbox_to_anchor=(1.05, 0.5), loc='center left',
-                  ncol=max(1, len(regular_labels) // 30),  # Adjust columns based on count
-                  fontsize=8)
-    else:
-        # For fewer alleles, a single legend is sufficient
-        plt.legend(title='Allele', bbox_to_anchor=(1.05, 1), 
-                  loc='upper left', fontsize=8, frameon=True)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "umap_sequential_latents.png"), dpi=300, bbox_inches='tight')
-    plt.close()
-    print("✓ UMAP plot of sequential latents saved.")
+    # # --- Visualization 1: UMAP of FLATTENED SEQUENTIAL latents ---
+    # print("Running UMAP on FLATTENED SEQUENTIAL latents...")
+    # reducer_seq = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
+    # embedding_seq = reducer_seq.fit_transform(latents_seq_flat)
+    #
+    # plt.figure(figsize=(14, 10))
+    #
+    # # Plot all points with assigned colors
+    # for allele in unique_alleles:
+    #     mask = alleles == allele
+    #     plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1],
+    #                c=[allele_color_map[allele]], label=allele,
+    #                s=5, alpha=0.3)
+    #
+    # # Highlight the 5 top alleles with distinct markers
+    # for i, allele in enumerate(top_5_alleles_to_mark):
+    #     mask = alleles == allele
+    #     markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
+    #     plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1],
+    #                c='gray', marker=markers[i], s=3,
+    #                edgecolor='black', linewidth=0.2,
+    #                label=f'{allele} (highlighted)')
+    #
+    # plt.title(f'UMAP of Flattened Sequential Latents ({len(df)} Samples)\nColored by {len(unique_alleles)} Unique Alleles')
+    # plt.xlabel('UMAP Dimension 1')
+    # plt.ylabel('UMAP Dimension 2')
+    #
+    # # Create a better legend for scientific publication
+    # if len(unique_alleles) > 20:
+    #     # For many alleles, create a compact legend with multiple columns
+    #     handles, labels = plt.gca().get_legend_handles_labels()
+    #
+    #     # Separate highlighted alleles from regular alleles
+    #     highlight_handles = [h for h, l in zip(handles, labels) if 'highlighted' in l]
+    #     highlight_labels = [l for l in labels if 'highlighted' in l]
+    #
+    #     regular_handles = [h for h, l in zip(handles, labels) if 'highlighted' not in l]
+    #     regular_labels = [l for l in labels if 'highlighted' not in l]
+    #
+    #     # First legend for highlighted alleles
+    #     first_legend = plt.legend(highlight_handles, highlight_labels,
+    #                              title='Highlighted Alleles',
+    #                              bbox_to_anchor=(1.05, 1), loc='upper left')
+    #     plt.gca().add_artist(first_legend)
+    #
+    #     # Second legend for regular alleles in multiple columns
+    #     plt.legend(regular_handles, regular_labels,
+    #               title='All Alleles',
+    #               bbox_to_anchor=(1.05, 0.5), loc='center left',
+    #               ncol=max(1, len(regular_labels) // 30),  # Adjust columns based on count
+    #               fontsize=8)
+    # else:
+    #     # For fewer alleles, a single legend is sufficient
+    #     plt.legend(title='Allele', bbox_to_anchor=(1.05, 1),
+    #               loc='upper left', fontsize=8, frameon=True)
+    #
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(out_dir, "umap_sequential_latents.png"), dpi=300, bbox_inches='tight')
+    # plt.close()
+    # print("✓ UMAP plot of sequential latents saved.")
 
     # --- Visualization 2: UMAP of POOLED latents ---
     print("Running UMAP on POOLED latents...")
-    reducer_pooled = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
+    reducer_pooled = umap.UMAP(n_neighbors=10, min_dist=0.1, n_components=2, random_state=42)
     embedding_pooled = reducer_pooled.fit_transform(latents_pooled)
 
     plt.figure(figsize=(14, 10))
@@ -271,14 +273,14 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
         mask = alleles == allele
         plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1], 
                    c=[allele_color_map[allele]], label=allele, 
-                   s=5, alpha=0.7)
+                   s=3, alpha=0.3)
     
     # Highlight the 5 top alleles with distinct markers
     for i, allele in enumerate(top_5_alleles_to_mark):
         mask = alleles == allele
         markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
         plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1], 
-                   c='gray', marker=markers[i], s=25, 
+                   c='gray', marker=markers[i], s=5,
                    edgecolor='black', linewidth=0.3, 
                    label=f'{allele} (highlighted)')
     
@@ -320,38 +322,46 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     plt.close()
     print("✓ UMAP plot of pooled latents saved.")
 
-    # --- Visualization 3: DBSCAN clustering on FLATTENED SEQUENTIAL latents ---
-    print("Running DBSCAN on FLATTENED SEQUENTIAL latents with automated eps estimation...")
-    
-    # --- Step 1: Automate eps estimation using k-distance graph ---
-    min_samples = 10 
+    # --- Visualization 3: DBSCAN clustering on POOLED latents ---
+    print("Running DBSCAN on UMAP-reduced latents for visual consistency...")
+
+    # --- Step 1: Automate eps estimation using k-distance graph on UMAP data ---
+    min_samples = 15  # A fixed, reasonable value for min_samples
+    print(f"Using min_samples: {min_samples}")
+
+    # Calculate distances on the 2D UMAP embedding
     neighbors = NearestNeighbors(n_neighbors=min_samples)
-    neighbors_fit = neighbors.fit(latents_seq_flat)
-    distances, indices = neighbors_fit.kneighbors(latents_seq_flat)
-    
-    k_distances = np.sort(distances[:, min_samples-1], axis=0)
+    neighbors_fit = neighbors.fit(embedding_pooled)
+    distances, indices = neighbors_fit.kneighbors(embedding_pooled)
+
+    k_distances = np.sort(distances[:, min_samples - 1], axis=0)
+
+    # Use KneeLocator to find the "elbow" of the k-distance plot
     kneedle = KneeLocator(range(len(k_distances)), k_distances, curve="convex", direction="increasing")
     estimated_eps = kneedle.elbow_y
-    
+
     if estimated_eps is None:
-        print("Warning: Could not automatically determine eps. Falling back to a default value.")
-        estimated_eps = np.median(k_distances) 
-    
-    print(f"Estimated optimal eps for DBSCAN: {estimated_eps:.4f}")
-    
+        print("Warning: KneeLocator failed to find an elbow. Falling back to 95th percentile of distances.")
+        estimated_eps = np.percentile(k_distances, 95)
+
+    print(f"Estimated DBSCAN eps: {estimated_eps:.4f}")
+
+    # Plot the k-distance graph for manual inspection
     plt.figure(figsize=(10, 6))
     kneedle.plot_knee()
     plt.xlabel("Points (sorted by distance)")
     plt.ylabel(f"Distance to {min_samples}-th nearest neighbor")
-    plt.title("K-Distance Graph for DBSCAN Epsilon Estimation")
-    plt.grid(True, linestyle='--', alpha=0.7)  # Add grid for better readability
+    plt.title("K-Distance Graph for DBSCAN Epsilon Estimation (on UMAP data)")
+    plt.axhline(y=estimated_eps, color='r', linestyle='--', label=f'Selected eps = {estimated_eps:.4f}')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
     plt.savefig(os.path.join(out_dir, "dbscan_k_distance_graph.png"), dpi=300, bbox_inches='tight')
     plt.close()
 
-    # --- Step 2: Run DBSCAN with the estimated eps ---
+    # --- Step 2: Run final DBSCAN with the estimated eps ---
     dbscan = DBSCAN(eps=estimated_eps, min_samples=min_samples, n_jobs=-1)
-    clusters = dbscan.fit_predict(latents_seq_flat)
-    
+    clusters = dbscan.fit_predict(embedding_pooled)
+
     n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
     n_noise = np.sum(clusters == -1)
     print(f"✓ DBSCAN found {n_clusters} clusters and {n_noise} noise points.")
@@ -362,42 +372,36 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     df.to_parquet(output_parquet_path)
     print(f"✓ Saved dataset with cluster IDs to {output_parquet_path}")
 
-
     # --- Step 4: Visualize the clustering results ---
     plt.figure(figsize=(14, 10))
-    
     # Create publication-friendly color map for clusters
     unique_clusters = sorted(set(clusters))
-    
     if len(unique_clusters) <= 8:
         # For small number of clusters, use a qualitative colormap
         cluster_colors = plt.cm.Dark2(np.linspace(0, 1, len(unique_clusters)))
     else:
         # For more clusters, use a sequential/diverging colormap
         cluster_colors = plt.cm.viridis(np.linspace(0, 1, len(unique_clusters)))
-        
     # Make noise points gray
     if -1 in unique_clusters:
         noise_idx = unique_clusters.index(-1)
         cluster_colors[noise_idx] = [0.7, 0.7, 0.7, 0.5]  # Light gray with lower alpha
-        
     cluster_color_map = {cluster: cluster_colors[i] for i, cluster in enumerate(unique_clusters)}
-    
     # Plot all points colored by cluster
     for cluster in unique_clusters:
         mask = clusters == cluster
         label = f'Cluster {cluster}' if cluster != -1 else 'Noise'
-        plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1], 
-                   c=[cluster_color_map[cluster]], label=label, 
-                   s=5, alpha=0.7)
-    
+        plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1],
+                   c=[cluster_color_map[cluster]], label=label,
+                   s=3, alpha=0.3)
+
     # Highlight the 5 top alleles with distinct markers
     for i, allele in enumerate(top_5_alleles_to_mark):
         mask = alleles == allele
         markers = ['*', 'D', 'X', 's', 'p'] 
-        plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1], 
-                   c='gray', marker=markers[i], s=25, 
-                   edgecolor='black', linewidth=0.3, 
+        plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1],
+                   c='gray', marker=markers[i], s=5,
+                   edgecolor='black', linewidth=0.3,
                    label=f'{allele} (highlighted)')
     
     plt.title(f'DBSCAN Clustering of Sequential Latents (Visualized with UMAP)\nFound {n_clusters} clusters, {n_noise} noise points')
@@ -431,34 +435,34 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     print("✓ DBSCAN clustering plot on sequential latents saved.")
 
 
-    # --- Visualization 3: Show latent of one sample ---
-    plt.figure(figsize=(12, 6))
-    sns.heatmap(latents_seq[0], cmap='viridis')
-    plt.title(f'Latent Representation of Sample 0 (Allele: {alleles[0]})')
-    plt.xlabel('Embedding Dimension'); plt.ylabel('Sequence Position')
-    plt.savefig(os.path.join(out_dir, "single_sample_latent.png"))
-    plt.close()
-    print("✓ Single latent plot saved.")
-
-    # --- Visualization 4: Compare mean latents for top 5 alleles ---
-    top_5_alleles = allele_counts.nlargest(5).index.tolist()
-    mean_latents = []
-    for allele_name in top_5_alleles:
-        indices = df[df['mhc_embedding_key'].apply(clean_key) == allele_name].index
-        mean_latent = latents_seq[indices].mean(axis=0)
-        mean_latents.append(mean_latent)
-
-    fig, axes = plt.subplots(len(top_5_alleles), 1, figsize=(10, 2 * len(top_5_alleles)), sharex=True)
-    fig.suptitle('Mean Latent Representation per Allele', fontsize=16)
-    for i, allele_name in enumerate(top_5_alleles):
-        sns.heatmap(mean_latents[i], ax=axes[i], cmap='viridis')
-        axes[i].set_title(f"{allele_name} (n={allele_counts[allele_name]})")
-        axes[i].set_ylabel('Sequence Pos')
-    axes[-1].set_xlabel('Embedding Dim')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(os.path.join(out_dir, "mean_latents_comparison.png"), dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✓ Mean latents comparison plot saved.")
+    # # --- Visualization 3: Show latent of one sample ---
+    # plt.figure(figsize=(12, 6))
+    # sns.heatmap(latents_seq[0], cmap='viridis')
+    # plt.title(f'Latent Representation of Sample 0 (Allele: {alleles[0]})')
+    # plt.xlabel('Embedding Dimension'); plt.ylabel('Sequence Position')
+    # plt.savefig(os.path.join(out_dir, "single_sample_latent.png"))
+    # plt.close()
+    # print("✓ Single latent plot saved.")
+    #
+    # # --- Visualization 4: Compare mean latents for top 5 alleles ---
+    # top_5_alleles = allele_counts.nlargest(5).index.tolist()
+    # mean_latents = []
+    # for allele_name in top_5_alleles:
+    #     indices = df[df['mhc_embedding_key'].apply(clean_key) == allele_name].index
+    #     mean_latent = latents_seq[indices].mean(axis=0)
+    #     mean_latents.append(mean_latent)
+    #
+    # fig, axes = plt.subplots(len(top_5_alleles), 1, figsize=(10, 2 * len(top_5_alleles)), sharex=True)
+    # fig.suptitle('Mean Latent Representation per Allele', fontsize=16)
+    # for i, allele_name in enumerate(top_5_alleles):
+    #     sns.heatmap(mean_latents[i], ax=axes[i], cmap='viridis')
+    #     axes[i].set_title(f"{allele_name} (n={allele_counts[allele_name]})")
+    #     axes[i].set_ylabel('Sequence Pos')
+    # axes[-1].set_xlabel('Embedding Dim')
+    # plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # plt.savefig(os.path.join(out_dir, "mean_latents_comparison.png"), dpi=150, bbox_inches='tight')
+    # plt.close()
+    # print("✓ Mean latents comparison plot saved.")
 
     # --- Visualizations 5 & 6: Show one sample of peptide/MHC input and masks ---
     sample_idx = 0
@@ -530,31 +534,52 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     print("\n✓ Visualizations complete.")
 
 # Helper function for inference and visualization
-def run_inference_and_visualizations(df, dataset_name, original_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size=32, embed_dim=32):
+def run_inference_and_visualizations(df, dataset_name, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size=32, embed_dim=32):
+    """
+    Runs inference on a dataset, saves latents to memory-mapped files, and generates visualizations.
+    """
     print(f"\n--- Running Inference & Visualization on {dataset_name.upper()} SET ---")
     dataset_out_dir = os.path.join(out_dir, f"visuals_{dataset_name}")
     os.makedirs(dataset_out_dir, exist_ok=True)
 
     indices = np.arange(len(df))
-    # These will store the outputs from the model
-    latents_seq = np.zeros((len(df), max_mhc_len, embed_dim), np.float32)
-    latents_pooled = np.zeros((len(df), embed_dim), np.float32)
-    
+
+    # Define paths for memory-mapped arrays
+    #latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.mmap")
+    latents_pooled_path = os.path.join(dataset_out_dir, f"mhc_latents_pooled_{dataset_name}.mmap")
+
+    # Create memory-mapped arrays on disk
+    #latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df), max_mhc_len, embed_dim))
+    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df), embed_dim))
+
+    print(f"Processing {len(df)} samples in batches...")
     for step in range(0, len(indices), batch_size):
         batch_idx = indices[step:step + batch_size]
         batch_df = df.iloc[batch_idx]
         batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+
+        # Run model inference
         true_preds = enc_dec(batch_data, training=False)
-        latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
+
+        # Write batch results directly to memory-mapped arrays
+        #latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
         latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
 
-    # Save the sequential latents (for heatmaps, etc.)
-    latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.npy")
-    np.save(latents_seq_path, latents_seq)
-    print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
+        # Flush changes to disk periodically to ensure data is saved
+        if step % (batch_size * 10) == 0:
+            #latents_seq.flush()
+            latents_pooled.flush()
 
-    # Pass both latent types to the visualization function
-    run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
+    # Final flush to save any remaining data
+    #latents_seq.flush()
+    latents_pooled.flush()
+
+    #print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
+    print(f"✓ Pooled latents for {dataset_name} set saved to {latents_pooled_path}")
+
+    # Now, call the visualization function with the paths to the memory-mapped files
+    run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
+
 
 def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str, seq_csv: str, embd_key_path: str,
           out_dir: str, epochs: int = 3, batch_size: int = 32,
@@ -714,12 +739,59 @@ def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str
     print(f"\nLoading best weights from {best_weights_path} for final analysis.")
     enc_dec.load_weights(best_weights_path)
 
-    # Run analysis on all three datasets
-    run_inference_and_visualizations(df_train, "train", train_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
-    run_inference_and_visualizations(df_val, "validation", validation_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
-    run_inference_and_visualizations(df_test, "test", test_path, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+    # Run analysis on all three datasets using memory-mapped arrays
+    run_inference_and_visualizations(df_train, "train", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+    run_inference_and_visualizations(df_val, "validation", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+    run_inference_and_visualizations(df_test, "test", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
 
-    
+
+def run_inference_and_visualizations(df, dataset_name, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size=32, embed_dim=32):
+    """
+    Runs inference on a dataset, saves latents to memory-mapped files, and generates visualizations.
+    """
+    print(f"\n--- Running Inference & Visualization on {dataset_name.upper()} SET ---")
+    dataset_out_dir = os.path.join(out_dir, f"visuals_{dataset_name}")
+    os.makedirs(dataset_out_dir, exist_ok=True)
+
+    indices = np.arange(len(df))
+
+    # Define paths for memory-mapped arrays
+    #latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.mmap")
+    latents_pooled_path = os.path.join(dataset_out_dir, f"mhc_latents_pooled_{dataset_name}.mmap")
+
+    # Create memory-mapped arrays on disk
+    #latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df), max_mhc_len, embed_dim))
+    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df), embed_dim))
+
+    print(f"Processing {len(df)} samples in batches...")
+    for step in range(0, len(indices), batch_size):
+        batch_idx = indices[step:step + batch_size]
+        batch_df = df.iloc[batch_idx]
+        batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+
+        # Run model inference
+        true_preds = enc_dec(batch_data, training=False)
+
+        # Write batch results directly to memory-mapped arrays
+        #latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
+        latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
+
+        # Flush changes to disk periodically to ensure data is saved
+        if step % (batch_size * 10) == 0:
+            #latents_seq.flush()
+            latents_pooled.flush()
+
+    # Final flush to save any remaining data
+    #latents_seq.flush()
+    latents_pooled.flush()
+
+    #print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
+    print(f"✓ Pooled latents for {dataset_name} set saved to {latents_pooled_path}")
+
+    # Now, call the visualization function with the paths to the memory-mapped files
+    run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
+
+
 def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
           out_dir: str, batch_size: int = 256, df_name="inference"):
     """
@@ -743,7 +815,7 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
         max_mhc_len = config['max_mhc_len']
         embed_dim = config['embed_dim']
         heads = config['heads']
-        noise_std = config.get('noise_std', 0.0) # Default to 0.0 if not in older configs
+        noise_std = config.get('noise_std', 0.0)  # Default to 0.0 if not in older configs
     except KeyError as e:
         raise ValueError(f"Missing required parameter in model_config.json: {e}")
 
@@ -751,7 +823,7 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
     seq_map = pd.read_csv(seq_csv, index_col="allele")["mhc_sequence"].to_dict()
     embed_map = pd.read_csv(embd_key_path, index_col="key")["mhc_sequence"].to_dict()
     seq_map = {clean_key(k): v for k, v in seq_map.items()}
-    
+
     df_infer = pq.ParquetFile(parquet_path).read().to_pandas()
     print(f"Loaded {len(df_infer)} samples for inference from {parquet_path}")
 
@@ -773,7 +845,7 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
     # Load best weights saved during training
     weights_path = os.path.join(out_dir, "best_enc_dec.weights.h5")
     if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Best model weights not found at {weights_path}. Please train the model first.")
+        raise FileNotFoundError(f"Best model weights not found at {weights_path} Please train the model first.")
     enc_dec.load_weights(weights_path)
     print(f"✓ Model weights loaded from {weights_path}")
 
@@ -784,24 +856,60 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
     os.makedirs(infer_out_dir, exist_ok=True)
 
     indices = np.arange(len(df_infer))
-    latents_seq = np.zeros((len(df_infer), max_mhc_len, embed_dim), np.float32)
-    latents_pooled = np.zeros((len(df_infer), embed_dim), np.float32)
-    
-    for step in range(0, len(indices), batch_size):
+
+    # Define paths for memory-mapped arrays
+    #latents_seq_path = os.path.join(infer_out_dir, "mhc_latents_sequential_infer.mmap")
+    latents_pooled_path = os.path.join(infer_out_dir, "mhc_latents_pooled_infer.mmap")
+
+    # Create memory-mapped arrays
+    #latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df_infer), max_mhc_len, embed_dim))
+    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df_infer), embed_dim))
+
+    print(f"Processing {len(df_infer)} samples for inference in batches...")
+    for step in tqdm(range(0, len(indices), batch_size), desc="Inference Progress"):
         batch_idx = indices[step:step + batch_size]
         batch_df = df_infer.iloc[batch_idx]
         batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+
+        # TODO TEMP - DEBUG - Remove LATER
+        # Save all batches into a single HDF5 file by appending slices
+        import h5py  # local import to avoid global dependency issues
+        batch_data_path = os.path.join(infer_out_dir, "batch_data.h5")
+        start, end = step, step + len(batch_idx)
+        with h5py.File(batch_data_path, "a") as h5f:
+            if "pep_onehot" not in h5f:
+                N = len(df_infer)
+                h5f.create_dataset("pep_onehot", (N, max_pep_len, 21), dtype="float32")
+                h5f.create_dataset("pep_mask", (N, max_pep_len), dtype="float32")
+                h5f.create_dataset("mhc_emb", (N, max_mhc_len, 1152), dtype="float32")
+                h5f.create_dataset("mhc_mask", (N, max_mhc_len), dtype="float32")
+                h5f.create_dataset("mhc_onehot", (N, max_mhc_len, 21), dtype="float32")
+            h5f["pep_onehot"][start:end] = batch_data["pep_onehot"].numpy()
+            h5f["pep_mask"][start:end] = batch_data["pep_mask"].numpy()
+            h5f["mhc_emb"][start:end] = batch_data["mhc_emb"].numpy()
+            h5f["mhc_mask"][start:end] = batch_data["mhc_mask"].numpy()
+            h5f["mhc_onehot"][start:end] = batch_data["mhc_onehot"].numpy()
+
         # Run model in inference mode
         true_preds = enc_dec(batch_data, training=False)
-        latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
+
+
+
+        # Write results to memory-mapped arrays
+        #latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
         latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
 
-    latents_seq_path = os.path.join(infer_out_dir, "mhc_latents_sequential_infer.npy")
-    np.save(latents_seq_path, latents_seq)
-    print(f"✓ Sequential latents from inference saved to {latents_seq_path}")
+    # Flush to ensure all data is written to disk
+    #latents_seq.flush()
+    latents_pooled.flush()
+
+    #print(f"✓ Sequential latents from inference saved to {latents_seq_path}")
+    print(f"✓ Pooled latents from inference saved to {latents_pooled_path}")
 
     # --- CALL THE VISUALIZATION FUNCTION ---
-    run_visualizations(df_infer, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, infer_out_dir, df_name)
+    # Pass the paths to the memory-mapped files
+    run_visualizations(df_infer, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map,
+                       embed_map, infer_out_dir, df_name)
     print("\n✓ Inference and visualization complete.")
 
 
@@ -828,102 +936,152 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
     print("\n--- Starting Negative Sample Generation ---")
 
     # Load the positive samples
-    positives_train = pd.read_parquet(positives_train)
-    positives_validation = pd.read_parquet(positives_validation)
+    positives_train_df = pd.read_parquet(positives_train)
+    positives_validation_df = pd.read_parquet(positives_validation)
 
-    positives_comb = pd.concat([positives_train, positives_validation], axis=0)
+    positives_comb = pd.concat([positives_train_df, positives_validation_df], axis=0, ignore_index=True)
+
+    # save the combined positives dataset
+    positives_comb_path = os.path.join(model_out_dir, "positives_combined.parquet")
+    positives_comb.to_parquet(positives_comb_path, index=False)
+    print(f"✓ Combined positives dataset saved to {positives_comb_path}")
 
     # 1. Run inference and clustering on the entire dataset
     # The `infer` function will create a subdirectory and save a parquet file with cluster IDs.
     df_name = "positives_combined"
-    infer(
-        parquet_path=positives_comb,
-        embed_npz=embed_npz,
-        seq_csv=seq_csv,
-        embd_key_path=embd_key_path,
-        out_dir=model_out_dir,
-        batch_size=batch_size,
-        df_name=df_name
-    )
-
-    # 2. Load the clustered data and the corresponding latent vectors
     infer_dir = os.path.join(model_out_dir, df_name)
     clustered_df_path = os.path.join(infer_dir, f"{df_name}_with_clusters.parquet")
-    latents_path = os.path.join(infer_dir, "mhc_latents_sequential_infer.npy") # TODO check
+
+    if not os.path.exists(clustered_df_path):
+        print(f"Clustered data not found at {clustered_df_path}. Running inference first...")
+        infer(
+            parquet_path=positives_comb_path,
+            embed_npz=embed_npz,
+            seq_csv=seq_csv,
+            embd_key_path=embd_key_path,
+            out_dir=model_out_dir,
+            batch_size=batch_size,
+            df_name=df_name
+        )
+    else:
+        print(f"Found existing clustered data at {clustered_df_path}.")
+
+    # 2. Load the clustered data and the corresponding latent vectors
+    latents_path = os.path.join(infer_dir, "mhc_latents_pooled_infer.mmap")
 
     if not os.path.exists(clustered_df_path) or not os.path.exists(latents_path):
-        raise FileNotFoundError("Clustered data or latent vectors not found. Ensure the `infer` function ran successfully.")
+        raise FileNotFoundError(f"Required files for negative generation not found in {infer_dir}")
 
     df_clustered = pd.read_parquet(clustered_df_path)
-    # Let's assume `run_inference_and_visualizations` saves pooled latents.
-    # For now, let's re-calculate the pooled latent as the mean of the sequential one.
-    latents_seq = np.load(latents_path)
 
-    print(f"✓ Loaded {len(df_clustered)} samples with cluster IDs.")
+    # Load the pooled latents from the memory-mapped file
+    # We need to know the shape, which we can get from the model config
+    config_path = os.path.join(model_out_dir, "model_config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Model config not found at {config_path}")
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    embed_dim = config['embed_dim']
+
+    # Correct the shape to be 2D: (n_samples, embed_dim)
+    latents_pooled = np.memmap(latents_path, dtype='float32', mode='r', shape=(len(df_clustered), embed_dim))
+    # save mmap configs
+    mmap_config_path = os.path.join(infer_dir, "mmap_config.json")
+    mmap_config = {
+        'latents_shape': latents_pooled.shape,
+        'embed_dim': embed_dim,
+        'max_pep_len': config['max_pep_len'],
+        'max_mhc_len': config['max_mhc_len']
+    }
+    with open(mmap_config_path, 'w') as f:
+        json.dump(mmap_config, f, indent=4)
+    print(f"✓ Saved memory-mapped latents configuration to {mmap_config_path}")
+
+    print(f"✓ Loaded {len(df_clustered)} samples with cluster IDs and memory-mapped latents.")
 
     # Exclude noise points from negative generation logic
-    df_clustered = df_clustered[df_clustered['cluster_id'] != -1].copy()
-    print(f"  Proceeding with {len(df_clustered)} non-noise samples.")
+    non_noise_mask = df_clustered['cluster_id'] != -1
+    df_non_noise = df_clustered[non_noise_mask].copy()
+    latents_non_noise = latents_pooled[non_noise_mask]
+    print(f"  Proceeding with {len(df_non_noise)} non-noise samples.")
+
+    if len(df_non_noise) == 0:
+        print("Warning: No clusters found (all points are noise). Cannot generate negatives.")
+        return
 
     # 3. Calculate the centroid for each cluster
-    cluster_ids = df_clustered['cluster_id'].unique()
+    print("Calculating cluster centroids...")
+    cluster_ids = sorted(df_non_noise['cluster_id'].unique())
     cluster_centroids = {}
+
     for cid in cluster_ids:
-        mask = df_clustered['cluster_id'] == cid
-        cluster_centroids[cid] = latents_seq[mask].mean(axis=0)
-    
+        cluster_mask = df_non_noise['cluster_id'] == cid
+        cluster_centroids[cid] = latents_non_noise[cluster_mask].mean(axis=0)
+
     print(f"✓ Calculated centroids for {len(cluster_centroids)} clusters.")
 
+    if len(cluster_centroids) < 2:
+        print("Warning: Fewer than 2 clusters found. Cannot determine distant clusters for negative sampling.")
+        return
+
     # 4. For each cluster, find the most distant cluster
-    
     sorted_cids = sorted(cluster_centroids.keys())
     centroid_matrix = np.array([cluster_centroids[cid] for cid in sorted_cids])
     dist_matrix = cdist(centroid_matrix, centroid_matrix, metric='euclidean')
-    
+
+    # Visualize and save the distance matrix
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(dist_matrix, xticklabels=sorted_cids, yticklabels=sorted_cids, cmap="viridis", annot=True, fmt=".2f")
+    plt.title("Centroid Distance Matrix Between Clusters")
+    plt.xlabel("Cluster ID")
+    plt.ylabel("Cluster ID")
+    plt.tight_layout()
+    dist_matrix_path = os.path.join(model_out_dir, "cluster_distance_matrix.png")
+    plt.savefig(dist_matrix_path, dpi=300)
+    plt.close()
+    print(f"✓ Saved cluster distance matrix plot to {dist_matrix_path}")
+
     # Set diagonal to a large value to ignore self-distance
-    np.fill_diagonal(dist_matrix, np.inf)
-    
+    np.fill_diagonal(dist_matrix, -np.inf)  # Use -inf for argmax
+
     # Find the index of the most distant cluster for each cluster
-    farthest_cluster_indices = np.argmin(dist_matrix, axis=1)
-    
+    farthest_cluster_indices = np.argmax(dist_matrix, axis=1)
+
     farthest_cluster_map = {
-        source_cid: sorted_cids[farthest_cluster_indices[i]]
-        for i, source_cid in enumerate(sorted_cids)
+        own_cid: sorted_cids[farthest_idx]
+        for own_cid, farthest_idx in zip(sorted_cids, farthest_cluster_indices)
     }
     print("✓ Determined the most distant cluster for each cluster.")
 
     # 5. Generate negative samples
     new_negatives = []
     # Get a representative set of alleles from each cluster
-    alleles_per_cluster = df_clustered.groupby('cluster_id')['mhc_embedding_key'].apply(
-        lambda x: x.unique().tolist()
-    ).to_dict()
+    alleles_per_cluster = df_non_noise.groupby('cluster_id')['mhc_embedding_key'].apply(
+        lambda x: list(set(x))
+    )
 
-    for _, row in df_clustered.iterrows():
-        source_cluster = row['cluster_id']
-        target_cluster = farthest_cluster_map.get(source_cluster)
+    for _, row in df_non_noise.iterrows():
+        current_cluster = row['cluster_id']
+        target_cluster = farthest_cluster_map[current_cluster]
 
-        if target_cluster is None:
-            continue
-
-        # Get available alleles from the target cluster
+        # Get potential alleles from the target cluster
         target_alleles = alleles_per_cluster.get(target_cluster)
         if not target_alleles:
             continue
-            
-        # Pick a random allele from the target cluster
-        new_mhc_key = np.random.choice(target_alleles)
 
-        # Create a new negative sample record
-        new_negatives.append({
-            'long_mer': row['long_mer'],
-            'mhc_embedding_key': new_mhc_key,
-            'origin_peptide': row['long_mer'],
-            'origin_mhc': row['mhc_embedding_key'],
-            'origin_cluster': source_cluster,
-            'target_cluster': target_cluster,
-            'assigned_label': 0  # Explicitly label as negative
-        })
+        # Choose a random allele from the target cluster
+        new_allele = np.random.choice(target_alleles)
+
+        # Create the new negative sample row
+        new_row = row.copy()
+        new_row['mhc_embedding_key'] = new_allele.replace("*", "").replace(":", "")
+        new_row['allele'] = new_allele
+        new_row['assigned_label'] = 0  # Explicitly set as non-binder
+        new_negatives.append(new_row)
+
+    if not new_negatives:
+        print("Warning: Could not generate any negative samples.")
+        return
 
     df_negatives = pd.DataFrame(new_negatives)
     print(f"✓ Generated {len(df_negatives)} new negative samples.")
@@ -931,57 +1089,78 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
     # 6. Save the new dataset
     negatives_output_path = os.path.join(model_out_dir, f"generated_negatives{MHC_CLASS}.parquet")
     df_negatives.to_parquet(negatives_output_path, index=False)
+
+    # Save allele names to a text file, separated by commas
+    alleles_output_path = os.path.join(model_out_dir, f"generated_negatives{MHC_CLASS}_alleles.txt")
+    if 'mhc_embedding_key' in df_negatives.columns:
+        alleles = df_negatives['mhc_embedding_key'].unique()
+        with open(alleles_output_path, 'w') as f:
+            f.write(",".join(map(str, alleles)))
+        print(f"✓ Saved allele names to {alleles_output_path}")
+    else:
+        print("Warning: 'mhc_embedding_key' column not found in negatives, skipping allele file generation.")
+
+    # Save peptide sequences to a FASTA file
+    fasta_output_path = os.path.join(model_out_dir, f"generated_negatives{MHC_CLASS}_peptides.fasta")
+    with open(fasta_output_path, 'w') as f:
+        for i, peptide in enumerate(df_negatives['long_mer']):
+            f.write(f">{i}\n{peptide}\n")
+    print(f"✓ Saved peptide sequences to {fasta_output_path}")
     print(f"✓ Saved generated negatives to {negatives_output_path}")
 
     # save positives_dataset with negatives
-    positives_comb = pd.concat([df_clustered, df_negatives], axis=0)
-    positives_comb_path = os.path.join(model_out_dir, f"binding_affinity_dataset_with_swapped_negatives{MHC_CLASS}.parquet")
-    positives_comb.to_parquet(positives_comb_path, index=False)
-    print(f"✓ Saved whole dataset to {positives_comb_path}")
+    # Use original positives, not the clustered/filtered one
+    final_dataset = pd.concat([positives_comb, df_negatives], ignore_index=True)
+    # drop cluster_id col
+    final_dataset = final_dataset.drop(columns=['cluster_id'], errors='ignore')
+    final_dataset_path = os.path.join(model_out_dir,
+                                      f"binding_affinity_dataset_with_swapped_negatives{MHC_CLASS}.parquet")
+    final_dataset.to_parquet(final_dataset_path, index=False)
+    print(f"✓ Saved combined dataset with positives and negatives to {final_dataset_path}")
 
 
 if __name__ == "__main__":
     # Suppress verbose TensorFlow logging, but keep errors.
-    MHC_CLASS = 2
+    MHC_CLASS = 1
     noise_std = 0.1
     heads = 4
     embed_dim = 96
-    batch_size = 512
+    batch_size = 32
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     train_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_train.parquet"
     validate_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_val.parquet"
     test_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_test.parquet"
-    embed_npz_path = f"../data/ESM/esmc_600m/PMGen_whole_seq/mhc{MHC_CLASS}_encodings.npz"
-    embd_key_path = f"../data/ESM/esmc_600m/PMGen_whole_seq/mhc{MHC_CLASS}_encodings.csv"
+    embed_npz_path = f"/media/amirreza/lasse/ESM/esmc_600m/PMGen_whole_seq/mhc{MHC_CLASS}_encodings.npz"
+    embd_key_path = f"/media/amirreza/lasse/ESM/esmc_600m/PMGen_whole_seq/mhc{MHC_CLASS}_encodings.csv"
     seq_csv_path = f"../data/alleles/aligned_PMGen_class_{MHC_CLASS}.csv"
     base_out_dir = f"../results/run_PMClust_ns_{noise_std}_hds_{heads}_zdim_{embed_dim}_L{MHC_CLASS}/"
     whole_dataset = f"../../data/binding_affinity_data/concatenated_class{MHC_CLASS}_all.parquet"
 
 
     # Training
-    counter = 1
-    while True:
-        out_dir = f"{base_out_dir}{counter}"
-        if not os.path.exists(out_dir):
-            break
-        counter += 1
-    os.makedirs(out_dir, exist_ok=True)
+    # counter = 1
+    # while True:
+    #     out_dir = f"{base_out_dir}{counter}"
+    #     if not os.path.exists(out_dir):
+    #         break
+    #     counter += 1
+    # os.makedirs(out_dir, exist_ok=True)
 
-    train(
-        train_path=train_path,
-        validation_path=validate_path,
-        test_path=test_path,
-        embed_npz=embed_npz_path,
-        seq_csv=seq_csv_path,
-        embd_key_path=embd_key_path,
-        out_dir=out_dir,
-        epochs=4,
-        batch_size=batch_size,
-        lr=1e-5,
-        embed_dim=96,
-        heads=4,
-        noise_std=noise_std
-    )
+    # train(
+    #     train_path=train_path,
+    #     validation_path=validate_path,
+    #     test_path=test_path,
+    #     embed_npz=embed_npz_path,
+    #     seq_csv=seq_csv_path,
+    #     embd_key_path=embd_key_path,
+    #     out_dir=out_dir,
+    #     epochs=4,
+    #     batch_size=batch_size,
+    #     lr=1e-5,
+    #     embed_dim=96,
+    #     heads=4,
+    #     noise_std=noise_std
+    # )
 
     # out_dir = f"{base_out_dir}4"
     # infer(
@@ -994,5 +1173,14 @@ if __name__ == "__main__":
     #     df_name="inference_validation"
     # )
 
+    out_dir = f"../pretrained/mhc1_pmclust/"
     # generate negatives
-    generate_negatives(model_out_dir=model_out_dir, whole_dataset_pq=whole_dataset_path, embed_npz=embed_npz_path, seq_csv=seq_csv_path, embd_key_path=embd_key_path, batch_size=batch_size)
+    generate_negatives(
+        model_out_dir=out_dir,
+        positives_train=train_path,
+        positives_validation=validate_path,
+        embed_npz=embed_npz_path,
+        seq_csv=seq_csv_path,
+        embd_key_path=embd_key_path,
+        batch_size=batch_size
+    )
