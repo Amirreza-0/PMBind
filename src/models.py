@@ -16,11 +16,13 @@ from tensorflow.keras import layers
 import matplotlib.pyplot as plt
 import seaborn as sns
 from keras.layers import Conv1D
+
 from utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
                        ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict,
                        SelfAttentionWith2DMask, AddGaussianNoise, RotaryPositionalEncoding,
                        SubtractLayer, SubtractAttentionLayer, MaskedCategoricalCrossentropy,
-                       masked_categorical_crossentropy, RotaryPositionalEncoding)
+                       masked_categorical_crossentropy, RotaryPositionalEncoding,
+                        GlobalSTDPooling1D,GlobalMeanPooling1D)
 
 
 MASK_TOKEN = -1.0
@@ -266,11 +268,13 @@ def pmclust_subtract(max_pep_len: int,
     pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
     pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
     pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
+    pep = layers.LayerNormalization(name="pep_norm1")(pep)
     pep = layers.Dropout(0.1, name="pep_Dropout1")(pep)
 
     mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
     mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
     mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
+    mhc = layers.LayerNormalization(name="mhc_norm1")(mhc)
     mhc = layers.Dropout(0.1, name="mhc_Dropout1")(mhc)
 
     # -------------------------------------------------------------------
@@ -307,15 +311,15 @@ def pmclust_subtract(max_pep_len: int,
     # -------------------------------------------------------------------
     # RECONSTRUCTION  HEADS
     # -------------------------------------------------------------------
-    latent_sequence = layers.Dense(emb_dim*max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(mhc_subtracted_p_attn)
+    latent_sequence = layers.Dense(emb_dim * max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(
+        mhc_subtracted_p_attn)
     latent_sequence = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_sequence)
-    latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence) # Shape: (B, M, D)
+    latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence)  # Shape: (B, M, D)
 
     # --- Latent Vector for Clustering (pooled) ---
-    latent_vector = layers.GlobalAveragePooling1D(name="gap_latent")(latent_sequence) # Shape: (B, D)
-    latent_vector = layers.Dense(emb_dim * 2, activation='relu', name='latent_dense2')(latent_vector)
-    latent_vector = layers.Dropout(0.2, name='latent_vector_dropout')(latent_vector)
-    latent_vector = layers.Dense(emb_dim, activation='relu', name='latent_vector_output')(latent_vector) # Shape: (B, D)
+    avg_pooled = GlobalMeanPooling1D(name="avg_pooled")(latent_sequence)  # Shape: (B, D)
+    std_pooled = GlobalSTDPooling1D(name="std_pooled")(latent_sequence)
+    latent_vector = layers.Concatenate(name="latent_vector_concat", axis=-1)([avg_pooled, std_pooled])  # Shape: (B, D*2)
 
     # --- Reconstruction Heads ---
     mhc_recon_head = layers.Dropout(0.2, name='latent_mhc_dropout2')(latent_sequence)
@@ -323,8 +327,8 @@ def pmclust_subtract(max_pep_len: int,
     pep_recon = layers.Dense(emb_dim, activation='relu', name='pep_latent')(peptide_cross_att)
     pep_recon = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
 
-    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon]) #(B,P,42)
-    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon]) #(B,M,42)
+    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon])  # (B,P,42)
+    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon])  # (B,M,42)
 
     # -------------------------------------------------------------------
     # MODELS
@@ -334,17 +338,17 @@ def pmclust_subtract(max_pep_len: int,
                           {"pep_ytrue_ypred": pep_out,
                            "mhc_ytrue_ypred": mhc_out,
                           "cross_latent": latent_sequence,
-                          "latent_vector": latent_vector,
-                            "attention_scores_CA": mhc_subtracted_p_attn_scores},
+                            "latent_vector": latent_vector,
+                            "attention_scores_CA": peptide_cross_attn_scores},
                           name="encoder_decoder")
 
-    loss_fn = masked_categorical_crossentropy
-
-    enc_dec.compile(
-        optimizer=keras.optimizers.Adam(1e-4),
-        loss={"pep_ytrue_ypred": loss_fn,
-              "mhc_ytrue_ypred": loss_fn},
-    )
+    # loss_fn = masked_categorical_crossentropy
+    #
+    # enc_dec.compile(
+    #     optimizer=keras.optimizers.Adam(1e-4),
+    #     loss={"pep_ytrue_ypred": loss_fn,
+    #           "mhc_ytrue_ypred": loss_fn},
+    # )
     return enc_dec
 
 
