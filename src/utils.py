@@ -1611,6 +1611,50 @@ def create_k_fold_leave_one_cluster_out_stratified_cv(
 
     return folds
 
+class GlobalSTDPooling1D(layers.Layer):
+    """
+    Global standard deviation pooling layer.
+    Computes the standard deviation across the last axis (features).
+    """
+    def __init__(self, name="global_std_pooling_", mask_token=-1, pad_token=-2, **kwargs):
+        super(GlobalSTDPooling1D, self).__init__(**kwargs)
+        self.name = name
+
+    def call(self, input_tensor, mask=None):
+        """
+        Computes the global standard deviation pooling over the input tensor.
+        :param input_tensor:
+        :param mask:
+        :return:
+        """
+        # inputs: (B, N, D)
+        stddev = tf.math.reduce_std(
+            input_tensor, axis=-1, keepdims=False
+        )
+        return stddev  # (B, D)
+
+class GlobalMeanPooling1D(layers.Layer):
+    """
+    Global mean pooling layer.
+    Computes the mean across the last axis (features).
+    """
+    def __init__(self, name="global_mean_pooling_", mask_token=-1, pad_token=-2, **kwargs):
+        super(GlobalMeanPooling1D, self).__init__(**kwargs)
+        self.name = name
+
+    def call(self, input_tensor, mask=None):
+        """
+        Computes the global mean pooling over the input tensor.
+        :param input_tensor:
+        :param mask:
+        :return:
+        """
+        # inputs: (B, N, D)
+        mean = tf.math.reduce_mean(
+            input_tensor, axis=-1, keepdims=False
+        )
+        return mean  # (B, D)
+
 # Usage example
 #
 # df_analysis = pd.read_csv("analysis_dataset_with_clusters.csv")
