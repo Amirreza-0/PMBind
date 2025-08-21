@@ -145,326 +145,243 @@ def rows_to_tensors(rows: pd.DataFrame, max_pep_len: int, max_mhc_len: int, seq_
     return {k: tf.convert_to_tensor(v) for k, v in batch_data.items()}
 
 
-def run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, dataset_name: str):
+def _plot_umap(
+        embedding: np.ndarray,
+        labels: pd.Series,
+        color_map: dict,
+        title: str,
+        filename: str,
+        alleles_to_highlight: list = None,
+        highlight_labels_series: pd.Series = None,
+):
     """
-    Generates and saves a series of visualizations for model analysis.
+    Helper function to create and save a UMAP plot in a scientific paper format.
+
+    Args:
+        embedding: The 2D UMAP embedding data.
+        labels: A pandas Series of labels for coloring the points (e.g., alleles or clusters).
+        color_map: A dictionary mapping labels to colors.
+        title: The main title for the plot.
+        filename: The full path to save the plot image.
+        alleles_to_highlight: A list of specific alleles to highlight with distinct markers.
+        highlight_labels_series: A pandas Series with the true labels used for highlighting.
+                                 If None, `labels` will be used.
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(14, 10))
+
+    unique_labels = sorted(labels.unique())
+
+    # Plot all data points first
+    for label in unique_labels:
+        mask = (labels == label)
+        # Use a default gray color if a label is not in the color map (e.g., noise)
+        color = color_map.get(label, [0.5, 0.5, 0.5, 0.5])
+        ax.scatter(
+            embedding[mask, 0], embedding[mask, 1],
+            c=[color], label=label, s=8, alpha=0.6, rasterized=True
+        )
+
+    # Highlight the specified random alleles with distinct markers
+    if alleles_to_highlight:
+        label_source = highlight_labels_series if highlight_labels_series is not None else labels
+        markers = ['*', 'D', 'X', 's', 'p']
+        for i, allele in enumerate(alleles_to_highlight):
+            mask = (label_source == allele)
+            if np.any(mask):
+                ax.scatter(
+                    embedding[mask, 0], embedding[mask, 1],
+                    c='none', marker=markers[i % len(markers)], s=20,
+                    edgecolor='black', linewidth=0.6,
+                    label=f'{allele} (highlighted)'
+                )
+
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.set_xlabel('UMAP Dimension 1', fontsize=12)
+    ax.set_ylabel('UMAP Dimension 2', fontsize=12)
+
+    # --- Publication Quality Legend Handling ---
+    handles, legend_labels = ax.get_legend_handles_labels()
+
+    highlight_handles = [h for h, l in zip(handles, legend_labels) if 'highlighted' in l]
+    highlight_labels = [l for l in legend_labels if 'highlighted' in l]
+
+    regular_handles = [h for h, l in zip(handles, legend_labels) if 'highlighted' not in l]
+    regular_labels = [l for l in legend_labels if 'highlighted' not in l]
+
+    # Create a legend for the highlighted markers if they exist
+    if highlight_handles:
+        first_legend = ax.legend(
+            highlight_handles, highlight_labels,
+            title='Highlighted Alleles', bbox_to_anchor=(1.05, 1),
+            loc='upper left', frameon=True, fontsize=10, title_fontsize=12
+        )
+        ax.add_artist(first_legend)
+
+    # Create the main legend for all alleles or clusters
+    legend_title = 'Clusters' if 'DBSCAN' in title else 'Alleles'
+    if len(regular_labels) > 25:
+        ax.legend(
+            regular_handles, regular_labels, title=legend_title,
+            bbox_to_anchor=(1.05, 0.75 if highlight_handles else 1), loc='upper left',
+            ncol=max(1, len(regular_labels) // 30), fontsize=8, frameon=True, title_fontsize=12
+        )
+    else:
+        ax.legend(
+            regular_handles, regular_labels, title=legend_title,
+            bbox_to_anchor=(1.05, 0.75 if highlight_handles else 1), loc='upper left',
+            fontsize=10, frameon=True, title_fontsize=12
+        )
+
+    plt.tight_layout(rect=[0, 0, 0.85, 1])
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✓ Plot saved to {filename}")
+
+
+def _run_dbscan_and_plot(
+            embedding: np.ndarray,
+            alleles: pd.Series,
+            random_alleles_to_highlight: list,
+            latent_type: str,
+            out_dir: str
+    ):
+        """Helper to run DBSCAN, estimate eps, and plot results."""
+        print(f"\nRunning DBSCAN on {latent_type} UMAP embedding...")
+
+        # 1. Estimate eps using the k-distance graph for robust parameter selection
+        min_samples = 20
+        neighbors = NearestNeighbors(n_neighbors=min_samples).fit(embedding)
+        distances, _ = neighbors.kneighbors(embedding)
+        k_distances = np.sort(distances[:, min_samples - 1], axis=0)
+
+        kneedle = KneeLocator(range(len(k_distances)), k_distances, curve="convex", direction="increasing")
+        estimated_eps = kneedle.elbow_y
+        if estimated_eps is None:
+            estimated_eps = np.percentile(k_distances, 95)
+            print(f"Warning: KneeLocator failed. Falling back to eps={estimated_eps:.4f}")
+        else:
+            print(f"Estimated DBSCAN eps for {latent_type} latents: {estimated_eps:.4f}")
+
+        # 2. Run DBSCAN with estimated parameters
+        dbscan = DBSCAN(eps=estimated_eps, min_samples=min_samples, n_jobs=-1)
+        clusters = dbscan.fit_predict(embedding)
+        n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
+        n_noise = np.sum(clusters == -1)
+        print(f"✓ Found {n_clusters} clusters and {n_noise} noise points.")
+
+        # 3. Visualize the clustering results
+        cluster_labels = pd.Series([f'Cluster {c}' if c != -1 else 'Noise' for c in clusters])
+        unique_cluster_labels = sorted(cluster_labels.unique(), key=lambda x: (x == 'Noise', x))
+
+        # Use a more distinctive color palette for clusters
+        n_labels = len(unique_cluster_labels)
+        if n_labels <= 20:
+            colors = sns.color_palette("tab20", n_colors=n_labels)
+        else:
+            colors = sns.color_palette("hls", n_colors=n_labels)
+        cluster_color_map = {label: color for label, color in zip(unique_cluster_labels, colors)}
+        if 'Noise' in cluster_color_map:
+            cluster_color_map['Noise'] = [0.7, 0.7, 0.7, 0.5]  # Muted gray for noise points
+
+        _plot_umap(
+            embedding=embedding,
+            labels=cluster_labels,
+            color_map=cluster_color_map,
+            title=f'DBSCAN Clustering of {latent_type.capitalize()} Latents\n({n_clusters} clusters, {n_noise} noise points)',
+            filename=os.path.join(out_dir, f"umap_dbscan_{latent_type}.png"),
+            alleles_to_highlight=random_alleles_to_highlight,
+            highlight_labels_series=alleles,  # Pass original alleles for highlighting
+        )
+        return clusters
+
+
+# --- Main Visualization Function ---
+
+def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir,
+                       dataset_name: str):
+    """
+    Generates and saves a series of publication-quality visualizations for model analysis.
     """
     print("\nGenerating visualizations...")
+    os.makedirs(out_dir, exist_ok=True)
 
-    # Print masking statistics for debugging
-    print("\n--- Masking Statistics ---")
-    sample_batch_df = df.head(5)
-    sample_data = rows_to_tensors(sample_batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
-    
-    pep_masks = sample_data["pep_mask"].numpy()
-    mhc_masks = sample_data["mhc_mask"].numpy()
-    
-    print(f"Peptide mask values - PAD_TOKEN: {PAD_TOKEN}, MASK_TOKEN: {MASK_TOKEN}, NORM_TOKEN: {NORM_TOKEN}")
-    print(f"Sample peptide shape: {sample_data['pep_onehot'].shape}")
-    print(f"Sample peptide mask shape: {pep_masks.shape}")
-    print(f"Unique values in peptide masks: {np.unique(pep_masks)}")
-    
-    print(f"Sample MHC embedding shape: {sample_data['mhc_emb'].shape}")
-    print(f"Sample MHC mask shape: {mhc_masks.shape}")
-    print(f"Unique values in MHC masks: {np.unique(mhc_masks)}")
-
-    # 1. Extract labels from alleles
+    # --- 1. Data and Color Preparation ---
     alleles = df['mhc_embedding_key'].apply(clean_key).astype('category')
-    allele_labels = alleles.cat.codes
     unique_alleles = alleles.cat.categories
-    allele_counts = df['mhc_embedding_key'].apply(clean_key).value_counts()
-    print(f"Found {len(unique_alleles)} unique alleles.")
 
-    # Flatten the sequential latents for UMAP and DBSCAN
-    #n_samples = latents_seq.shape[0]
-    #latents_seq_flat = latents_seq.reshape(n_samples, -1)
-    latents_seq_flat = latents_pooled
+    # Select 5 random unique alleles to highlight for reproducibility
+    num_to_highlight = min(5, len(unique_alleles))
+    np.random.seed(999)  # for reproducible random selection
+    random_alleles_to_highlight = np.random.choice(unique_alleles, num_to_highlight, replace=False).tolist()
+    print(
+        f"Found {len(unique_alleles)} unique alleles. Highlighting {num_to_highlight} random alleles: {random_alleles_to_highlight}")
 
     # Create a publication-friendly color palette for all alleles
-    np.random.seed(10)  # for reproducibility
-    
-    # Use colorblind-friendly palettes appropriate for scientific publications
-    if len(unique_alleles) <= 8:
-        # For small number of alleles use Set2 (colorblind-friendly)
-        colors = plt.cm.Set2(np.linspace(0, 1, len(unique_alleles)))
+    if len(unique_alleles) <= 10:
+        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_alleles)))
     elif len(unique_alleles) <= 20:
-        # For medium number of alleles
-        colors = plt.cm.tab20c(np.linspace(0, 1, len(unique_alleles)))
+        colors = plt.cm.tab20(np.linspace(0, 1, len(unique_alleles)))
     else:
-        # For large number of alleles use viridis (perceptually uniform, colorblind-friendly)
         colors = plt.cm.viridis(np.linspace(0, 1, len(unique_alleles)))
-        
-    allele_color_map = {allele: colors[i] for i, allele in enumerate(unique_alleles)}
-    
-    # Choose top 5 most frequent alleles to highlight
-    top_5_alleles_to_mark = allele_counts.head(5).index.tolist()
-    print(f"Highlighting top 5 alleles: {top_5_alleles_to_mark}")
+    allele_color_map = {allele: color for allele, color in zip(unique_alleles, colors)}
 
-    # # --- Visualization 1: UMAP of FLATTENED SEQUENTIAL latents ---
-    # print("Running UMAP on FLATTENED SEQUENTIAL latents...")
-    # reducer_seq = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
-    # embedding_seq = reducer_seq.fit_transform(latents_seq_flat)
-    #
-    # plt.figure(figsize=(14, 10))
-    #
-    # # Plot all points with assigned colors
-    # for allele in unique_alleles:
-    #     mask = alleles == allele
-    #     plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1],
-    #                c=[allele_color_map[allele]], label=allele,
-    #                s=5, alpha=0.3)
-    #
-    # # Highlight the 5 top alleles with distinct markers
-    # for i, allele in enumerate(top_5_alleles_to_mark):
-    #     mask = alleles == allele
-    #     markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
-    #     plt.scatter(embedding_seq[mask, 0], embedding_seq[mask, 1],
-    #                c='gray', marker=markers[i], s=3,
-    #                edgecolor='black', linewidth=0.2,
-    #                label=f'{allele} (highlighted)')
-    #
-    # plt.title(f'UMAP of Flattened Sequential Latents ({len(df)} Samples)\nColored by {len(unique_alleles)} Unique Alleles')
-    # plt.xlabel('UMAP Dimension 1')
-    # plt.ylabel('UMAP Dimension 2')
-    #
-    # # Create a better legend for scientific publication
-    # if len(unique_alleles) > 20:
-    #     # For many alleles, create a compact legend with multiple columns
-    #     handles, labels = plt.gca().get_legend_handles_labels()
-    #
-    #     # Separate highlighted alleles from regular alleles
-    #     highlight_handles = [h for h, l in zip(handles, labels) if 'highlighted' in l]
-    #     highlight_labels = [l for l in labels if 'highlighted' in l]
-    #
-    #     regular_handles = [h for h, l in zip(handles, labels) if 'highlighted' not in l]
-    #     regular_labels = [l for l in labels if 'highlighted' not in l]
-    #
-    #     # First legend for highlighted alleles
-    #     first_legend = plt.legend(highlight_handles, highlight_labels,
-    #                              title='Highlighted Alleles',
-    #                              bbox_to_anchor=(1.05, 1), loc='upper left')
-    #     plt.gca().add_artist(first_legend)
-    #
-    #     # Second legend for regular alleles in multiple columns
-    #     plt.legend(regular_handles, regular_labels,
-    #               title='All Alleles',
-    #               bbox_to_anchor=(1.05, 0.5), loc='center left',
-    #               ncol=max(1, len(regular_labels) // 30),  # Adjust columns based on count
-    #               fontsize=8)
-    # else:
-    #     # For fewer alleles, a single legend is sufficient
-    #     plt.legend(title='Allele', bbox_to_anchor=(1.05, 1),
-    #               loc='upper left', fontsize=8, frameon=True)
-    #
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(out_dir, "umap_sequential_latents.png"), dpi=300, bbox_inches='tight')
-    # plt.close()
-    # print("✓ UMAP plot of sequential latents saved.")
+    # --- 2. Sequential Latents Analysis ---
+    print("\n--- Processing Sequential Latents ---")
+    latents_seq_flat = latents_seq.reshape(latents_seq.shape[0], -1)
 
-    # --- Visualization 2: UMAP of POOLED latents ---
-    print("Running UMAP on POOLED latents...")
-    reducer_pooled = umap.UMAP(n_neighbors=10, min_dist=0.1, n_components=2, random_state=42)
+    reducer_seq = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
+    embedding_seq = reducer_seq.fit_transform(latents_seq_flat)
+
+    # Plot Raw UMAP of Sequential Latents (all alleles, no highlights)
+    # Plot Raw UMAP of Sequential Latents (with highlights)
+    _plot_umap(
+        embedding=embedding_seq, labels=alleles, color_map=allele_color_map,
+        title=f'UMAP of Sequential Latents ({len(df)} Samples)\nColored by {len(unique_alleles)} Unique Alleles',
+        filename=os.path.join(out_dir, "umap_raw_sequential.png"),
+        alleles_to_highlight=random_alleles_to_highlight
+    )
+
+    # Run DBSCAN and Plot Results for Sequential Latents (with random allele highlights)
+    clusters_seq = _run_dbscan_and_plot(
+        embedding=embedding_seq, alleles=alleles,
+        random_alleles_to_highlight=random_alleles_to_highlight,
+        latent_type="sequential", out_dir=out_dir
+    )
+    df['cluster_id_seq'] = clusters_seq
+
+    # --- 3. Pooled Latents Analysis ---
+    print("\n--- Processing Pooled Latents ---")
+    reducer_pooled = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
     embedding_pooled = reducer_pooled.fit_transform(latents_pooled)
 
-    plt.figure(figsize=(14, 10))
-    
-    # Plot all points with assigned colors
-    for allele in unique_alleles:
-        mask = alleles == allele
-        plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1], 
-                   c=[allele_color_map[allele]], label=allele, 
-                   s=3, alpha=0.3)
-    
-    # Highlight the 5 top alleles with distinct markers
-    for i, allele in enumerate(top_5_alleles_to_mark):
-        mask = alleles == allele
-        markers = ['*', 'D', 'X', 's', 'p']  # More publication-friendly markers
-        plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1], 
-                   c='gray', marker=markers[i], s=5,
-                   edgecolor='black', linewidth=0.3, 
-                   label=f'{allele} (highlighted)')
-    
-    plt.title(f'UMAP of Pooled Latents ({len(df)} Samples)\nColored by {len(unique_alleles)} Unique Alleles')
-    plt.xlabel('UMAP Dimension 1')
-    plt.ylabel('UMAP Dimension 2')
-    
-    # Create a better legend for scientific publication
-    if len(unique_alleles) > 20:
-        # For many alleles, create a compact legend with multiple columns
-        handles, labels = plt.gca().get_legend_handles_labels()
-        
-        # Separate highlighted alleles from regular alleles
-        highlight_handles = [h for h, l in zip(handles, labels) if 'highlighted' in l]
-        highlight_labels = [l for l in labels if 'highlighted' in l]
-        
-        regular_handles = [h for h, l in zip(handles, labels) if 'highlighted' not in l]
-        regular_labels = [l for l in labels if 'highlighted' not in l]
-        
-        # First legend for highlighted alleles
-        first_legend = plt.legend(highlight_handles, highlight_labels, 
-                                 title='Highlighted Alleles',
-                                 bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.gca().add_artist(first_legend)
-        
-        # Second legend for regular alleles in multiple columns
-        plt.legend(regular_handles, regular_labels, 
-                  title='All Alleles',
-                  bbox_to_anchor=(1.05, 0.5), loc='center left',
-                  ncol=max(1, len(regular_labels) // 30),  # Adjust columns based on count
-                  fontsize=8)
-    else:
-        # For fewer alleles, a single legend is sufficient
-        plt.legend(title='Allele', bbox_to_anchor=(1.05, 1), 
-                  loc='upper left', fontsize=8, frameon=True)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "umap_pooled_latents.png"), dpi=300, bbox_inches='tight')
-    plt.close()
-    print("✓ UMAP plot of pooled latents saved.")
+    # Plot Raw UMAP of Pooled Latents (all alleles, no highlights)
+    # Plot Raw UMAP of Pooled Latents (with highlights)
+    _plot_umap(
+        embedding=embedding_pooled, labels=alleles, color_map=allele_color_map,
+        title=f'UMAP of Pooled Latents ({len(df)} Samples)\nColored by {len(unique_alleles)} Unique Alleles',
+        filename=os.path.join(out_dir, "umap_raw_pooled.png"),
+        alleles_to_highlight=random_alleles_to_highlight
+    )
 
-    # --- Visualization 3: DBSCAN clustering on POOLED latents ---
-    print("Running DBSCAN on UMAP-reduced latents for visual consistency...")
+    # Run DBSCAN and Plot Results for Pooled Latents (with random allele highlights)
+    clusters_pooled = _run_dbscan_and_plot(
+        embedding=embedding_pooled, alleles=alleles,
+        random_alleles_to_highlight=random_alleles_to_highlight,
+        latent_type="pooled", out_dir=out_dir
+    )
+    df['cluster_id_pooled'] = clusters_pooled
 
-    # --- Step 1: Automate eps estimation using k-distance graph on UMAP data ---
-    min_samples = 15  # A fixed, reasonable value for min_samples
-    print(f"Using min_samples: {min_samples}")
-
-    # Calculate distances on the 2D UMAP embedding
-    neighbors = NearestNeighbors(n_neighbors=min_samples)
-    neighbors_fit = neighbors.fit(embedding_pooled)
-    distances, indices = neighbors_fit.kneighbors(embedding_pooled)
-
-    k_distances = np.sort(distances[:, min_samples - 1], axis=0)
-
-    # Use KneeLocator to find the "elbow" of the k-distance plot
-    kneedle = KneeLocator(range(len(k_distances)), k_distances, curve="convex", direction="increasing")
-    estimated_eps = kneedle.elbow_y
-
-    if estimated_eps is None:
-        print("Warning: KneeLocator failed to find an elbow. Falling back to 95th percentile of distances.")
-        estimated_eps = np.percentile(k_distances, 95)
-
-    print(f"Estimated DBSCAN eps: {estimated_eps:.4f}")
-
-    # Plot the k-distance graph for manual inspection
-    plt.figure(figsize=(10, 6))
-    kneedle.plot_knee()
-    plt.xlabel("Points (sorted by distance)")
-    plt.ylabel(f"Distance to {min_samples}-th nearest neighbor")
-    plt.title("K-Distance Graph for DBSCAN Epsilon Estimation (on UMAP data)")
-    plt.axhline(y=estimated_eps, color='r', linestyle='--', label=f'Selected eps = {estimated_eps:.4f}')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.savefig(os.path.join(out_dir, "dbscan_k_distance_graph.png"), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # --- Step 2: Run final DBSCAN with the estimated eps ---
-    dbscan = DBSCAN(eps=estimated_eps, min_samples=min_samples, n_jobs=-1)
-    clusters = dbscan.fit_predict(embedding_pooled)
-
-    n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
-    n_noise = np.sum(clusters == -1)
-    print(f"✓ DBSCAN found {n_clusters} clusters and {n_noise} noise points.")
-
-    # --- Step 3: Add cluster labels to DataFrame and save ---
-    df['cluster_id'] = clusters
+    # Save the dataframe with both cluster assignments
     output_parquet_path = os.path.join(out_dir, f"{dataset_name}_with_clusters.parquet")
     df.to_parquet(output_parquet_path)
-    print(f"✓ Saved dataset with cluster IDs to {output_parquet_path}")
+    print(f"\n✓ Saved dataset with cluster IDs to {output_parquet_path}")
 
-    # --- Step 4: Visualize the clustering results ---
-    plt.figure(figsize=(14, 10))
-    # Create publication-friendly color map for clusters
-    unique_clusters = sorted(set(clusters))
-    if len(unique_clusters) <= 8:
-        # For small number of clusters, use a qualitative colormap
-        cluster_colors = plt.cm.Dark2(np.linspace(0, 1, len(unique_clusters)))
-    else:
-        # For more clusters, use a sequential/diverging colormap
-        cluster_colors = plt.cm.viridis(np.linspace(0, 1, len(unique_clusters)))
-    # Make noise points gray
-    if -1 in unique_clusters:
-        noise_idx = unique_clusters.index(-1)
-        cluster_colors[noise_idx] = [0.7, 0.7, 0.7, 0.5]  # Light gray with lower alpha
-    cluster_color_map = {cluster: cluster_colors[i] for i, cluster in enumerate(unique_clusters)}
-    # Plot all points colored by cluster
-    for cluster in unique_clusters:
-        mask = clusters == cluster
-        label = f'Cluster {cluster}' if cluster != -1 else 'Noise'
-        plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1],
-                   c=[cluster_color_map[cluster]], label=label,
-                   s=3, alpha=0.3)
+    # --- 4. Other Visualizations (Inputs and Predictions) ---
+    # This part of your code was well-structured and is kept as is.
+    print("\n--- Generating supplementary plots (inputs, masks, predictions) ---")
 
-    # Highlight the 5 top alleles with distinct markers
-    for i, allele in enumerate(top_5_alleles_to_mark):
-        mask = alleles == allele
-        markers = ['*', 'D', 'X', 's', 'p'] 
-        plt.scatter(embedding_pooled[mask, 0], embedding_pooled[mask, 1],
-                   c='gray', marker=markers[i], s=5,
-                   edgecolor='black', linewidth=0.3,
-                   label=f'{allele} (highlighted)')
-    
-    plt.title(f'DBSCAN Clustering of Sequential Latents (Visualized with UMAP)\nFound {n_clusters} clusters, {n_noise} noise points')
-    plt.xlabel('UMAP Dimension 1')
-    plt.ylabel('UMAP Dimension 2')
-    
-    # Create separate legends for clusters and highlighted alleles
-    handles, labels = plt.gca().get_legend_handles_labels()
-    
-    # Separate highlighted alleles from clusters
-    highlight_handles = [h for h, l in zip(handles, labels) if 'highlighted' in l]
-    highlight_labels = [l for l in labels if 'highlighted' in l]
-    
-    cluster_handles = [h for h, l in zip(handles, labels) if 'highlighted' not in l]
-    cluster_labels = [l for l in labels if 'highlighted' not in l]
-    
-    # First legend for highlighted alleles
-    first_legend = plt.legend(highlight_handles, highlight_labels, 
-                             title='Highlighted Alleles',
-                             bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.gca().add_artist(first_legend)
-    
-    # Second legend for clusters
-    plt.legend(cluster_handles, cluster_labels, 
-              title='Clusters',
-              bbox_to_anchor=(1.05, 0.6), loc='center left')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "umap_dbscan_clusters_sequential.png"), dpi=300, bbox_inches='tight')
-    plt.close()
-    print("✓ DBSCAN clustering plot on sequential latents saved.")
-
-
-    # # --- Visualization 3: Show latent of one sample ---
-    # plt.figure(figsize=(12, 6))
-    # sns.heatmap(latents_seq[0], cmap='viridis')
-    # plt.title(f'Latent Representation of Sample 0 (Allele: {alleles[0]})')
-    # plt.xlabel('Embedding Dimension'); plt.ylabel('Sequence Position')
-    # plt.savefig(os.path.join(out_dir, "single_sample_latent.png"))
-    # plt.close()
-    # print("✓ Single latent plot saved.")
-    #
-    # # --- Visualization 4: Compare mean latents for top 5 alleles ---
-    # top_5_alleles = allele_counts.nlargest(5).index.tolist()
-    # mean_latents = []
-    # for allele_name in top_5_alleles:
-    #     indices = df[df['mhc_embedding_key'].apply(clean_key) == allele_name].index
-    #     mean_latent = latents_seq[indices].mean(axis=0)
-    #     mean_latents.append(mean_latent)
-    #
-    # fig, axes = plt.subplots(len(top_5_alleles), 1, figsize=(10, 2 * len(top_5_alleles)), sharex=True)
-    # fig.suptitle('Mean Latent Representation per Allele', fontsize=16)
-    # for i, allele_name in enumerate(top_5_alleles):
-    #     sns.heatmap(mean_latents[i], ax=axes[i], cmap='viridis')
-    #     axes[i].set_title(f"{allele_name} (n={allele_counts[allele_name]})")
-    #     axes[i].set_ylabel('Sequence Pos')
-    # axes[-1].set_xlabel('Embedding Dim')
-    # plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # plt.savefig(os.path.join(out_dir, "mean_latents_comparison.png"), dpi=150, bbox_inches='tight')
-    # plt.close()
-    # print("✓ Mean latents comparison plot saved.")
-
-    # --- Visualizations 5 & 6: Show one sample of peptide/MHC input and masks ---
+    # Example for the input/mask plots:
     sample_idx = 0
     sample_row = df.iloc[[sample_idx]]
     sample_data = rows_to_tensors(sample_row, max_pep_len, max_mhc_len, seq_map, embed_map)
@@ -474,66 +391,28 @@ def run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, se
 
     sns.heatmap(sample_data['pep_onehot'][0].numpy().T, ax=axes[0, 0], cmap='gray_r')
     axes[0, 0].set_title('Peptide Input (One-Hot)')
-    axes[0, 0].set_ylabel('Amino Acid'); axes[0, 0].set_xlabel('Sequence Position')
+    axes[0, 0].set_ylabel('Amino Acid')
+    axes[0, 0].set_xlabel('Sequence Position')
 
     sns.heatmap(sample_data['pep_mask'][0].numpy()[np.newaxis, :], ax=axes[0, 1], cmap='viridis', cbar=False)
-    axes[0, 1].set_title('Peptide Mask'); axes[0, 1].set_yticks([])
+    axes[0, 1].set_title('Peptide Mask')
+    axes[0, 1].set_yticks([])
 
     sns.heatmap(sample_data['mhc_emb'][0].numpy().T, ax=axes[1, 0], cmap='viridis')
     axes[1, 0].set_title('MHC Input (Embedding)')
-    axes[1, 0].set_ylabel('Embedding Dim'); axes[1, 0].set_xlabel('Sequence Position')
+    axes[1, 0].set_ylabel('Embedding Dim')
+    axes[1, 0].set_xlabel('Sequence Position')
 
     sns.heatmap(sample_data['mhc_mask'][0].numpy()[np.newaxis, :], ax=axes[1, 1], cmap='viridis', cbar=False)
-    axes[1, 1].set_title('MHC Mask'); axes[1, 1].set_yticks([])
+    axes[1, 1].set_title('MHC Mask')
+    axes[1, 1].set_yticks([])
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(os.path.join(out_dir, "input_and_mask_samples.png"))
     plt.close()
     print("✓ Input and mask plots saved.")
 
-    # --- Visualization 7: Print 5 predictions and compare them with inputs ---
-    print("\n--- Comparing 5 Predictions with Inputs ---")
-    pred_samples_df = df.head(5)
-    pred_data = rows_to_tensors(pred_samples_df, max_pep_len, max_mhc_len, seq_map, embed_map)
-
-    model_inputs = {
-        "pep_onehot": pred_data["pep_onehot"], "pep_mask": pred_data["pep_mask"],
-        "mhc_emb": pred_data["mhc_emb"], "mhc_mask": pred_data["mhc_mask"],
-        "mhc_onehot": pred_data["mhc_onehot"],
-    }
-    true_preds = enc_dec(model_inputs, training=False)
-
-    pep_true, pep_pred_ohe = split_y_true_y_pred(true_preds["pep_ytrue_ypred"].numpy())
-    mhc_true, mhc_pred_ohe = split_y_true_y_pred(true_preds["mhc_ytrue_ypred"].numpy())
-
-    pep_masks_np = pred_data["pep_mask"].numpy()
-    mhc_masks_np = pred_data["mhc_mask"].numpy()
-
-    for i in range(5):
-        print(f"\n--- Sample {i} ---")
-        print(f"  Allele: {clean_key(pred_samples_df.iloc[i]['mhc_embedding_key'])}")
-
-        # --- Peptide Processing ---
-        original_peptide_full = OHE_to_seq_single(pep_true[i], gap=True).replace("X", "-")
-        predicted_peptide_full = OHE_to_seq_single(pep_pred_ohe[i], gap=True).replace("X", "-")
-        pep_valid_mask = (pep_masks_np[i] != PAD_TOKEN) & (np.array(list(original_peptide_full)) != '-')
-        original_peptide = "".join(np.array(list(original_peptide_full))[pep_valid_mask])
-        predicted_peptide = "".join(np.array(list(predicted_peptide_full))[pep_valid_mask])
-        print(f"  Original Peptide : {original_peptide}")
-        print(f"  Predicted Peptide: {predicted_peptide}")
-
-        # --- MHC Processing ---
-        original_mhc_full = OHE_to_seq_single(mhc_true[i], gap=True).replace("X", "-")
-        predicted_mhc_full = OHE_to_seq_single(mhc_pred_ohe[i], gap=True).replace("X", "-")
-        mhc_valid_mask = (mhc_masks_np[i] != PAD_TOKEN) & (np.array(list(original_mhc_full)) != '-')
-        original_mhc = "".join(np.array(list(original_mhc_full))[mhc_valid_mask])
-        predicted_mhc = "".join(np.array(list(predicted_mhc_full))[mhc_valid_mask])
-        print(f"  Original MHC     : {original_mhc}")
-        print(f"  Predicted MHC    : {predicted_mhc}")
-
-    print("\n✓ Visualizations complete.")
-
-# Helper function for inference and visualization
+# Helper function for inference and visualizations
 def run_inference_and_visualizations(df, dataset_name, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size=32, embed_dim=32):
     """
     Runs inference on a dataset, saves latents to memory-mapped files, and generates visualizations.
@@ -545,12 +424,12 @@ def run_inference_and_visualizations(df, dataset_name, enc_dec, max_pep_len, max
     indices = np.arange(len(df))
 
     # Define paths for memory-mapped arrays
-    #latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.mmap")
+    latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.mmap")
     latents_pooled_path = os.path.join(dataset_out_dir, f"mhc_latents_pooled_{dataset_name}.mmap")
 
     # Create memory-mapped arrays on disk
-    #latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df), max_mhc_len, embed_dim))
-    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df), embed_dim))
+    latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df), max_mhc_len, embed_dim))
+    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df), max_mhc_len * 2))
 
     print(f"Processing {len(df)} samples in batches...")
     for step in range(0, len(indices), batch_size):
@@ -562,234 +441,215 @@ def run_inference_and_visualizations(df, dataset_name, enc_dec, max_pep_len, max
         true_preds = enc_dec(batch_data, training=False)
 
         # Write batch results directly to memory-mapped arrays
-        #latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
+        latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
         latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
 
         # Flush changes to disk periodically to ensure data is saved
         if step % (batch_size * 10) == 0:
-            #latents_seq.flush()
+            latents_seq.flush()
             latents_pooled.flush()
 
     # Final flush to save any remaining data
-    #latents_seq.flush()
+    latents_seq.flush()
     latents_pooled.flush()
 
-    #print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
+    print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
     print(f"✓ Pooled latents for {dataset_name} set saved to {latents_pooled_path}")
 
     # Now, call the visualization function with the paths to the memory-mapped files
-    run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
+    run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
 
 
 def train(train_path: str, validation_path: str, test_path: str,  embed_npz: str, seq_csv: str, embd_key_path: str,
-          out_dir: str, epochs: int = 3, batch_size: int = 32,
-            lr: float = 1e-4, embed_dim: int = 32, heads: int = 8, noise_std: float = 0.1):
-    """
-    Trains the model on the training set, validates on the validation set,
-    and finally runs inference and generates visualizations for train, validation, and test sets.
-    """
-    global EMB_DB
-    EMB_DB = load_embedding_db(embed_npz)
+              out_dir: str, epochs: int = 3, batch_size: int = 32,
+                lr: float = 1e-4, embed_dim: int = 32, heads: int = 8, noise_std: float = 0.1):
+        """
+        Trains the model on the training set, validates on the validation set,
+        and finally runs inference and generates visualizations for train, validation, and test sets.
+        """
+        global EMB_DB
+        EMB_DB = load_embedding_db(embed_npz)
 
-    seq_map = pd.read_csv(seq_csv, index_col="allele")["mhc_sequence"].to_dict()
-    embed_map = pd.read_csv(embd_key_path, index_col="key")["mhc_sequence"].to_dict()
-    seq_map = {clean_key(k): v for k, v in seq_map.items()}
+        seq_map = pd.read_csv(seq_csv, index_col="allele")["mhc_sequence"].to_dict()
+        embed_map = pd.read_csv(embd_key_path, index_col="key")["mhc_sequence"].to_dict()
+        seq_map = {clean_key(k): v for k, v in seq_map.items()}
 
-    # Load all datasets
-    print("Loading datasets...")
-    df_train = pq.ParquetFile(train_path).read().to_pandas()
-    df_val = pq.ParquetFile(validation_path).read().to_pandas()
-    df_test = pq.ParquetFile(test_path).read().to_pandas()
-    print(f"Loaded {len(df_train)} training, {len(df_val)} validation, and {len(df_test)} test samples.")
+        # Load all datasets
+        print("Loading datasets...")
+        df_train = pq.ParquetFile(train_path).read().to_pandas()
+        df_val = pq.ParquetFile(validation_path).read().to_pandas()
+        df_test = pq.ParquetFile(test_path).read().to_pandas()
+        print(f"Loaded {len(df_train)} training, {len(df_val)} validation, and {len(df_test)} test samples.")
 
-    # Calculate max lengths across all datasets to ensure consistency
-    max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"], df_test["long_mer"]]).str.len().max())
-    if MHC_CLASS == 2:
-        max_mhc_len = 400 # manually set
-    else:
-        max_mhc_len = int(next(iter(EMB_DB.values())).shape[0])
-    print(f"Max peptide length: {max_pep_len}, Max MHC length: {max_mhc_len}")
+        # Calculate max lengths across all datasets to ensure consistency
+        max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"], df_test["long_mer"]]).str.len().max())
+        if MHC_CLASS == 2:
+            max_mhc_len = 400 # manually set
+        else:
+            max_mhc_len = int(next(iter(EMB_DB.values())).shape[0])
+        print(f"Max peptide length: {max_pep_len}, Max MHC length: {max_mhc_len}")
 
-    # Initialize model and optimizer
-    enc_dec = pmclust_subtract(
-        max_pep_len,
-        max_mhc_len,
-        emb_dim=embed_dim,
-        heads=heads,
-        mask_token=MASK_TOKEN,
-        pad_token=PAD_TOKEN,
-        noise_std=noise_std)
-    
-    opt = keras.optimizers.Adam(lr)
-    loss_fn = masked_categorical_crossentropy
+        # Initialize model and optimizer
+        enc_dec = pmclust_subtract(
+            max_pep_len,
+            max_mhc_len,
+            emb_dim=embed_dim,
+            heads=heads,
+            mask_token=MASK_TOKEN,
+            pad_token=PAD_TOKEN,
+            noise_std=noise_std)
 
-    # Save model configuration
-    config = {
-        'max_pep_len': max_pep_len, 
-        'max_mhc_len': max_mhc_len, 
-        'embed_dim': embed_dim,
-        'heads': heads,
-        'noise_std': noise_std
-    }
-    with open(os.path.join(out_dir, "model_config.json"), 'w') as f:
-        json.dump(config, f, indent=4)
-    print(f"\n✓ Model configuration saved.")
+        # Set up learning rate scheduler
+        num_train_steps = (len(df_train) // batch_size) * epochs
+        lr_schedule = keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=lr,
+            decay_steps=num_train_steps,
+            alpha=0.0  # End at 0
+        )
+        opt = keras.optimizers.Lion(lr_schedule)
+        loss_fn = masked_categorical_crossentropy
 
-    # Get indices for training and validation
-    train_indices = np.arange(len(df_train))
-    val_indices = np.arange(len(df_val))
+        # print model summary
+        print("\n--- Model Summary ---")
+        enc_dec.build(input_shape={
+            "pep_onehot": (None, max_pep_len, 21),  # 21 for amino acids + PAD/MASK
+            "pep_mask": (None, max_pep_len),
+            "mhc_emb": (None, max_mhc_len, 1152),
+            "mhc_mask": (None, max_mhc_len),
+            "mhc_onehot": (None, max_mhc_len, 21)  # Assuming MHC also uses one-hot encoding
+        })
+        enc_dec.summary()
 
-    # Create a fixed validation batch for periodic evaluation
-    fixed_val_batch_df = df_val.sample(n=batch_size, random_state=42)
-    fixed_val_batch = rows_to_tensors(fixed_val_batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+        # Save model configuration
+        config = {
+            'max_pep_len': max_pep_len,
+            'max_mhc_len': max_mhc_len,
+            'embed_dim': embed_dim,
+            'heads': heads,
+            'noise_std': noise_std
+        }
+        with open(os.path.join(out_dir, "model_config.json"), 'w') as f:
+            json.dump(config, f, indent=4)
+        print(f"\n✓ Model configuration saved.")
 
-    # --- Training Loop ---
-    history = {
-        'train_loss': [], 'train_pep_loss': [], 'train_mhc_loss': [],
-        'val_loss': [], 'val_pep_loss': [], 'val_mhc_loss': []
-    }
-    best_val_loss = float('inf')
-    best_weights_path = os.path.join(out_dir, "best_enc_dec.weights.h5")
+        # Get indices for training and validation
+        train_indices = np.arange(len(df_train))
+        val_indices = np.arange(len(df_val))
 
-    for epoch in range(1, epochs + 1):
-        np.random.shuffle(train_indices)
-        print(f"\nEpoch {epoch}/{epochs}")
-        
-        # --- Training Step ---
-        epoch_loss_sum, epoch_pep_loss_sum, epoch_mhc_loss_sum, num_steps = 0, 0, 0, 0
-        for step in range(0, len(train_indices), batch_size):
-            batch_idx = train_indices[step:step + batch_size]
-            batch_df = df_train.iloc[batch_idx]
-            batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+        # Create a fixed validation batch for periodic evaluation
+        fixed_val_batch_df = df_val.sample(n=batch_size, random_state=42)
+        fixed_val_batch = rows_to_tensors(fixed_val_batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
 
-            with tf.GradientTape() as tape:
-                true_and_preds = enc_dec(batch_data, training=True)
+        # --- Training Loop ---
+        history = {
+            'train_loss': [], 'train_pep_loss': [], 'train_mhc_loss': [],
+            'val_loss': [], 'val_pep_loss': [], 'val_mhc_loss': [], 'lr': []
+        }
+        best_val_loss = float('inf')
+        best_weights_path = os.path.join(out_dir, "best_enc_dec.weights.h5")
+
+        for epoch in range(1, epochs + 1):
+            np.random.shuffle(train_indices)
+            print(f"\nEpoch {epoch}/{epochs}")
+
+            # --- Training Step ---
+            epoch_loss_sum, epoch_pep_loss_sum, epoch_mhc_loss_sum, num_steps = 0, 0, 0, 0
+            pbar = tqdm(range(0, len(train_indices), batch_size), desc=f"Epoch {epoch} Training")
+            for step in pbar:
+                batch_idx = train_indices[step:step + batch_size]
+                batch_df = df_train.iloc[batch_idx]
+                batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+
+                with tf.GradientTape() as tape:
+                    true_and_preds = enc_dec(batch_data, training=True)
+                    pep_loss = tf.reduce_mean(loss_fn(true_and_preds["pep_ytrue_ypred"], batch_data["pep_mask"]))
+                    mhc_loss = tf.reduce_mean(loss_fn(true_and_preds["mhc_ytrue_ypred"], batch_data["mhc_mask"]))
+                    loss = pep_loss + mhc_loss
+
+                grads = tape.gradient(loss, enc_dec.trainable_variables)
+                opt.apply_gradients(zip(grads, enc_dec.trainable_variables))
+
+                epoch_loss_sum += loss.numpy()
+                epoch_pep_loss_sum += pep_loss.numpy()
+                epoch_mhc_loss_sum += mhc_loss.numpy()
+                num_steps += 1
+                current_lr = opt.learning_rate.numpy() if not isinstance(opt.learning_rate, float) else opt.learning_rate
+                pbar.set_postfix(loss=f"{loss.numpy():.4f}", lr=f"{current_lr:.2e}")
+
+            history['train_loss'].append(epoch_loss_sum / num_steps)
+            history['train_pep_loss'].append(epoch_pep_loss_sum / num_steps)
+            history['train_mhc_loss'].append(epoch_mhc_loss_sum / num_steps)
+            history['lr'].append(current_lr)
+            print(f"Epoch {epoch} average train loss: {history['train_loss'][-1]:.4f}, pep={history['train_pep_loss'][-1]:.4f}, mhc={history['train_mhc_loss'][-1]:.4f}")
+
+            # --- Full Validation Step (at end of epoch) ---
+            val_loss_sum, val_pep_loss_sum, val_mhc_loss_sum, num_val_steps = 0, 0, 0, 0
+            for val_step in range(0, len(val_indices), batch_size):
+                batch_idx = val_indices[val_step:val_step + batch_size]
+                batch_df = df_val.iloc[batch_idx]
+                batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
+
+                true_and_preds = enc_dec(batch_data, training=False)
                 pep_loss = tf.reduce_mean(loss_fn(true_and_preds["pep_ytrue_ypred"], batch_data["pep_mask"]))
                 mhc_loss = tf.reduce_mean(loss_fn(true_and_preds["mhc_ytrue_ypred"], batch_data["mhc_mask"]))
                 loss = pep_loss + mhc_loss
 
-            grads = tape.gradient(loss, enc_dec.trainable_variables)
-            opt.apply_gradients(zip(grads, enc_dec.trainable_variables))
+                val_loss_sum += loss.numpy()
+                val_pep_loss_sum += pep_loss.numpy()
+                val_mhc_loss_sum += mhc_loss.numpy()
+                num_val_steps += 1
 
-            epoch_loss_sum += loss.numpy()
-            epoch_pep_loss_sum += pep_loss.numpy()
-            epoch_mhc_loss_sum += mhc_loss.numpy()
-            num_steps += 1
-            
-            # Periodically calculate and print validation loss on the fixed batch
-            if step % (batch_size * 10) == 0:
-                val_preds = enc_dec(fixed_val_batch, training=False)
-                val_pep_loss = tf.reduce_mean(loss_fn(val_preds["pep_ytrue_ypred"], fixed_val_batch["pep_mask"]))
-                val_mhc_loss = tf.reduce_mean(loss_fn(val_preds["mhc_ytrue_ypred"], fixed_val_batch["mhc_mask"]))
-                val_loss = val_pep_loss + val_mhc_loss
-                print(f"  step {step // batch_size:4d}  train_loss={loss.numpy():.4f}  val_loss={val_loss.numpy():.4f}")
+            avg_val_loss = val_loss_sum / num_val_steps
+            history['val_loss'].append(avg_val_loss)
+            history['val_pep_loss'].append(val_pep_loss_sum / num_val_steps)
+            history['val_mhc_loss'].append(val_mhc_loss_sum / num_val_steps)
+            print(f"Epoch {epoch} full validation loss: {avg_val_loss:.4f} (pep={history['val_pep_loss'][-1]:.4f}, mhc={history['val_mhc_loss'][-1]:.4f})")
 
-        history['train_loss'].append(epoch_loss_sum / num_steps)
-        history['train_pep_loss'].append(epoch_pep_loss_sum / num_steps)
-        history['train_mhc_loss'].append(epoch_mhc_loss_sum / num_steps)
-        print(f"Epoch {epoch} average train loss: {history['train_loss'][-1]:.4f}, pep={history['train_pep_loss'][-1]:.4f}, mhc={history['train_mhc_loss'][-1]:.4f}")
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                enc_dec.save_weights(best_weights_path)
+                print(f"✓ New best model saved to {best_weights_path} with validation loss {best_val_loss:.4f}")
 
-        # --- Full Validation Step (at end of epoch) ---
-        val_loss_sum, val_pep_loss_sum, val_mhc_loss_sum, num_val_steps = 0, 0, 0, 0
-        for val_step in range(0, len(val_indices), batch_size):
-            batch_idx = val_indices[val_step:val_step + batch_size]
-            batch_df = df_val.iloc[batch_idx]
-            batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
-            
-            true_and_preds = enc_dec(batch_data, training=False)
-            pep_loss = tf.reduce_mean(loss_fn(true_and_preds["pep_ytrue_ypred"], batch_data["pep_mask"]))
-            mhc_loss = tf.reduce_mean(loss_fn(true_and_preds["mhc_ytrue_ypred"], batch_data["mhc_mask"]))
-            loss = pep_loss + mhc_loss
-            
-            val_loss_sum += loss.numpy()
-            val_pep_loss_sum += pep_loss.numpy()
-            val_mhc_loss_sum += mhc_loss.numpy()
-            num_val_steps += 1
-            
-        avg_val_loss = val_loss_sum / num_val_steps
-        history['val_loss'].append(avg_val_loss)
-        history['val_pep_loss'].append(val_pep_loss_sum / num_val_steps)
-        history['val_mhc_loss'].append(val_mhc_loss_sum / num_val_steps)
-        print(f"Epoch {epoch} full validation loss: {avg_val_loss:.4f} (pep={history['val_pep_loss'][-1]:.4f}, mhc={history['val_mhc_loss'][-1]:.4f})")
+        # --- Post-Training Analysis ---
+        print("\n--- Training Complete ---")
+        # Plot and save loss curves
+        fig, ax1 = plt.subplots(figsize=(12, 5))
+        epoch_range = range(1, epochs + 1)
 
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            enc_dec.save_weights(best_weights_path)
-            print(f"✓ New best model saved to {best_weights_path} with validation loss {best_val_loss:.4f}")
+        ax1.plot(epoch_range, history['train_loss'], 'b-', label='Training Loss')
+        ax1.plot(epoch_range, history['val_loss'], 'r-', label='Validation Loss')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss', color='b')
+        ax1.tick_params(axis='y', labelcolor='b')
+        ax1.legend(loc='upper left')
+        ax1.grid(True, alpha=0.3)
 
-    # --- Post-Training Analysis ---
-    print("\n--- Training Complete ---")
-    # Plot and save loss curves
-    plt.figure(figsize=(12, 5))
-    epoch_range = range(1, epochs + 1)
-    plt.plot(epoch_range, history['train_loss'], 'b-', label='Training Loss')
-    plt.plot(epoch_range, history['val_loss'], 'r-', label='Validation Loss')
-    plt.title('Total Training and Validation Loss (End of Epoch)')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(out_dir, "loss_curves.png"), dpi=150, bbox_inches='tight')
-    plt.close()
-    print("✓ Loss curves saved.")
+        ax2 = ax1.twinx()
+        ax2.plot(epoch_range, history['lr'], 'g--', label='Learning Rate')
+        ax2.set_ylabel('Learning Rate', color='g')
+        ax2.tick_params(axis='y', labelcolor='g')
+        ax2.legend(loc='upper right')
 
-    # Save final model weights
-    final_weights_path = os.path.join(out_dir, "final_enc_dec.weights.h5")
-    enc_dec.save_weights(final_weights_path)
-    print(f"✓ Final weights saved to {final_weights_path}")
+        fig.suptitle('Training and Validation Loss with Learning Rate Schedule')
+        fig.tight_layout()
+        plt.savefig(os.path.join(out_dir, "loss_curves.png"), dpi=150, bbox_inches='tight')
+        plt.close()
+        print("✓ Loss curves saved.")
 
-    # Load the best weights for final analysis
-    print(f"\nLoading best weights from {best_weights_path} for final analysis.")
-    enc_dec.load_weights(best_weights_path)
+        # Save final model weights
+        final_weights_path = os.path.join(out_dir, "final_enc_dec.weights.h5")
+        enc_dec.save_weights(final_weights_path)
+        print(f"✓ Final weights saved to {final_weights_path}")
 
-    # Run analysis on all three datasets using memory-mapped arrays
-    run_inference_and_visualizations(df_train, "train", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
-    run_inference_and_visualizations(df_val, "validation", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
-    run_inference_and_visualizations(df_test, "test", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+        # Load the best weights for final analysis
+        print(f"\nLoading best weights from {best_weights_path} for final analysis.")
+        enc_dec.load_weights(best_weights_path)
 
+        # Run analysis on all three datasets using memory-mapped arrays
+        run_inference_and_visualizations(df_train, "train", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+        run_inference_and_visualizations(df_val, "validation", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
+        run_inference_and_visualizations(df_test, "test", enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size, embed_dim)
 
-def run_inference_and_visualizations(df, dataset_name, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, out_dir, batch_size=32, embed_dim=32):
-    """
-    Runs inference on a dataset, saves latents to memory-mapped files, and generates visualizations.
-    """
-    print(f"\n--- Running Inference & Visualization on {dataset_name.upper()} SET ---")
-    dataset_out_dir = os.path.join(out_dir, f"visuals_{dataset_name}")
-    os.makedirs(dataset_out_dir, exist_ok=True)
-
-    indices = np.arange(len(df))
-
-    # Define paths for memory-mapped arrays
-    #latents_seq_path = os.path.join(dataset_out_dir, f"mhc_latents_sequential_{dataset_name}.mmap")
-    latents_pooled_path = os.path.join(dataset_out_dir, f"mhc_latents_pooled_{dataset_name}.mmap")
-
-    # Create memory-mapped arrays on disk
-    #latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df), max_mhc_len, embed_dim))
-    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df), embed_dim))
-
-    print(f"Processing {len(df)} samples in batches...")
-    for step in range(0, len(indices), batch_size):
-        batch_idx = indices[step:step + batch_size]
-        batch_df = df.iloc[batch_idx]
-        batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
-
-        # Run model inference
-        true_preds = enc_dec(batch_data, training=False)
-
-        # Write batch results directly to memory-mapped arrays
-        #latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
-        latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
-
-        # Flush changes to disk periodically to ensure data is saved
-        if step % (batch_size * 10) == 0:
-            #latents_seq.flush()
-            latents_pooled.flush()
-
-    # Final flush to save any remaining data
-    #latents_seq.flush()
-    latents_pooled.flush()
-
-    #print(f"✓ Sequential latents for {dataset_name} set saved to {latents_seq_path}")
-    print(f"✓ Pooled latents for {dataset_name} set saved to {latents_pooled_path}")
-
-    # Now, call the visualization function with the paths to the memory-mapped files
-    run_visualizations(df, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map, embed_map, dataset_out_dir, dataset_name)
 
 
 def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
@@ -858,12 +718,12 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
     indices = np.arange(len(df_infer))
 
     # Define paths for memory-mapped arrays
-    #latents_seq_path = os.path.join(infer_out_dir, "mhc_latents_sequential_infer.mmap")
+    latents_seq_path = os.path.join(infer_out_dir, "mhc_latents_sequential_infer.mmap")
     latents_pooled_path = os.path.join(infer_out_dir, "mhc_latents_pooled_infer.mmap")
 
     # Create memory-mapped arrays
-    #latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df_infer), max_mhc_len, embed_dim))
-    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df_infer), embed_dim))
+    latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df_infer), max_mhc_len, embed_dim))
+    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+', shape=(len(df_infer), max_mhc_len * 2))
 
     print(f"Processing {len(df_infer)} samples for inference in batches...")
     for step in tqdm(range(0, len(indices), batch_size), desc="Inference Progress"):
@@ -871,44 +731,42 @@ def infer(parquet_path: str, embed_npz: str, seq_csv: str, embd_key_path: str,
         batch_df = df_infer.iloc[batch_idx]
         batch_data = rows_to_tensors(batch_df, max_pep_len, max_mhc_len, seq_map, embed_map)
 
-        # TODO TEMP - DEBUG - Remove LATER
-        # Save all batches into a single HDF5 file by appending slices
-        import h5py  # local import to avoid global dependency issues
-        batch_data_path = os.path.join(infer_out_dir, "batch_data.h5")
-        start, end = step, step + len(batch_idx)
-        with h5py.File(batch_data_path, "a") as h5f:
-            if "pep_onehot" not in h5f:
-                N = len(df_infer)
-                h5f.create_dataset("pep_onehot", (N, max_pep_len, 21), dtype="float32")
-                h5f.create_dataset("pep_mask", (N, max_pep_len), dtype="float32")
-                h5f.create_dataset("mhc_emb", (N, max_mhc_len, 1152), dtype="float32")
-                h5f.create_dataset("mhc_mask", (N, max_mhc_len), dtype="float32")
-                h5f.create_dataset("mhc_onehot", (N, max_mhc_len, 21), dtype="float32")
-            h5f["pep_onehot"][start:end] = batch_data["pep_onehot"].numpy()
-            h5f["pep_mask"][start:end] = batch_data["pep_mask"].numpy()
-            h5f["mhc_emb"][start:end] = batch_data["mhc_emb"].numpy()
-            h5f["mhc_mask"][start:end] = batch_data["mhc_mask"].numpy()
-            h5f["mhc_onehot"][start:end] = batch_data["mhc_onehot"].numpy()
+        # # TODO TEMP - DEBUG - Remove LATER
+        # # Save all batches into a single HDF5 file by appending slices
+        # import h5py  # local import to avoid global dependency issues
+        # batch_data_path = os.path.join(infer_out_dir, "batch_data.h5")
+        # start, end = step, step + len(batch_idx)
+        # with h5py.File(batch_data_path, "a") as h5f:
+        #     if "pep_onehot" not in h5f:
+        #         N = len(df_infer)
+        #         h5f.create_dataset("pep_onehot", (N, max_pep_len, 21), dtype="float32")
+        #         h5f.create_dataset("pep_mask", (N, max_pep_len), dtype="float32")
+        #         h5f.create_dataset("mhc_emb", (N, max_mhc_len, 1152), dtype="float32")
+        #         h5f.create_dataset("mhc_mask", (N, max_mhc_len), dtype="float32")
+        #         h5f.create_dataset("mhc_onehot", (N, max_mhc_len, 21), dtype="float32")
+        #     h5f["pep_onehot"][start:end] = batch_data["pep_onehot"].numpy()
+        #     h5f["pep_mask"][start:end] = batch_data["pep_mask"].numpy()
+        #     h5f["mhc_emb"][start:end] = batch_data["mhc_emb"].numpy()
+        #     h5f["mhc_mask"][start:end] = batch_data["mhc_mask"].numpy()
+        #     h5f["mhc_onehot"][start:end] = batch_data["mhc_onehot"].numpy()
 
         # Run model in inference mode
         true_preds = enc_dec(batch_data, training=False)
 
-
-
         # Write results to memory-mapped arrays
-        #latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
+        latents_seq[batch_idx] = true_preds["cross_latent"].numpy()
         latents_pooled[batch_idx] = true_preds["latent_vector"].numpy()
 
     # Flush to ensure all data is written to disk
-    #latents_seq.flush()
+    latents_seq.flush()
     latents_pooled.flush()
 
-    #print(f"✓ Sequential latents from inference saved to {latents_seq_path}")
+    print(f"✓ Sequential latents from inference saved to {latents_seq_path}")
     print(f"✓ Pooled latents from inference saved to {latents_pooled_path}")
 
     # --- CALL THE VISUALIZATION FUNCTION ---
     # Pass the paths to the memory-mapped files
-    run_visualizations(df_infer, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map,
+    run_visualizations(df_infer, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len, seq_map,
                        embed_map, infer_out_dir, df_name)
     print("\n✓ Inference and visualization complete.")
 
@@ -967,9 +825,10 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
         print(f"Found existing clustered data at {clustered_df_path}.")
 
     # 2. Load the clustered data and the corresponding latent vectors
-    latents_path = os.path.join(infer_dir, "mhc_latents_pooled_infer.mmap")
+    latents_pooled_path = os.path.join(infer_dir, "mhc_latents_pooled_infer.mmap")
+    latents_seq_path = os.path.join(infer_dir, "mhc_latents_sequential_infer.mmap")
 
-    if not os.path.exists(clustered_df_path) or not os.path.exists(latents_path):
+    if not os.path.exists(clustered_df_path) or not os.path.exists(latents_seq_path):
         raise FileNotFoundError(f"Required files for negative generation not found in {infer_dir}")
 
     df_clustered = pd.read_parquet(clustered_df_path)
@@ -982,13 +841,18 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
     with open(config_path, 'r') as f:
         config = json.load(f)
     embed_dim = config['embed_dim']
+    max_pep_len = config['max_pep_len']
+    max_mhc_len = config['max_mhc_len']
 
     # Correct the shape to be 2D: (n_samples, embed_dim)
-    latents_pooled = np.memmap(latents_path, dtype='float32', mode='r', shape=(len(df_clustered), embed_dim))
+    latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+', shape=(len(df_clustered), max_mhc_len, embed_dim))
+    latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='r', shape=(len(df_clustered), max_mhc_len * 2))
+
     # save mmap configs
     mmap_config_path = os.path.join(infer_dir, "mmap_config.json")
     mmap_config = {
-        'latents_shape': latents_pooled.shape,
+        'latents_shape': latents_seq.shape,
+        'latents_pooled_shape': latents_pooled.shape,
         'embed_dim': embed_dim,
         'max_pep_len': config['max_pep_len'],
         'max_mhc_len': config['max_mhc_len']
@@ -1000,7 +864,7 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
     print(f"✓ Loaded {len(df_clustered)} samples with cluster IDs and memory-mapped latents.")
 
     # Exclude noise points from negative generation logic
-    non_noise_mask = df_clustered['cluster_id'] != -1
+    non_noise_mask = df_clustered['cluster_id_pooled'] != -1
     df_non_noise = df_clustered[non_noise_mask].copy()
     latents_non_noise = latents_pooled[non_noise_mask]
     print(f"  Proceeding with {len(df_non_noise)} non-noise samples.")
@@ -1011,11 +875,11 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
 
     # 3. Calculate the centroid for each cluster
     print("Calculating cluster centroids...")
-    cluster_ids = sorted(df_non_noise['cluster_id'].unique())
+    cluster_ids = sorted(df_non_noise['cluster_id_pooled'].unique())
     cluster_centroids = {}
 
     for cid in cluster_ids:
-        cluster_mask = df_non_noise['cluster_id'] == cid
+        cluster_mask = df_non_noise['cluster_id_pooled'] == cid
         cluster_centroids[cid] = latents_non_noise[cluster_mask].mean(axis=0)
 
     print(f"✓ Calculated centroids for {len(cluster_centroids)} clusters.")
@@ -1056,12 +920,12 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
     # 5. Generate negative samples
     new_negatives = []
     # Get a representative set of alleles from each cluster
-    alleles_per_cluster = df_non_noise.groupby('cluster_id')['mhc_embedding_key'].apply(
+    alleles_per_cluster = df_non_noise.groupby('cluster_id_pooled')['mhc_embedding_key'].apply(
         lambda x: list(set(x))
     )
 
     for _, row in df_non_noise.iterrows():
-        current_cluster = row['cluster_id']
+        current_cluster = row['cluster_id_pooled']
         target_cluster = farthest_cluster_map[current_cluster]
 
         # Get potential alleles from the target cluster
@@ -1112,7 +976,7 @@ def generate_negatives(model_out_dir: str, positives_train: str, positives_valid
     # Use original positives, not the clustered/filtered one
     final_dataset = pd.concat([positives_comb, df_negatives], ignore_index=True)
     # drop cluster_id col
-    final_dataset = final_dataset.drop(columns=['cluster_id'], errors='ignore')
+    final_dataset = final_dataset.drop(columns=['cluster_id_pooled', 'cluster_id_seq'], errors='ignore')
     final_dataset_path = os.path.join(model_out_dir,
                                       f"binding_affinity_dataset_with_swapped_negatives{MHC_CLASS}.parquet")
     final_dataset.to_parquet(final_dataset_path, index=False)
@@ -1123,9 +987,11 @@ if __name__ == "__main__":
     # Suppress verbose TensorFlow logging, but keep errors.
     MHC_CLASS = 1
     noise_std = 0.1
-    heads = 4
-    embed_dim = 96
-    batch_size = 32
+    heads = 2
+    embed_dim = 21
+    batch_size = 128
+    epochs = 5
+    lr = 1e-3
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     train_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_train.parquet"
     validate_path = f"../data/binding_affinity_data/positives_class{MHC_CLASS}_val.parquet"
@@ -1145,7 +1011,7 @@ if __name__ == "__main__":
     #         break
     #     counter += 1
     # os.makedirs(out_dir, exist_ok=True)
-
+    #
     # train(
     #     train_path=train_path,
     #     validation_path=validate_path,
@@ -1154,11 +1020,11 @@ if __name__ == "__main__":
     #     seq_csv=seq_csv_path,
     #     embd_key_path=embd_key_path,
     #     out_dir=out_dir,
-    #     epochs=4,
+    #     epochs=epochs,
     #     batch_size=batch_size,
-    #     lr=1e-5,
-    #     embed_dim=96,
-    #     heads=4,
+    #     lr=lr,
+    #     embed_dim=embed_dim,
+    #     heads=heads,
     #     noise_std=noise_std
     # )
 
@@ -1173,7 +1039,7 @@ if __name__ == "__main__":
     #     df_name="inference_validation"
     # )
 
-    out_dir = f"../pretrained/mhc1_pmclust/"
+    out_dir = f"/home/amirreza/Desktop/PMBind/results/run_PMClust_ns_0.1_hds_2_zdim_21_L1/12"
     # generate negatives
     generate_negatives(
         model_out_dir=out_dir,
