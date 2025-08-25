@@ -19,6 +19,7 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
 from Bio import AlignIO
 from Bio.Align.Applications import MafftCommandline
+from collections import Counter
 
 
 # Constants
@@ -766,28 +767,48 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
 #     result = determine_ks_dict(initial_input, output_dims)
 #     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
 
-def masked_categorical_crossentropy(y_true_y_pred, mask, pad_token=-2.0):
+def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sample_weight=None):
     """
     Compute masked categorical cross-entropy loss.
 
     Args:
-        y_true: True labels (tensor).
-        y_pred: Predicted probabilities (tensor).
+        y_true_and_pred: Concatenated tensor of true labels and predictions.
         mask: Mask tensor indicating positions to include in the loss.
+        pad_token: Value of the padding token in the mask.
+        sample_weight: Optional tensor of shape (B, 1) or (B,) to weight samples.
 
     Returns:
         Mean masked loss (tensor).
     """
-    y_true, y_pred = tf.split(y_true_y_pred, num_or_size_splits=2, axis=-1)
-    # loss = tf.keras.losses.categorical_crossentropy(y_true, y_pred)
-    loss = -tf.reduce_sum(y_true * tf.math.log(tf.clip_by_value(y_pred, 1e-7, 1.0)), axis=-1) #(B,N)
-    mask = tf.cast(mask, tf.float32)  # Ensure mask is float
-    mask = tf.where(mask == pad_token, 0.0, 1.0)  # Convert pad token to 0.0 and others to 1.0
-    if tf.rank(mask) > tf.rank(loss):
+    y_true, y_pred = tf.split(y_true_and_pred, num_or_size_splits=2, axis=-1)
+    y_pred = tf.clip_by_value(y_pred, 1e-9, 1.0)
+
+    # Build a 0/1 mask for non-pad tokens
+    mask = tf.cast(tf.not_equal(mask, pad_token), tf.float32)
+
+    # If mask has an extra trailing dim of 1, squeeze it (static check only)
+    if mask.shape.rank is not None and mask.shape.rank > 2 and mask.shape[-1] == 1:
         mask = tf.squeeze(mask, axis=-1)
-    loss = loss * mask
-    loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
-    return loss
+
+    loss = -tf.reduce_sum(y_true * tf.math.log(y_pred), axis=-1)  # (B, N)
+
+    # Ensure shape compatibility with loss
+    mask = tf.cast(tf.broadcast_to(mask, tf.shape(loss)), tf.float32)
+
+    masked_loss = loss * mask
+
+    # Apply sample weights if provided
+    if sample_weight is not None:
+        sample_weight = tf.cast(sample_weight, tf.float32)
+        if sample_weight.shape.rank == 2 and sample_weight.shape[1] == 1:
+            sample_weight = tf.squeeze(sample_weight, axis=-1) # (B,)
+        # Broadcast sample_weight from (B,) to (B, N) to match masked_loss
+        masked_loss *= sample_weight[:, tf.newaxis]
+        mask *= sample_weight[:, tf.newaxis]
+
+    total_loss = tf.reduce_sum(masked_loss)
+    total_weight = tf.reduce_sum(mask)
+    return tf.math.divide_no_nan(total_loss, total_weight)
 
 
 def split_y_true_y_pred(y_true_y_pred):
@@ -1611,27 +1632,6 @@ def create_k_fold_leave_one_cluster_out_stratified_cv(
 
     return folds
 
-class GlobalSTDPooling1D(layers.Layer):
-    """
-    Global standard deviation pooling layer.
-    Computes the standard deviation across the last axis (features).
-    """
-    def __init__(self, name="global_std_pooling_", mask_token=-1, pad_token=-2, **kwargs):
-        super(GlobalSTDPooling1D, self).__init__(**kwargs)
-        self.name = name
-
-    def call(self, input_tensor, mask=None):
-        """
-        Computes the global standard deviation pooling over the input tensor.
-        :param input_tensor:
-        :param mask:
-        :return:
-        """
-        # inputs: (B, N, D)
-        stddev = tf.math.reduce_std(
-            input_tensor, axis=-1, keepdims=False
-        )
-        return stddev  # (B, D)
 
 class GlobalMeanPooling1D(layers.Layer):
     """
@@ -1654,6 +1654,313 @@ class GlobalMeanPooling1D(layers.Layer):
             input_tensor, axis=-1, keepdims=False
         )
         return mean  # (B, D)
+
+class GlobalSTDPooling1D(layers.Layer):
+    """
+    Global Standard Deviation Pooling layer that computes the standard deviation
+    across the sequence dimension for each feature.
+    Args:
+        name (str): Layer name.
+    """
+    def __init__(self, name='global_std_pooling'):
+        super().__init__(name=name)
+
+    def call(self, input_tensor):
+        """
+        Args:
+            inputs: Input tensor of shape (B, N, D).
+        Returns:
+            Tensor of shape (B, N) containing the standard deviation across D.
+        """
+        pooled_std = tf.math.reduce_std(
+            input_tensor, axis=1, keepdims=False, name=None
+            )
+        return pooled_std
+
+
+class GumbelSoftmax(keras.layers.Layer):
+    """
+    Gumbel-Softmax activation layer.
+
+    Args:
+        temperature (float): Temperature parameter for Gumbel-Softmax.
+    """
+    def __init__(self, temperature=0.2, name="gumble_softmax_layer"):
+        super(GumbelSoftmax, self).__init__(name=name)
+        self.temperature = temperature
+
+    def call(self, logits, training=None):
+        """
+        Applies Gumbel-Softmax.
+
+        Args:
+            logits: Input tensor of shape (B, N).
+            training: Whether the layer is in training mode (not used here but required by Layer API).
+
+        Returns:
+            Tensor of shape (B, N) with Gumbel-Softmax applied.
+        """
+        # Sample Gumbel noise
+        # Use tf.random.uniform for TensorFlow compatibility
+        U = tf.random.uniform(tf.shape(logits), minval=0, maxval=1)
+        gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20) # Add small epsilon for numerical stability
+
+        # Apply Gumbel-Softmax formula
+        y = tf.exp((logits + gumbel_noise) / self.temperature)
+        return y / tf.reduce_sum(y, axis=-1, keepdims=True)
+
+# Reduced alphabet mapping based on MMseqs2
+mmseqs2_reduced_alphabet = {
+    "L": ["L", "M"],
+    "I": ["I", "V"],
+    "K": ["K", "R"],
+    "E": ["E", "Q"],
+    "A": ["A", "S", "T"],
+    "N": ["N", "D"],
+    "F": ["F", "Y"],
+    "G": ["G"],
+    "H": ["H"],
+    "C": ["C"],
+    "P": ["P"],
+    "W": ["W"],
+}
+
+mmseqs2_reduced_alphabet_rev = {
+    "A": "A",
+    "C": "C",
+    "D": "N",
+    "E": "E",
+    "F": "F",
+    "G": "G",
+    "H": "H",
+    "I": "I",
+    "K": "K",
+    "L": "L",
+    "M": "L",
+    "N": "N",
+    "P": "P",
+    "Q": "E",
+    "R": "K",
+    "S": "A",
+    "T": "A",
+    "V": "I",
+    "W": "W",
+    "Y": "F",
+}
+
+def reduced_anchor_pair(peptide_seq: str) -> str:
+    """ Gets the second and last amino acid, maps them to the MMseqs2 reduced alphabet, and returns them as a pair string. """
+    # remove gaps
+    peptide_seq = peptide_seq.replace("-", "").replace("*", "").replace(" ", "").replace("X", "").upper()
+    # print(peptide_seq)
+    if len(peptide_seq) < 2:
+        return "Short"
+    p2 = peptide_seq[1].upper() # second amino acid
+    p_omega = peptide_seq[-1].upper() # last amino acid
+
+    # Map to reduced alphabet, handle missing keys gracefully
+    p2_reduced = mmseqs2_reduced_alphabet_rev.get(p2, 'X')
+    # print(f"p2: {p2}, reduced: {p2_reduced}")
+    p_omega_reduced = mmseqs2_reduced_alphabet_rev.get(p_omega, 'X')
+    # print(f"p_omega: {p_omega}, reduced: {p_omega_reduced}")
+
+    return f"{p2_reduced}-{p_omega_reduced}" # e.g. "A-S" should return 144 combinations
+
+ # --- Helper function and data for physiochemical properties ---
+from collections import Counter
+from typing import Dict
+
+from Bio.SeqUtils.ProtParam import ProteinAnalysis
+
+VALID_AA = set("ACDEFGHIKLMNPQRSTVWY")
+POLAR_UNCHARGED = set("STNQCY")
+CHARGED = set("KRHDE")
+POLAR_SET = POLAR_UNCHARGED | CHARGED
+
+def peptide_properties_biopython(seq: str, pH: float = 7.4) -> Dict[str, float]:
+    """
+    Compute peptide properties using Biopython's ProtParam:
+      - Kyte–Doolittle average hydrophobicity (GRAVY)
+      - Net charge at given pH (includes termini)
+      - Fraction of polar residues (charged + polar uncharged)
+      - Isoelectric point (pI)
+      - Aromaticity
+      - Instability index
+      - Molecular weight
+      - Extinction coefficients (reduced and with cystines)
+    Unknowns/gaps (e.g., X, - , *) are removed before analysis.
+    """
+    if not seq:
+        return {
+            "original_length": 0,
+            "analyzed_length": 0,
+            "hydrophobicity": 0.0,
+            "charge": 0.0,
+            "fraction_polar": 0.0,
+            "pI": 0.0,
+            "aromaticity": 0.0,
+            "instability_index": 0.0,
+            "molecular_weight": 0.0,
+            "extinction_coeff_reduced": 0,
+            "extinction_coeff_cystine": 0,
+        }
+
+    seq = seq.upper()
+    cleaned = "".join(aa for aa in seq if aa in VALID_AA)
+    L = len(cleaned)
+
+    if L == 0:
+        return {
+            "original_length": len(seq),
+            "analyzed_length": 0,
+            "hydrophobicity": 0.0,
+            "charge": 0.0,
+            "fraction_polar": 0.0,
+            "pI": 0.0,
+            "aromaticity": 0.0,
+            "instability_index": 0.0,
+            "molecular_weight": 0.0,
+            "extinction_coeff_reduced": 0,
+            "extinction_coeff_cystine": 0,
+        }
+
+    pa = ProteinAnalysis(cleaned)
+    counts = Counter(cleaned)
+
+    gravy = pa.gravy()  # Kyte–Doolittle average hydropathy
+    charge = pa.charge_at_pH(pH)  # includes side chains + N/C termini
+    frac_polar = sum(n for aa, n in counts.items() if aa in POLAR_SET) / L
+
+    pI = pa.isoelectric_point()
+    aromaticity = pa.aromaticity()
+    instability = pa.instability_index()
+    mw = pa.molecular_weight()
+    # Returns (reduced, with cystines)
+    ext_reduced, ext_cystine = pa.molar_extinction_coefficient()
+
+    return {
+        "original_length": len(seq),
+        "analyzed_length": L,
+        "hydrophobicity": gravy,
+        "charge": charge,
+        "fraction_polar": frac_polar,
+        "pI": pI,
+        "aromaticity": aromaticity,
+        "instability_index": instability,
+        "molecular_weight": mw,
+        "extinction_coeff_reduced": ext_reduced,
+        "extinction_coeff_cystine": ext_cystine,
+    }
+
+
+def cn_terminal_amino_acids(peptide: str, n_term_len: int = 3, c_term_len: int = 3) -> dict:
+    """
+    Analyzes a peptide sequence to determine the dominant chemical property
+    (polar, hydrophobic, or charged) of its N-terminal, C-terminal, and core regions.
+
+    Args:
+        peptide (str): The amino acid sequence of the peptide.
+        n_term_len (int): The number of amino acids to consider for the N-terminus.
+        c_term_len (int): The number of amino acids to consider for the C-terminus.
+
+    Returns:
+        dict: A dictionary with keys 'N-term', 'Core', and 'C-term', where the values
+              are strings indicating the region and its dominant property
+              (e.g., 'N-term_polar').
+    """
+    # --- Define Amino Acid Properties ---
+    # Using sets for efficient membership checking
+    polar_aa = {'S', 'T', 'C', 'N', 'Q', 'Y'}
+    hydrophobic_aa = {'A', 'V', 'I', 'L', 'M', 'F', 'W', 'P', 'G'}
+    # Both acidic (-) and basic (+) are considered 'charged'
+    charged_aa = {'D', 'E', 'R', 'K', 'H'}
+
+    def get_property(amino_acid: str) -> str:
+        """Helper function to classify a single amino acid."""
+        if amino_acid in polar_aa:
+            return 'polar'
+        if amino_acid in hydrophobic_aa:
+            return 'hydrophobic'
+        if amino_acid in charged_aa:
+            return 'charged'
+        return 'unknown'  # Should not happen with standard peptides
+
+    def get_dominant_property(sequence: str) -> str:
+        """
+        Helper function to find the most common property in a sequence.
+        In case of a tie, the priority is hydrophobic > polar > charged.
+        """
+        if not sequence:
+            return 'none'  # Handle empty core sequences
+
+        properties = [get_property(aa) for aa in sequence]
+
+        # Count occurrences of each property
+        counts = Counter(properties)
+
+        # Determine the dominant property with a tie-breaking rule
+        # The key for sorting is a tuple of the count and a priority value
+        # Higher count is better, lower priority value is better for ties
+        priority = {'hydrophobic': 0, 'polar': 1, 'charged': 2, 'none': 3, 'unknown': 4}
+
+        # Find the property with the maximum count, using priority to break ties
+        dominant_prop = max(counts, key=lambda prop: (counts[prop], -priority[prop]))
+
+        return dominant_prop
+
+    # --- Define Peptide Regions ---
+    # Ensure the function handles peptides shorter than the defined terminal lengths
+    actual_n_len = min(n_term_len, len(peptide))
+    actual_c_len = min(c_term_len, len(peptide))
+
+    n_terminal_seq = peptide[:actual_n_len]
+    c_terminal_seq = peptide[-actual_c_len:]
+
+    # The core is what's left in the middle
+    # Handle cases where terminals overlap or there is no core
+    if len(peptide) > actual_n_len + actual_c_len:
+        core_seq = peptide[actual_n_len:-actual_c_len]
+    else:
+        core_seq = ""  # No distinct core
+
+    # --- Classify Each Region ---
+    n_term_prop = get_dominant_property(n_terminal_seq)
+    c_term_prop = get_dominant_property(c_terminal_seq)
+    core_prop = get_dominant_property(core_seq)
+
+    # --- Format Output ---
+    # This format matches the keys in your `segment_color_map`
+    result = {
+        'N-term': f'N-term_{n_term_prop}',
+        'Core': f'Core_{core_prop}',
+        'C-term': f'C-term_{c_term_prop}'
+    }
+
+    return result
+
+
+# # --- Example Usage ---
+# if __name__ == '__main__':
+#     # Create a dummy DataFrame similar to your use case
+#     data = {'long_mer': ['SKIVYWQPL', 'GLACGTGVN', 'RGYVYQGL', 'LLFGYPVYV']}
+#     df = pd.DataFrame(data)
+#
+#     # Apply the function to the DataFrame column
+#     # The .apply(pd.Series) part expands the dictionary output into separate columns
+#     cn_peptide_df = df['long_mer'].apply(cn_terminal_amino_acids).apply(pd.Series)
+#
+#     print("--- Original Peptides ---")
+#     print(df)
+#     print("\n--- Classified Peptide Regions ---")
+#     print(cn_peptide_df)
+#
+#     # Example 1: SKIVYWQPL
+#     # N-term: SKI -> charged, polar, hydrophobic -> tie, resolved to hydrophobic
+#     # C-term: QPL -> polar, hydrophobic, hydrophobic -> hydrophobic
+#     # Core: VYW -> hydrophobic, polar, polar -> polar
+#     # Expected: N-term_hydrophobic, Core_polar, C-term_hydrophobic
+#     print("\n--- Detailed check for 'SKIVYWQPL' ---")
+#     print(cn_terminal_amino_acids('SKIVYWQPL'))
 
 # Usage example
 #
