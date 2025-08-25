@@ -22,7 +22,7 @@ from utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbe
                        SelfAttentionWith2DMask, AddGaussianNoise, RotaryPositionalEncoding,
                        SubtractLayer, SubtractAttentionLayer, MaskedCategoricalCrossentropy,
                        masked_categorical_crossentropy, RotaryPositionalEncoding,
-                        GlobalSTDPooling1D,GlobalMeanPooling1D)
+                        GlobalSTDPooling1D,GlobalMeanPooling1D, GlobalSTDPooling1D, GumbelSoftmax)
 
 
 MASK_TOKEN = -1.0
@@ -245,7 +245,7 @@ def bicross_recon_mini(max_pep_len: int,
 #################################################################################################
 def pmclust_subtract(max_pep_len: int,
                        max_mhc_len: int,
-                       emb_dim: int = 96,
+                       emb_dim: int = 21,
                        heads: int = 4,
                        noise_std: float = 0.1,
                        mask_token: float = MASK_TOKEN,
@@ -269,13 +269,13 @@ def pmclust_subtract(max_pep_len: int,
     pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
     pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
     pep = layers.LayerNormalization(name="pep_norm1")(pep)
-    pep = layers.Dropout(0.1, name="pep_Dropout1")(pep)
+    pep = layers.Dropout(0.2, name="pep_Dropout1")(pep)
 
     mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
     mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
     mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
     mhc = layers.LayerNormalization(name="mhc_norm1")(mhc)
-    mhc = layers.Dropout(0.1, name="mhc_Dropout1")(mhc)
+    mhc = layers.Dropout(0.2, name="mhc_Dropout1")(mhc)
 
     # -------------------------------------------------------------------
     # Subtract Layer
@@ -313,6 +313,7 @@ def pmclust_subtract(max_pep_len: int,
     # -------------------------------------------------------------------
     latent_sequence = layers.Dense(emb_dim * max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(
         mhc_subtracted_p_attn)
+    latent_sequence = layers.LayerNormalization(name="latent_mhc_norm1")(latent_sequence)
     latent_sequence = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_sequence)
     latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence)  # Shape: (B, M, D)
 
@@ -333,7 +334,6 @@ def pmclust_subtract(max_pep_len: int,
     # -------------------------------------------------------------------
     # MODELS
     # -------------------------------------------------------------------
-
     enc_dec = keras.Model([pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in],
                           {"pep_ytrue_ypred": pep_out,
                            "mhc_ytrue_ypred": mhc_out,
@@ -342,13 +342,6 @@ def pmclust_subtract(max_pep_len: int,
                             "attention_scores_CA": peptide_cross_attn_scores},
                           name="encoder_decoder")
 
-    # loss_fn = masked_categorical_crossentropy
-    #
-    # enc_dec.compile(
-    #     optimizer=keras.optimizers.Adam(1e-4),
-    #     loss={"pep_ytrue_ypred": loss_fn,
-    #           "mhc_ytrue_ypred": loss_fn},
-    # )
     return enc_dec
 
 
@@ -490,195 +483,116 @@ def pmclust_cross_attn(max_pep_len: int,
 
 
 ########################################## MoE ###############################################
-class Expert(layers.Layer):
-    """A binary prediction expert with added complexity."""
+class ExpertLayer(keras.layers.Layer):
+    """
+    Expert layer that applies a dense transformation to the input.
 
-    def __init__(self, input_dim, hidden_dim, output_dim=1, dropout_rate=0.2):
-        super().__init__()
-        self.fc1 = layers.Dense(hidden_dim, activation='relu', input_shape=(input_dim,))
-        self.dropout1 = layers.Dropout(dropout_rate)
-        self.fc2 = layers.Dense(hidden_dim // 2, activation='relu')
-        self.dropout2 = layers.Dropout(dropout_rate)
-        self.fc3 = layers.Dense(output_dim)
+    Args:
+        input_dim (int): Input dimension.
+        hidden_dim (int): Hidden dimension.
+        output_dim (int): Output dimension.
+        dropout_rate (float): Dropout rate.
+    """
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout_rate=0.2):
+        super(ExpertLayer, self).__init__()
+        self.w_init = tf.random_normal_initializer(stddev=0.1)
+        self.z_init = tf.zeros_initializer()
+        self.input_dim = input_dim
+        self.dense1 = keras.layers.Dense(
+            hidden_dim,  # Changed from output_dim to hidden_dim
+            kernel_initializer=self.w_init,
+            bias_initializer=self.z_init,
+            name='expert_dense1'
+        )
+        self.dropout1 = keras.layers.Dropout(dropout_rate, name='expert_dropout1')
+        self.dense2 = keras.layers.Dense(
+            output_dim,  # Keep as output_dim
+            kernel_initializer=self.w_init,
+            bias_initializer=self.z_init,
+            name='expert_dense2'
+        )
+        self.dropout = keras.layers.Dropout(dropout_rate, name='expert_dropout2')
 
     def call(self, x, training=False):
-        x = self.fc1(x)
-        x = self.dropout1(x, training=training)
-        x = self.fc2(x)
-        x = self.dropout2(x, training=training)
-        x = self.fc3(x)
-        return tf.nn.sigmoid(x)
+        x = self.dense1(x)
+        x = tf.nn.relu(x)  # Apply ReLU activation after first layer
+        if training:
+            x = self.dropout1(x, training=training)
+        x = self.dense2(x)
+        if training:
+            x = self.dropout(x, training=training)
+        # Removed final ReLU to allow negative outputs before sigmoid
+        return x
 
 
-class EnhancedMixtureOfExperts(layers.Layer):
+class EnhancedMixtureOfExperts(keras.layers.Layer):
     """
     Enhanced Mixture of Experts layer that uses cluster assignments.
 
-    This implementation eliminates the need for a SparseDispatcher by:
-    - During training: Using hard clustering to train specific experts
-    - During inference: Using soft clustering to mix the experts' weights
+    - During training: use hard clustering (vector) to route to a specific expert per sample
+    - During inference: use soft clustering to mix experts' weights per sample
     """
 
-    def __init__(self, input_dim, hidden_dim, num_experts, output_dim=1,
-                 use_hard_clustering=True, dropout_rate=0.2):
-        super().__init__()
+    def __init__(self, input_dim, hidden_dim=32, num_experts=16, output_dim=1, dropout_rate=0.2):
+        super(EnhancedMixtureOfExperts, self).__init__()
+        self.input_dim = input_dim
+        #self.hidden_dim = hidden_dim
         self.num_experts = num_experts
-        self.use_hard_clustering = use_hard_clustering
         self.output_dim = output_dim
 
-        # Create n experts
-        self.experts = [
-            Expert(input_dim, hidden_dim, output_dim, dropout_rate)
-            for _ in range(num_experts)
-        ]
+        #self.experts = [ExpertLayer(self.input_dim, self.hidden_dim, self.output_dim, dropout_rate) for _ in range(self.num_experts)]
 
-    def convert_to_hard_clustering(self, soft_clusters):
-        """Convert soft clustering values to hard clustering (one-hot encoding)"""
-        # Get the index of the maximum value for each sample
-        hard_indices = tf.argmax(soft_clusters, axis=1)
-        # Convert to one-hot encoding
-        return tf.one_hot(hard_indices, depth=self.num_experts)
+    def build(self, inputs):
+        self.gate_weight = self.add_weight(shape=(self.input_dim, self.num_experts),
+                                           initializer='random_uniform',
+                                            trainable=True,
+                                            name='gate_weight')
+        self.dense_weight = self.add_weight(shape=(self.num_experts, self.input_dim, self.output_dim),
+                                            initializer='random_normal',
+                                            trainable=True,
+                                            name='dense_weight')
+        self.bias = self.add_weight(shape=(self.num_experts, self.output_dim),
+                                    initializer='zeros',
+                                    trainable=True,
+                                    name='bias')
 
-    def call(self, inputs, training=False):
-        # Unpack inputs
-        if isinstance(inputs, tuple) and len(inputs) == 2:
-            x, soft_cluster_probs = inputs
+
+    # def hardmax(self, soft_clusters):
+    #     """
+    #     Convert soft clustering to hard clustering by selecting the max index.
+    #     Args:
+    #         soft_clusters: Tensor of shape (B, num_experts).
+    #     Returns:
+    #         Hard clustering tensor of shape (B, num_experts).
+    #     """
+    #     hard_indices = tf.argmax(soft_clusters, axis=-1)
+    #     hard_clusters = tf.one_hot(hard_indices, depth=self.num_experts, dtype=tf.float32)
+    #     return hard_clusters
+
+    def call(self, x_batch, training=False):
+        """
+        We have to generate a one-hot encoding that defines which expert is activated for each sample. (B, num_experts, ohe_num_experts).
+
+        Args:
+            x: Input tensor of shape (B, input_dim).
+            training: Whether the layer is in training mode.
+        Returns:
+            Output tensor of shape (B, output_dim).
+        """
+        gate = tf.matmul(x_batch, self.gate_weight) # (B, num_experts)
+        if training:
+            gate_probs = tf.nn.softmax(gate / 0.2, axis=-1)
         else:
-            raise ValueError("Inputs must include both features and clustering values")
+            gate_probs = tf.nn.softmax(gate, axis=-1)
+        gate_probs = tf.expand_dims(gate_probs, axis=-1) #(B, num_experts, 1)
+        # tf.print("Gate probabilities shape:", gate_probs.shape, "Gate probabilities:", gate_probs)
+        # gate_probs dim = (B, input_dim)
+        out = tf.einsum('bi,eio->beo', x_batch, self.dense_weight) #(B, num_experts, output_dim)
+        out = out + self.bias #(B, num_experts, output_dim)
+        out = tf.multiply(out, gate_probs) #(B, num_experts, output_dim)
+        out = tf.reduce_sum(out, axis=1) #(B, output_dim)
+        return out, gate_probs
 
-        batch_size = tf.shape(x)[0]
-
-        # Convert to hard clustering during training if requested
-        if training and self.use_hard_clustering:
-            clustering = self.convert_to_hard_clustering(soft_cluster_probs)
-        else:
-            clustering = soft_cluster_probs
-
-        # Initialize output tensor
-        combined_output = tf.zeros([batch_size, self.output_dim])
-
-        # Process each expert
-        for i, expert in enumerate(self.experts):
-            # Get the weight for this expert for each sample in the batch
-            expert_weights = clustering[:, i:i + 1]  # Shape: [batch_size, 1]
-
-            # Only compute outputs for samples with non-zero weights
-            # to save computation during training with hard clustering
-            if training and self.use_hard_clustering:
-                # Find samples assigned to this expert
-                assigned_indices = tf.where(expert_weights[:, 0] > 0)[:, 0]
-
-                if tf.math.greater(tf.size(assigned_indices), 0):
-                    # Get assigned samples
-                    assigned_x = tf.gather(x, assigned_indices)
-
-                    # Get expert output for assigned samples
-                    expert_output = expert(assigned_x, training=training)
-
-                    # Use scatter_nd to place results back into full batch tensor
-                    indices = tf.expand_dims(assigned_indices, axis=1)
-                    updates = expert_output
-                    combined_output += tf.scatter_nd(indices, updates, [batch_size, self.output_dim])
-            else:
-                # During inference or when using soft clustering:
-                # Compute expert output for all samples
-                expert_output = expert(x, training=training)
-
-                # Weight the output by the clustering values
-                weighted_output = expert_output * expert_weights
-
-                # Add to combined output
-                combined_output += weighted_output
-
-        return combined_output
-
-
-class EnhancedMoEModel(tf.keras.Model):
-    """Complete model wrapping the Enhanced MoE layer"""
-
-    def __init__(self, input_dim, hidden_dim, num_experts, output_dim=1,
-                 use_hard_clustering=True, dropout_rate=0.2):
-        super().__init__()
-        self.use_hard_clustering = use_hard_clustering
-        self.moe_layer = EnhancedMixtureOfExperts(
-            input_dim,
-            hidden_dim,
-            num_experts,
-            output_dim=output_dim,
-            use_hard_clustering=use_hard_clustering,
-            dropout_rate=dropout_rate
-        )
-
-    def call(self, inputs, training=False):
-        return self.moe_layer(inputs, training=training)
-
-    def train_step(self, data):
-        if isinstance(data, tuple) and len(data) == 2:
-            # Unpack the data
-            x, y = data
-
-            # Ensure x contains both inputs and clustering values
-            if not (isinstance(x, tuple) and len(x) == 2):
-                raise ValueError("Input must be a tuple of (features, clustering)")
-        else:
-            raise ValueError("Training data must include both inputs and labels")
-
-        # Unpack inputs
-        inputs, soft_cluster_vector = x
-
-        with tf.GradientTape() as tape:
-            # Forward pass
-            predictions = self(x, training=True)
-
-            # Compute loss
-            loss = self.compiled_loss(y, predictions, regularization_losses=self.losses)
-
-            # Add expert load balancing loss if using soft clustering
-            if not self.use_hard_clustering:
-                expert_usage = tf.reduce_mean(soft_cluster_vector, axis=0)
-                load_balancing_loss = tf.reduce_sum(expert_usage * tf.math.log(expert_usage + 1e-10)) * 0.01
-                loss += load_balancing_loss
-
-        # Compute gradients and update weights
-        gradients = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-
-        # Update metrics
-        self.compiled_metrics.update_state(y, predictions)
-
-        # Return metrics
-        results = {m.name: m.result() for m in self.metrics}
-        results.update({'loss': loss})
-        return results
-
-    def test_step(self, data):
-        if isinstance(data, tuple) and len(data) == 2:
-            # Unpack the data
-            x, y = data
-
-            # Ensure x contains both inputs and clustering values
-            if not (isinstance(x, tuple) and len(x) == 2):
-                raise ValueError("Input must be a tuple of (features, clustering)")
-        else:
-            raise ValueError("Test data must include both inputs and labels")
-
-        # Forward pass (always use soft clustering for inference)
-        original_hard_clustering = self.moe_layer.use_hard_clustering
-        self.moe_layer.use_hard_clustering = False
-        predictions = self(x, training=False)
-        self.moe_layer.use_hard_clustering = original_hard_clustering
-
-        # Compute loss
-        loss = self.compiled_loss(y, predictions, regularization_losses=self.losses)
-
-        # Update metrics
-        self.compiled_metrics.update_state(y, predictions)
-
-        # Return metrics
-        results = {m.name: m.result() for m in self.metrics}
-        results.update({'loss': loss})
-        return results
-#######################################################################################
 
 
 ####
@@ -687,8 +601,7 @@ def pmbind_subtract_moe_auto(max_pep_len: int,
                                emb_dim: int = 96,
                                heads: int = 4,
                                noise_std: float = 0.1,
-                               num_experts: int = 5,
-                               use_hard_clustering: bool = True,
+                               num_experts: int = 30,
                                mask_token: float = MASK_TOKEN,
                                pad_token: float = PAD_TOKEN):
     """
@@ -704,118 +617,119 @@ def pmbind_subtract_moe_auto(max_pep_len: int,
     # -------------------------------------------------------------------
     pep_OHE_in = keras.Input((max_pep_len, 21), name="pep_onehot")
     pep_mask_in = keras.Input((max_pep_len,), name="pep_mask")
+
     mhc_emb_in = keras.Input((max_mhc_len, 1152), name="mhc_emb")
     mhc_mask_in = keras.Input((max_mhc_len,), name="mhc_mask")
-    mhc_OHE_in = keras.Input((max_mhc_len, 21), name="mhc_onehot")
-    # Input for the classification label, not used in model graph but needed for training
-    y_in = keras.Input(shape=(1,), name="label")
+
+    mhc_OHE_in = keras.Input((max_mhc_len, 21), name="mhc_onehot")  # Optional input for MHC one-hot encoding
 
     # -------------------------------------------------------------------
-    # MASKED EMBEDDING + POSITIONAL ENCODING
+    # MASKED  EMBEDDING  +  PE
     # -------------------------------------------------------------------
     pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
     pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
     pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
-    pep = layers.Dropout(0.1, name="pep_Dropout1")(pep)
+    pep = layers.LayerNormalization(name="pep_norm1")(pep)
+    pep = layers.Dropout(0.2, name="pep_Dropout1")(pep)
 
     mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
     mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
     mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
-    mhc = layers.Dropout(0.1, name="mhc_Dropout1")(mhc)
+    mhc = layers.LayerNormalization(name="mhc_norm1")(mhc)
+    mhc = layers.Dropout(0.2, name="mhc_Dropout1")(mhc)
 
     # -------------------------------------------------------------------
-    # INTERACTION & LATENT SPACE
+    # Subtract Layer
     # -------------------------------------------------------------------
-    mhc_subtracted_p = SubtractLayer(name="pmhc_subtract")(pep, pep_mask_in, mhc, mhc_mask_in)
+    mhc_subtracted_p = SubtractLayer(name="pmhc_subtract")(pep, pep_mask_in, mhc,
+                                                           mhc_mask_in)  # (B, M, P*D) = mhc_expanded – peptide_expanded
+    tf.print("mhc_subtracted_p shape:", mhc_subtracted_p.shape)
+
+    # -------------------------------------------------------------------
+    # Add Gaussian Noise
+    # -------------------------------------------------------------------
     mhc_subtracted_p = AddGaussianNoise(noise_std, name="pmhc_gaussian_noise")(mhc_subtracted_p)
 
     query_dim = int(emb_dim * max_pep_len)
+
+    # # -------------------------------------------------------------------
+    # Normal Self-Attention Layer
+    # # -------------------------------------------------------------------
     mhc_subtracted_p_attn, mhc_subtracted_p_attn_scores = AttentionLayer(
         query_dim=query_dim, context_dim=query_dim, output_dim=query_dim,
-        type="self", heads=heads, resnet=True, return_att_weights=True,
-        name='mhc_subtracted_p_attn', mask_token=mask_token, pad_token=pad_token
+        type="self", heads=heads, resnet=True,
+        return_att_weights=True, name='mhc_subtracted_p_attn',
+        mask_token=mask_token,
+        pad_token=pad_token
     )(mhc_subtracted_p, mhc_mask_in)
-
-    latent_sequence = layers.Dense(emb_dim * max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(mhc_subtracted_p_attn)
-    latent_sequence = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_sequence)
-    latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence)
-
-    latent_vector = layers.GlobalAveragePooling1D(name="gap_latent")(latent_sequence)
-    latent_vector = layers.Dense(emb_dim * 2, activation='relu', name='latent_dense2')(latent_vector)
-    latent_vector = layers.Dropout(0.2, name='latent_vector_dropout')(latent_vector)
-    latent_vector = layers.Dense(emb_dim, activation='relu', name='latent_vector_output')(latent_vector)
-
-    # -------------------------------------------------------------------
-    # RECONSTRUCTION HEADS
-    # -------------------------------------------------------------------
-    peptide_cross_att, _ = AttentionLayer(
+    peptide_cross_att, peptide_cross_attn_scores = AttentionLayer(
         query_dim=int(emb_dim), context_dim=query_dim, output_dim=int(emb_dim),
-        type="cross", heads=heads, resnet=False, return_att_weights=True,
-        name='peptide_cross_att', mask_token=mask_token, pad_token=pad_token
+        type="cross", heads=heads, resnet=False,
+        return_att_weights=True, name='peptide_cross_att',
+        mask_token=mask_token,
+        pad_token=pad_token
     )(pep, pep_mask_in, mhc_subtracted_p_attn, mhc_mask_in)
 
+    # -------------------------------------------------------------------
+    # RECONSTRUCTION  HEADS
+    # -------------------------------------------------------------------
+    latent_sequence = layers.Dense(emb_dim * max_pep_len * 2, activation='relu', name='latent_mhc_dense1')(
+        mhc_subtracted_p_attn)
+    latent_sequence = layers.LayerNormalization(name="latent_mhc_norm1")(latent_sequence)
+    latent_sequence = layers.Dropout(0.2, name='latent_mhc_dropout1')(latent_sequence)
+    latent_sequence = layers.Dense(emb_dim, activation='relu', name='cross_latent')(latent_sequence)  # Shape: (B, M, D)
+
+    # --- Latent Vector for Clustering (pooled) ---
+    avg_pooled = GlobalMeanPooling1D(name="avg_pooled")(latent_sequence)  # Shape: (B, D)
+    std_pooled = GlobalSTDPooling1D(name="std_pooled")(latent_sequence)
+    latent_vector = layers.Concatenate(name="latent_vector_concat", axis=-1)(
+        [avg_pooled, std_pooled])  # Shape: (B, max_mhc_len+D)
+
+    # --- Reconstruction Heads ---
     mhc_recon_head = layers.Dropout(0.2, name='latent_mhc_dropout2')(latent_sequence)
     mhc_recon = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon_head)
     pep_recon = layers.Dense(emb_dim, activation='relu', name='pep_latent')(peptide_cross_att)
     pep_recon = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
 
-    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon])
-    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon])
+    pep_out = layers.Concatenate(name='pep_ytrue_ypred', axis=-1)([pep_OHE_in, pep_recon]) #(B,P,42)
+    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred', axis=-1)([mhc_OHE_in, mhc_recon]) #(B,M,42)
 
     # -------------------------------------------------------------------
     # CLASSIFIER HEAD (MIXTURE OF EXPERTS)
     # -------------------------------------------------------------------
     # 1. Gating network: Generate soft cluster assignments from the latent vector
-    soft_cluster_probs = layers.Dense(num_experts, activation='softmax', name='gating_network')(latent_vector)
+    # bigger_probs = layers.Dense(num_experts * 2, activation='relu', name='gating_network_dense1')(latent_vector)
+    # bigger_probs = layers.Dropout(0.2, name='gating_network_dropout1')(bigger_probs)
+    # logits = layers.Dense(num_experts, name='gating_network_logits')(bigger_probs)
+
+    # soft_cluster_probs = GumbelSoftmax(name="gumble_softmax")(logits) # Shape: (B, num_experts)
+    # soft_cluster_probs = layers.Activation('softmax', name="soft_cluster_probs")(logits)  # Shape: (B, num_experts)
 
     # 2. MoE layer: Get weighted prediction from experts
     moe_layer = EnhancedMixtureOfExperts(
-        input_dim=emb_dim,
-        hidden_dim=emb_dim // 2,
+        input_dim=max_mhc_len+emb_dim,
+        hidden_dim=emb_dim * 2,
         num_experts=num_experts,
         output_dim=1,
-        use_hard_clustering=use_hard_clustering,
         dropout_rate=0.2
     )
-    y_pred = moe_layer((latent_vector, soft_cluster_probs))
-    y_pred = layers.Activation('sigmoid', name='classification_output')(y_pred)
+    pred_logits, gate_probs = moe_layer(latent_vector) # (B, 1)
+    y_pred = layers.Dense(1, activation='sigmoid', name='cls_ypred')(pred_logits)  # Final logit output
 
     # -------------------------------------------------------------------
     # MODEL DEFINITION
     # -------------------------------------------------------------------
     model = keras.Model(
-        inputs=[pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in, y_in],
+        inputs=[pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in, mhc_OHE_in],
         outputs={
             "pep_ytrue_ypred": pep_out,
             "mhc_ytrue_ypred": mhc_out,
-            "classification_output": y_pred,
-            "cross_latent": latent_sequence,
             "latent_vector": latent_vector,
-            "soft_cluster_probs": soft_cluster_probs,
-            "attention_scores_CA": mhc_subtracted_p_attn_scores
+            "soft_cluster_probs": gate_probs,
+            "cls_ypred": y_pred,
         },
         name="pmbind_subtract_moe_autoencoder"
     )
-
-    # Compile the model with multiple losses
-    model.compile(
-        optimizer=keras.optimizers.Adam(1e-4),
-        loss={
-            "pep_ytrue_ypred": masked_categorical_crossentropy,
-            "mhc_ytrue_ypred": masked_categorical_crossentropy,
-            "classification_output": 'binary_crossentropy'
-        },
-        loss_weights={
-            "pep_ytrue_ypred": 0.5,  # Weight reconstruction loss
-            "mhc_ytrue_ypred": 0.5,
-            "classification_output": 1.0  # Weight classification loss higher
-        },
-        metrics={
-            "classification_output": ['accuracy', tf.keras.metrics.AUC(name='auc')]
-        }
-    )
-    # Add the label to the loss calculation for the classification output
-    model.add_loss(model.loss_functions[2](y_in, y_pred))
 
     return model
 
@@ -823,187 +737,187 @@ def pmbind_subtract_moe_auto(max_pep_len: int,
 
 
 # Test run with synthetic data
-if __name__ == "__main__":
-    tf.random.set_seed(0)
-    np.random.seed(0)
-
-    # Parameters
-    max_pep_len = 14
-    max_mhc_len = 342
-    batch_size = 32
-    pep_emb_dim = 128
-    mhc_emb_dim = 128
-    heads = 4
-
-    # Generate synthetic data
-    # Define amino acids
-    # Define amino acids
-    AA = "ACDEFGHIKLMNPQRSTVWY"
-
-    # Position-specific amino acid frequencies for peptides
-    # Simplified frequencies where certain positions prefer specific amino acids
-    pep_pos_freq = {
-        0: {"A": 0.3, "G": 0.2, "M": 0.2},  # Position 1 prefers A, G, M
-        1: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 2 prefers hydrophobic
-        2: {"D": 0.2, "E": 0.2, "N": 0.2},  # Position 3 prefers charged/polar
-    }
-    # Default distribution for other positions
-    default_aa_freq = {aa: 1/len(AA) for aa in AA}
-
-    # Generate peptides with position-specific preferences
-    pep_lengths = np.random.choice([8, 9, 10, 11], size=batch_size, p=[0.1, 0.6, 0.2, 0.1])  # More realistic length distribution
-    pep_seqs = []
-    for length in pep_lengths:
-        seq = []
-        for pos in range(length):
-            # Use position-specific frequencies if available, otherwise default
-            freq = pep_pos_freq.get(pos, default_aa_freq)
-            # Convert frequencies to probability array
-            aa_list = list(AA)
-            probs = [freq.get(aa, 0.01) for aa in aa_list]
-            probs = np.array(probs) / sum(probs)  # Normalize
-            seq.append(np.random.choice(aa_list, p=probs))
-        pep_seqs.append(''.join(seq))
-
-    # Convert peptide sequences to one-hot encoding
-    pep_OHE = np.array([seq_to_onehot(seq, max_pep_len) for seq in pep_seqs], dtype=np.float32)
-    mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
-    for i, length in enumerate(pep_lengths):
-        mask_pep[i, :length] = 1.0
-
-    # MHC alleles typically have conserved regions
-    mhc_pos_freq = {
-        0: {"G": 0.5, "D": 0.3},  # First position often G or D
-        1: {"S": 0.4, "H": 0.3, "F": 0.2},
-        # Add more positions as needed
-    }
-
-    # Generate MHC sequences with more realistic properties
-    mhc_lengths = np.random.randint(340,342, size=batch_size)  # Less variation in length
-    mhc_seqs = []
-    for length in mhc_lengths:
-        seq = []
-        for pos in range(length):
-            freq = mhc_pos_freq.get(pos, default_aa_freq)
-            aa_list = list(AA)
-            probs = [freq.get(aa, 0.01) for aa in aa_list]
-            probs = np.array(probs) / sum(probs)
-            seq.append(np.random.choice(aa_list, p=probs))
-        mhc_seqs.append(''.join(seq))
-
-    # Generate MHC embeddings (simulating ESM or similar)
-    mhc_EMB = np.random.randn(batch_size, max_mhc_len, 1152).astype(np.float32)
-    mhc_OHE = np.array([seq_to_onehot(seq, max_mhc_len) for seq in mhc_seqs], dtype=np.float32)
-
-    # Create masks for MHC sequences
-    mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
-    for i, length in enumerate(mhc_lengths):
-        mask_mhc[i, :length] = 1.0
-        mhc_EMB[i, length:, :] = 0.0  # Zero out padding positions
-
-    # Generate MHC IDs (could represent allele types)
-    mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
-
-    # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
-    # mask_pep[np.random.rand(batch_size, max_pep_len) < 0.15] = MASK_TOKEN
-    # pep_OHE[mask_pep == MASK_TOKEN] = 0.0  # Zero out masked positions
-    # # mask 0.15 of the MHC positions update the mask with MASK_TOKEN and zero out the corresponding positions in the EMB
-    # mask_mhc[np.random.rand(batch_size, max_mhc_len) < 0.15] = MASK_TOKEN
-    # mhc_EMB[mask_mhc == MASK_TOKEN] = 0.0  # Zero out masked positions
-
-    # convert all inputs tensors
-    # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=tf.float32)
-    # mask_pep = tf.convert_to_tensor(mask_pep, dtype=tf.float32)
-    # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=tf.float32)
-    # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=tf.float32)
-    # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=tf.float32)
-
-    # Cov layers
-    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20, max_kernel_size=60)
-
-    # Build models
-    encoder, encoder_decoder = bicross_recon(
-        max_pep_len=max_pep_len,
-        max_mhc_len=max_mhc_len,
-        mask_token=MASK_TOKEN,
-        pad_token=PAD_TOKEN,
-        pep_emb_dim=pep_emb_dim,
-        mhc_emb_dim=mhc_emb_dim,
-        heads=heads,
-    )
-
-    # Print model summaries
-    encoder.summary()
-    encoder_decoder.summary()
-
-    # Train
-    encoder_decoder.fit(x=[pep_OHE, mask_pep, mhc_EMB, mask_mhc],
-                        y={'pep_reconstruction': pep_OHE, 'mhc_reconstruction': mhc_OHE},
-                        epochs=200, batch_size=batch_size )
-
-    # save the model
-    encoder_decoder.save("h5/bicross_encoder_decoder.h5")
-
-    outputs = encoder_decoder.predict([pep_OHE, mask_pep, mhc_EMB, mask_mhc])
-    pep_recon = outputs['pep_reconstruction']  # Shape: (batch_size, max_pep_len, 21)
-    mhc_recon = outputs['mhc_reconstruction']  # Shape: (batch_size, max_mhc_len, 21)
-    # barcoded_mhc_attn = outputs['barcode_mhc_attn']  # Shape: (batch_size, max_pep_len + max_mhc_len, mhc_emb_dim)
-    conv_mhc_attn_scores = outputs['mhc_to_pep_attn_score']  # Shape: (batch_size, heads, max_pep_len + max_mhc_len, mhc_emb_dim)
-    pep_OHE_m = outputs['pep_OHE_m']  # Masked peptide OHE
-    mhc_EMB_m = outputs['mhc_EMB_m']  # Masked MHC embeddings
-
-    # OHE to sequences
-    pep_pred = OHE_to_seq(pep_recon) # (B, max_pep_len, 21) -> (B,)
-    mhc_pred = OHE_to_seq(mhc_recon)
-    pep_orig = OHE_to_seq(pep_OHE)
-    mhc_orig = OHE_to_seq(mhc_OHE)
-
-    print("Peptide Reconstruction:")
-    print(pep_pred[0], " (original:", pep_orig[0], ")")
-    print("MHC Reconstruction:")
-    print(mhc_pred[0], " (original:", mhc_orig[0], ")")
-
-
-
-    att_outputs = encoder.predict([pep_OHE, mask_pep, mhc_EMB, mask_mhc])
-    mhc_att_weights = att_outputs['attention_scores_CA']  # MHC cross-attention weights
-
-    # Verify shapes
-    print(f"pep_recon shape: {pep_recon.shape}")  # Expected: (32, 15, 21)
-    print(f"mhc_recon shape: {mhc_recon.shape}")  # Expected: (32, 34, 21)
-    print(f"mhc_att_weights shape: {mhc_att_weights.shape}")  # Expected: (32, 8, 34, 15)
-
-    # Visualize attention weights for the first sample
-    mhc_att_avg = mhc_att_weights[0].mean(axis=0)  # Shape: (34, 15)
-
-    plt.figure(figsize=(6, 4))
-    sns.heatmap(mhc_att_avg, cmap='viridis')
-    plt.title('Peptide-MHC Cross-Attention')
-    plt.xlabel('Peptide Positions')
-    plt.ylabel('MHC Positions')
-    plt.show()
-
-    # Visualize barcoded MHC attention
-    conv_mhc_attn_avg = conv_mhc_attn_scores[0].mean(axis=0)  # Shape: (max_pep_len + max_mhc_len, mhc_emb_dim)
-    plt.figure(figsize=(6, 4))
-    sns.heatmap(conv_mhc_attn_avg, cmap='viridis')
-    plt.title('Convolution pMHC Attention')
-    plt.xlabel('Conv Positions')
-    plt.ylabel('Conv Positions')
-    plt.show()
-
-    # Visualize masked peptide OHE
-    plt.figure(figsize=(6, 4))
-    sns.heatmap(pep_OHE_m[0], cmap='viridis')
-    plt.title('Masked Peptide OHE')
-    plt.xlabel('Amino Acid Types')
-    plt.ylabel('Peptide Positions')
-    plt.show()
-
-    # Visualize masked MHC embeddings
-    plt.figure(figsize=(6, 4))
-    sns.heatmap(mhc_EMB_m[0], cmap='viridis')
-    plt.title('Masked MHC Embeddings')
-    plt.xlabel('Embedding Dimensions')
-    plt.ylabel('MHC Positions')
-    plt.show()
+# if __name__ == "__main__":
+#     tf.random.set_seed(0)
+#     np.random.seed(0)
+#
+#     # Parameters
+#     max_pep_len = 14
+#     max_mhc_len = 342
+#     batch_size = 32
+#     pep_emb_dim = 128
+#     mhc_emb_dim = 128
+#     heads = 4
+#
+#     # Generate synthetic data
+#     # Define amino acids
+#     # Define amino acids
+#     AA = "ACDEFGHIKLMNPQRSTVWY"
+#
+#     # Position-specific amino acid frequencies for peptides
+#     # Simplified frequencies where certain positions prefer specific amino acids
+#     pep_pos_freq = {
+#         0: {"A": 0.3, "G": 0.2, "M": 0.2},  # Position 1 prefers A, G, M
+#         1: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 2 prefers hydrophobic
+#         2: {"D": 0.2, "E": 0.2, "N": 0.2},  # Position 3 prefers charged/polar
+#     }
+#     # Default distribution for other positions
+#     default_aa_freq = {aa: 1/len(AA) for aa in AA}
+#
+#     # Generate peptides with position-specific preferences
+#     pep_lengths = np.random.choice([8, 9, 10, 11], size=batch_size, p=[0.1, 0.6, 0.2, 0.1])  # More realistic length distribution
+#     pep_seqs = []
+#     for length in pep_lengths:
+#         seq = []
+#         for pos in range(length):
+#             # Use position-specific frequencies if available, otherwise default
+#             freq = pep_pos_freq.get(pos, default_aa_freq)
+#             # Convert frequencies to probability array
+#             aa_list = list(AA)
+#             probs = [freq.get(aa, 0.01) for aa in aa_list]
+#             probs = np.array(probs) / sum(probs)  # Normalize
+#             seq.append(np.random.choice(aa_list, p=probs))
+#         pep_seqs.append(''.join(seq))
+#
+#     # Convert peptide sequences to one-hot encoding
+#     pep_OHE = np.array([seq_to_onehot(seq, max_pep_len) for seq in pep_seqs], dtype=np.float32)
+#     mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
+#     for i, length in enumerate(pep_lengths):
+#         mask_pep[i, :length] = 1.0
+#
+#     # MHC alleles typically have conserved regions
+#     mhc_pos_freq = {
+#         0: {"G": 0.5, "D": 0.3},  # First position often G or D
+#         1: {"S": 0.4, "H": 0.3, "F": 0.2},
+#         # Add more positions as needed
+#     }
+#
+#     # Generate MHC sequences with more realistic properties
+#     mhc_lengths = np.random.randint(340,342, size=batch_size)  # Less variation in length
+#     mhc_seqs = []
+#     for length in mhc_lengths:
+#         seq = []
+#         for pos in range(length):
+#             freq = mhc_pos_freq.get(pos, default_aa_freq)
+#             aa_list = list(AA)
+#             probs = [freq.get(aa, 0.01) for aa in aa_list]
+#             probs = np.array(probs) / sum(probs)
+#             seq.append(np.random.choice(aa_list, p=probs))
+#         mhc_seqs.append(''.join(seq))
+#
+#     # Generate MHC embeddings (simulating ESM or similar)
+#     mhc_EMB = np.random.randn(batch_size, max_mhc_len, 1152).astype(np.float32)
+#     mhc_OHE = np.array([seq_to_onehot(seq, max_mhc_len) for seq in mhc_seqs], dtype=np.float32)
+#
+#     # Create masks for MHC sequences
+#     mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
+#     for i, length in enumerate(mhc_lengths):
+#         mask_mhc[i, :length] = 1.0
+#         mhc_EMB[i, length:, :] = 0.0  # Zero out padding positions
+#
+#     # Generate MHC IDs (could represent allele types)
+#     mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
+#
+#     # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
+#     # mask_pep[np.random.rand(batch_size, max_pep_len) < 0.15] = MASK_TOKEN
+#     # pep_OHE[mask_pep == MASK_TOKEN] = 0.0  # Zero out masked positions
+#     # # mask 0.15 of the MHC positions update the mask with MASK_TOKEN and zero out the corresponding positions in the EMB
+#     # mask_mhc[np.random.rand(batch_size, max_mhc_len) < 0.15] = MASK_TOKEN
+#     # mhc_EMB[mask_mhc == MASK_TOKEN] = 0.0  # Zero out masked positions
+#
+#     # convert all inputs tensors
+#     # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=tf.float32)
+#     # mask_pep = tf.convert_to_tensor(mask_pep, dtype=tf.float32)
+#     # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=tf.float32)
+#     # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=tf.float32)
+#     # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=tf.float32)
+#
+#     # Cov layers
+#     ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20, max_kernel_size=60)
+#
+#     # Build models
+#     encoder, encoder_decoder = bicross_recon(
+#         max_pep_len=max_pep_len,
+#         max_mhc_len=max_mhc_len,
+#         mask_token=MASK_TOKEN,
+#         pad_token=PAD_TOKEN,
+#         pep_emb_dim=pep_emb_dim,
+#         mhc_emb_dim=mhc_emb_dim,
+#         heads=heads,
+#     )
+#
+#     # Print model summaries
+#     encoder.summary()
+#     encoder_decoder.summary()
+#
+#     # Train
+#     encoder_decoder.fit(x=[pep_OHE, mask_pep, mhc_EMB, mask_mhc],
+#                         y={'pep_reconstruction': pep_OHE, 'mhc_reconstruction': mhc_OHE},
+#                         epochs=200, batch_size=batch_size )
+#
+#     # save the model
+#     encoder_decoder.save("h5/bicross_encoder_decoder.h5")
+#
+#     outputs = encoder_decoder.predict([pep_OHE, mask_pep, mhc_EMB, mask_mhc])
+#     pep_recon = outputs['pep_reconstruction']  # Shape: (batch_size, max_pep_len, 21)
+#     mhc_recon = outputs['mhc_reconstruction']  # Shape: (batch_size, max_mhc_len, 21)
+#     # barcoded_mhc_attn = outputs['barcode_mhc_attn']  # Shape: (batch_size, max_pep_len + max_mhc_len, mhc_emb_dim)
+#     conv_mhc_attn_scores = outputs['mhc_to_pep_attn_score']  # Shape: (batch_size, heads, max_pep_len + max_mhc_len, mhc_emb_dim)
+#     pep_OHE_m = outputs['pep_OHE_m']  # Masked peptide OHE
+#     mhc_EMB_m = outputs['mhc_EMB_m']  # Masked MHC embeddings
+#
+#     # OHE to sequences
+#     pep_pred = OHE_to_seq(pep_recon) # (B, max_pep_len, 21) -> (B,)
+#     mhc_pred = OHE_to_seq(mhc_recon)
+#     pep_orig = OHE_to_seq(pep_OHE)
+#     mhc_orig = OHE_to_seq(mhc_OHE)
+#
+#     print("Peptide Reconstruction:")
+#     print(pep_pred[0], " (original:", pep_orig[0], ")")
+#     print("MHC Reconstruction:")
+#     print(mhc_pred[0], " (original:", mhc_orig[0], ")")
+#
+#
+#
+#     att_outputs = encoder.predict([pep_OHE, mask_pep, mhc_EMB, mask_mhc])
+#     mhc_att_weights = att_outputs['attention_scores_CA']  # MHC cross-attention weights
+#
+#     # Verify shapes
+#     print(f"pep_recon shape: {pep_recon.shape}")  # Expected: (32, 15, 21)
+#     print(f"mhc_recon shape: {mhc_recon.shape}")  # Expected: (32, 34, 21)
+#     print(f"mhc_att_weights shape: {mhc_att_weights.shape}")  # Expected: (32, 8, 34, 15)
+#
+#     # Visualize attention weights for the first sample
+#     mhc_att_avg = mhc_att_weights[0].mean(axis=0)  # Shape: (34, 15)
+#
+#     plt.figure(figsize=(6, 4))
+#     sns.heatmap(mhc_att_avg, cmap='viridis')
+#     plt.title('Peptide-MHC Cross-Attention')
+#     plt.xlabel('Peptide Positions')
+#     plt.ylabel('MHC Positions')
+#     plt.show()
+#
+#     # Visualize barcoded MHC attention
+#     conv_mhc_attn_avg = conv_mhc_attn_scores[0].mean(axis=0)  # Shape: (max_pep_len + max_mhc_len, mhc_emb_dim)
+#     plt.figure(figsize=(6, 4))
+#     sns.heatmap(conv_mhc_attn_avg, cmap='viridis')
+#     plt.title('Convolution pMHC Attention')
+#     plt.xlabel('Conv Positions')
+#     plt.ylabel('Conv Positions')
+#     plt.show()
+#
+#     # Visualize masked peptide OHE
+#     plt.figure(figsize=(6, 4))
+#     sns.heatmap(pep_OHE_m[0], cmap='viridis')
+#     plt.title('Masked Peptide OHE')
+#     plt.xlabel('Amino Acid Types')
+#     plt.ylabel('Peptide Positions')
+#     plt.show()
+#
+#     # Visualize masked MHC embeddings
+#     plt.figure(figsize=(6, 4))
+#     sns.heatmap(mhc_EMB_m[0], cmap='viridis')
+#     plt.title('Masked MHC Embeddings')
+#     plt.xlabel('Embedding Dimensions')
+#     plt.ylabel('MHC Positions')
+#     plt.show()
