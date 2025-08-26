@@ -588,7 +588,7 @@ class AnchorPositionExtractor(keras.layers.Layer):
         mask = tf.where(mask == self.pad_token, 0., 1.)
 
         barcode = self.barcode
-        barcode = tf.broadcast_to(barcode, (tf.shape(input)[0], 1, tf.shape(input)[-1]))  # (B,N,E)
+        barcode = tf.broadcast_to(barcode, (tf.shape(input)[0], 1, tf.shape(input)[-1]))  # (B,1,E)
         q = tf.matmul(barcode, self.q)  # (B,1,E)*(E,E)->(B,1,E)
         k = tf.matmul(input, self.k)  # (B,N,E)*(E,E)->(B,N,E)
         v = tf.matmul(input, self.v)  # (B,N,E)*(E,E)->(B,N,E)

@@ -22,7 +22,8 @@ from utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbe
                        SelfAttentionWith2DMask, AddGaussianNoise, RotaryPositionalEncoding,
                        SubtractLayer, SubtractAttentionLayer, MaskedCategoricalCrossentropy,
                        masked_categorical_crossentropy, RotaryPositionalEncoding,
-                        GlobalSTDPooling1D,GlobalMeanPooling1D, GlobalSTDPooling1D, GumbelSoftmax)
+                        GlobalSTDPooling1D,GlobalMeanPooling1D, GlobalSTDPooling1D, GumbelSoftmax,
+                   AnchorPositionExtractor)
 
 
 MASK_TOKEN = -1.0
@@ -698,23 +699,30 @@ def pmbind_subtract_moe_auto(max_pep_len: int,
     # CLASSIFIER HEAD (MIXTURE OF EXPERTS)
     # -------------------------------------------------------------------
     # 1. Gating network: Generate soft cluster assignments from the latent vector
-    # bigger_probs = layers.Dense(num_experts * 2, activation='relu', name='gating_network_dense1')(latent_vector)
-    # bigger_probs = layers.Dropout(0.2, name='gating_network_dropout1')(bigger_probs)
-    # logits = layers.Dense(num_experts, name='gating_network_logits')(bigger_probs)
+    bigger_probs = layers.Dense(num_experts * 2, activation='relu', name='gating_network_dense1')(latent_vector)
+    bigger_probs = layers.Dropout(0.2, name='gating_network_dropout1')(bigger_probs)
+    logits = layers.Dense(num_experts, name='gating_network_logits')(bigger_probs)
 
-    # soft_cluster_probs = GumbelSoftmax(name="gumble_softmax")(logits) # Shape: (B, num_experts)
-    # soft_cluster_probs = layers.Activation('softmax', name="soft_cluster_probs")(logits)  # Shape: (B, num_experts)
+    #soft_cluster_probs = GumbelSoftmax(name="gumble_softmax")(logits) # Shape: (B, num_experts)
+    gate_probs = layers.Activation('softmax', name="soft_cluster_probs")(logits)  # Shape: (B, num_experts)
+
+    # MLP head
+    x = layers.Dense(emb_dim, activation='relu', name='cls_dense1')(latent_vector)
+    x = layers.Dropout(0.2, name='cls_dropout1')(x)
+    x = layers.Dense(emb_dim//2, activation='relu', name='cls_dense2')(x)
+    x = layers.Dropout(0.2, name='cls_dropout2')(x)
+    y_pred = layers.Dense(1, activation='sigmoid', name='cls_ypred')(x)  # Final logit output
 
     # 2. MoE layer: Get weighted prediction from experts
-    moe_layer = EnhancedMixtureOfExperts(
-        input_dim=max_mhc_len+emb_dim,
-        hidden_dim=emb_dim * 2,
-        num_experts=num_experts,
-        output_dim=1,
-        dropout_rate=0.2
-    )
-    pred_logits, gate_probs = moe_layer(latent_vector) # (B, 1)
-    y_pred = layers.Dense(1, activation='sigmoid', name='cls_ypred')(pred_logits)  # Final logit output
+    # moe_layer = EnhancedMixtureOfExperts(
+    #     input_dim=max_mhc_len+emb_dim,
+    #     hidden_dim=emb_dim * 2,
+    #     num_experts=num_experts,
+    #     output_dim=1,
+    #     dropout_rate=0.2
+    # )
+    # pred_logits, gate_probs = moe_layer(latent_vector) # (B, 1)
+    # y_pred = layers.Dense(1, activation='sigmoid', name='cls_ypred')(pred_logits)  # Final logit output
 
     # -------------------------------------------------------------------
     # MODEL DEFINITION
@@ -729,6 +737,117 @@ def pmbind_subtract_moe_auto(max_pep_len: int,
             "cls_ypred": y_pred,
         },
         name="pmbind_subtract_moe_autoencoder"
+    )
+
+    return model
+
+
+def pmbind_anchor_extractor(max_pep_len: int,
+                               max_mhc_len: int,
+                               emb_dim: int = 4,
+                               heads: int = 4,
+                               noise_std: float = 0.1,
+                               num_anchors: int = 2, # 2 for MHC1 and 4 for MHC2
+                               mask_token: float = MASK_TOKEN,
+                               pad_token: float = PAD_TOKEN):
+    """
+    Builds a pMHC autoencoder model with a Mixture-of-Experts (MoE) classifier head.
+
+    This model performs two tasks:
+    1. Autoencoding: Reconstructs peptide and MHC sequences from a latent representation.
+    2. Classification: Predicts a binary label using an MoE head, where experts are
+       selected based on an internally generated clustering of the latent space.
+    """
+    # -------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------
+    pep_OHE_in = keras.Input((max_pep_len, 21), name="pep_onehot")
+    pep_mask_in = keras.Input((max_pep_len,), name="pep_mask")
+
+    mhc_emb_in = keras.Input((max_mhc_len, 1152), name="mhc_emb")
+    mhc_mask_in = keras.Input((max_mhc_len,), name="mhc_mask")
+
+    # -------------------------------------------------------------------
+    # MASKED  EMBEDDING  +  PE
+    # -------------------------------------------------------------------
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask2")(pep_OHE_in, pep_mask_in)
+    pep = PositionalEncoding(21, int(max_pep_len * 3), name="pep_pos1")(pep, pep_mask_in)
+    pep = layers.Dense(emb_dim, name="pep_Dense1")(pep)
+    pep = layers.LayerNormalization(name="pep_norm1")(pep)
+    pep = layers.Dropout(0.2, name="pep_Dropout1")(pep) # (B,P,E)
+
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask2")(mhc_emb_in, mhc_mask_in)
+    mhc = PositionalEncoding(1152, int(max_mhc_len * 3), name="mhc_pos1")(mhc, mhc_mask_in)
+    mhc = layers.Dense(emb_dim, name="mhc_dense1")(mhc)
+    mhc = layers.LayerNormalization(name="mhc_norm1")(mhc)
+    mhc = layers.Dropout(0.2, name="mhc_Dropout1")(mhc) # (B,M,E)
+
+    # -------------------------------------------------------------------
+    # Add Gaussian Noise
+    # -------------------------------------------------------------------
+    mhc = AddGaussianNoise(noise_std, name="pmhc_gaussian_noise")(mhc)
+
+    # self attns
+    pep_attn = AttentionLayer(
+        query_dim=int(emb_dim), context_dim=int(emb_dim), output_dim=int(emb_dim),
+        type="self", heads=heads, resnet=True,
+        return_att_weights=False, name='pep_self_att',
+        mask_token=mask_token,
+        pad_token=pad_token
+    )(pep, pep_mask_in)  # (B,P,E)
+
+    mhc_attn = AttentionLayer(
+        query_dim=int(emb_dim), context_dim=int(emb_dim), output_dim=int(emb_dim),
+        type="self", heads=heads, resnet=True,
+        return_att_weights=False, name='mhc_self_att',
+        mask_token=mask_token,
+        pad_token=pad_token
+    )(mhc, mhc_mask_in)  # (B,M,E)
+
+    peptide_cross_att, peptide_cross_attn_scores = AttentionLayer(
+        query_dim=int(emb_dim), context_dim=int(emb_dim), output_dim=int(emb_dim),
+        type="cross", heads=heads, resnet=False,
+        return_att_weights=True, name='peptide_cross_att',
+        mask_token=mask_token,
+        pad_token=pad_token
+    )(pep_attn, pep_mask_in, mhc_attn, mhc_mask_in) # (B,P,E), (B, P, M)
+
+    # dense to reduce dim to 4
+    peptide_cross_att = layers.Dense(4, activation="relu", name='peptide_cross_att_dense')(peptide_cross_att)  # (B,P,E)
+
+    # anchor extractor
+    outs, inds, weights, barcode_out, barcode_att = AnchorPositionExtractor(
+        num_anchors=num_anchors,
+        dist_thr=[7, max_pep_len],
+        name='anchor_extractor',
+        project=False,
+        mask_token=mask_token,
+        pad_token=pad_token,
+        return_att_weights=True
+    )(peptide_cross_att, pep_mask_in)  # (B,num_anchors,E), (B,num_anchors), (B,num_anchors), (B,E), (B,P,M)
+
+    # Flatten the outs
+    mhc_anchor_flat = layers.Flatten(name='mhc_anchor_flat')(outs)  # (B, num_anchors*E)
+
+    # CLASSIFIER HEAD
+    flat_dense = layers.Dense(32, activation='relu', name='latent_vector')(mhc_anchor_flat)  # (B, 32)
+    y_pred = layers.Dense(1, activation='sigmoid', name='cls_ypred')(flat_dense)  # (B, 1)
+
+    # -------------------------------------------------------------------
+    # MODEL DEFINITION
+    # -------------------------------------------------------------------
+    model = keras.Model(
+        inputs=[pep_OHE_in, pep_mask_in, mhc_emb_in, mhc_mask_in],
+        outputs={
+            "cls_ypred": y_pred,
+            "anchor_positions": inds,
+            "anchor_weights": weights,
+            "anchor_embeddings": outs,
+            "peptide_cross_attn_scores": peptide_cross_attn_scores,
+            "barcode_out": barcode_out,
+            "barcode_att": barcode_att
+        },
+        name="pmbind_anchor_extractor"
     )
 
     return model
