@@ -97,6 +97,27 @@ def OHE_to_seq_single(ohe: np.ndarray, gap=False) -> str:
             seq.append(AA[aa_index])
     return ''.join(seq)  # Join the list into a string
 
+def peptides_to_onehot_kmer_windows(seq, max_seq_len, k=9, pad_token=-1.0) -> np.ndarray:
+    """
+    Converts a peptide sequence into a sliding window of k-mers, one-hot encoded.
+    Output shape: (RF, k, 21), where RF = max_seq_len - k + 1
+    """
+    RF = max_seq_len - k + 1
+    RFs = np.zeros((RF, k, 21), dtype=np.float32)
+    for window in range(RF):
+        if window + k <= len(seq):
+            kmer = seq[window:window + k]
+            for i, aa in enumerate(kmer):
+                idx = AA_TO_INT.get(aa, pad_token)
+                RFs[window, i, idx] = 1.0
+            # Pad remaining positions in k-mer if sequence is too short
+            for i in range(len(kmer), k):
+                RFs[window, i, pad_token] = 1.0
+        else:
+            # Entire k-mer is padding if out of sequence
+            RFs[window, :, pad_token] = 1.0
+    return np.array(RFs)
+
 
 # Custom Attention Layer
 class AttentionLayer(keras.layers.Layer):
@@ -498,6 +519,157 @@ class PositionalEncoding(keras.layers.Layer):
         return x + pe
 
 
+# @tf.function
+# def select_indices(ind, n, m_range):
+#     """
+#     Select top-n indices from `ind` (descending sorted) such that:
+#     - First index is always selected.
+#     - Each subsequent index has a distance from all previously selected
+#       indices between m_range[0] and m_range[1], inclusive.
+#     Args:
+#         ind: Tensor of shape (B, N) with descending sorted indices.
+#         n: Number of indices to select.
+#         m_range: List or tuple [min_distance, max_distance]
+#     Returns:
+#         Tensor of shape (B, n) with selected indices per batch.
+#     """
+#     m_min = tf.constant(m_range[0], dtype=tf.int32)
+#     m_max = tf.constant(m_range[1], dtype=tf.int32)
+#
+#     def per_batch_select(indices):
+#         top = indices[0]
+#         selected = tf.TensorArray(dtype=tf.int32, size=n)
+#         selected = selected.write(0, top)
+#         count = tf.constant(1)
+#         i = tf.constant(1)
+#
+#         def cond(i, count, selected):
+#             return tf.logical_and(i < tf.shape(indices)[0], count < n)
+#
+#         def body(i, count, selected):
+#             candidate = indices[i]
+#             selected_vals = selected.stack()[:count]
+#             distances = tf.abs(selected_vals - candidate)
+#             if_valid = tf.reduce_all(
+#                 tf.logical_and(distances >= m_min, distances <= m_max)
+#             )
+#             selected = tf.cond(if_valid,
+#                                lambda: selected.write(count, candidate),
+#                                lambda: selected)
+#             count = tf.cond(if_valid, lambda: count + 1, lambda: count)
+#             return i + 1, count, selected
+#
+#         _, _, selected = tf.while_loop(
+#             cond, body, [i, count, selected],
+#             shape_invariants=[i.get_shape(), count.get_shape(), tf.TensorShape(None)]
+#         )
+#         return selected.stack()
+#
+#     return tf.map_fn(per_batch_select, ind, dtype=tf.int32)
+#
+#
+# class AnchorPositionExtractor(keras.layers.Layer):
+#     def __init__(self, num_anchors, dist_thr, name='anchor_extractor', project=True,
+#                  mask_token=-1., pad_token=-2., return_att_weights=False):
+#         super().__init__()
+#         assert isinstance(dist_thr, list) and len(dist_thr) == 2
+#         assert num_anchors > 0
+#         self.num_anchors = num_anchors
+#         self.dist_thr = dist_thr
+#         self.name = name
+#         self.project = project
+#         self.mask_token = mask_token
+#         self.pad_token = pad_token
+#         self.return_att_weights = return_att_weights
+#
+#     def build(self, input_shape):  # att_out (B,N,E)
+#         b, n, e = input_shape[0], input_shape[1], input_shape[2]
+#         self.barcode = tf.random.uniform(shape=(1, 1, e))  # add as a token to input
+#         self.q = self.add_weight(shape=(e, e),
+#                                  initializer='random_normal',
+#                                  trainable=True, name=f'query_{self.name}')
+#         self.k = self.add_weight(shape=(e, e),
+#                                  initializer='random_normal',
+#                                  trainable=True, name=f'key_{self.name}')
+#         self.v = self.add_weight(shape=(e, e),
+#                                  initializer='random_normal',
+#                                  trainable=True, name=f'value_{self.name}')
+#         self.ln = layers.LayerNormalization(name=f'ln_{self.name}')
+#         if self.project:
+#             self.g = self.add_weight(shape=(self.num_anchors, e, e),
+#                                      initializer='random_uniform',
+#                                      trainable=True, name=f'gate_{self.name}')
+#             self.w = self.add_weight(shape=(1, self.num_anchors, e, e),
+#                                      initializer='random_normal',
+#                                      trainable=True, name=f'w_{self.name}')
+#
+#     def call(self, input, mask):  # (B,N,E) this is peptide embedding and (B,N) for mask
+#
+#         mask = tf.cast(mask, tf.float32)  # (B, N)
+#         mask = tf.where(mask == self.pad_token, 0., 1.)
+#
+#         barcode = self.barcode
+#         barcode = tf.broadcast_to(barcode, (tf.shape(input)[0], 1, tf.shape(input)[-1]))  # (B,1,E)
+#         q = tf.matmul(barcode, self.q)  # (B,1,E)*(E,E)->(B,1,E)
+#         k = tf.matmul(input, self.k)  # (B,N,E)*(E,E)->(B,N,E)
+#         v = tf.matmul(input, self.v)  # (B,N,E)*(E,E)->(B,N,E)
+#         scale = 1 / tf.math.sqrt(tf.cast(tf.shape(input)[-1], tf.float32))
+#         barcode_att = tf.matmul(q, k, transpose_b=True) * scale  # (B,1,E)*(B,E,N)->(B,1,N)
+#         # mask: (B,N) => (B,1,N)
+#         mask_exp = tf.expand_dims(mask, axis=1)
+#         additive_mask = (1.0 - mask_exp) * -1e9
+#         barcode_att += additive_mask
+#         barcode_att = tf.nn.softmax(barcode_att)
+#         barcode_att *= mask_exp  # to remove the impact of row wise attention of padded tokens. since all are 1e-9
+#         barcode_out = tf.matmul(barcode_att, v)  # (B,1,N)*(B,N,E)->(B,1,E)
+#         # barcode_out represents a vector for all information from peptide
+#         # barcode_att represents the anchor positions which are the tokens with highest weights
+#         inds, weights, outs = self.find_anchor(input,
+#                                                barcode_att)  # (B,num_anchors) (B,num_anchors) (B, num_anchors, E)
+#         if self.project:
+#             pos_encoding = tf.broadcast_to(
+#                 tf.expand_dims(inds, axis=-1),
+#                 (tf.shape(outs)[0], tf.shape(outs)[1], tf.shape(outs)[2])
+#             )
+#             pos_encoding = tf.cast(pos_encoding, tf.float32)
+#             dim = tf.cast(tf.shape(outs)[-1], tf.float32)
+#             ra = tf.range(dim, dtype=tf.float32) / dim
+#             pos_encoding = tf.sin(pos_encoding / tf.pow(40., ra))
+#             outs += pos_encoding
+#
+#             weights_bc = tf.expand_dims(weights, axis=-1)
+#             weights_bc = tf.broadcast_to(weights_bc, (tf.shape(weights_bc)[0],
+#                                                       tf.shape(weights_bc)[1],
+#                                                       tf.shape(outs)[-1]
+#                                                       ))  # (B,num_anchors, E)
+#             outs = tf.expand_dims(outs, axis=-2)  # (B, num_anchors, 1, E)
+#             outs_w = tf.matmul(outs, self.w)  # (B,num_anchors,1,E)*(1,num_anchors,E,E)->(B,num_anchors,1,E)
+#             outs_g = tf.nn.sigmoid(tf.matmul(outs, self.g))
+#             outs_w = tf.squeeze(outs_w, axis=-2)  # (B,num_anchors,E)
+#             outs_g = tf.squeeze(outs_g, axis=-2)
+#             # multiply by attention weights from barcode_att to choose best anchors and additional feature gating
+#             outs = outs_w * outs_g * weights_bc  # (B, num_anchors, E)
+#         outs = self.ln(outs)
+#         # outs -> anchor info, inds -> anchor indeces, weights -> anchor att weights, barcode_out -> whole peptide features
+#         # (B,num_anchors,E), (B,num_anchors), (B,num_anchors), (B,E)
+#         if self.return_att_weights:
+#             return outs, inds, weights, tf.squeeze(barcode_out, axis=1), barcode_att
+#         else:
+#             return outs, inds, weights, tf.squeeze(barcode_out, axis=1)
+#
+#     def find_anchor(self, input, barcode_att):  # (B,N,E), (B,1,N)
+#         inds = tf.argsort(barcode_att, axis=-1, direction='DESCENDING', stable=False)  # (B,1,N)
+#         inds = tf.squeeze(inds, axis=1)  # (B,N)
+#         selected_inds = select_indices(inds, n=self.num_anchors, m_range=self.dist_thr)  # (B,num_anchors)
+#         sorted_selected_inds = tf.sort(selected_inds)
+#         sorted_selected_weights = tf.gather(tf.squeeze(barcode_att, axis=1),
+#                                             sorted_selected_inds,
+#                                             axis=1,
+#                                             batch_dims=1)  # (B,num_anchors)
+#         sorted_selected_output = tf.gather(input, sorted_selected_inds, axis=1, batch_dims=1)  # (B,num_anchors,E)
+#         return sorted_selected_inds, sorted_selected_weights, sorted_selected_output
+
+
 @tf.function
 def select_indices(ind, n, m_range):
     """
@@ -548,7 +720,7 @@ def select_indices(ind, n, m_range):
 
 
 class AnchorPositionExtractor(keras.layers.Layer):
-    def __init__(self, num_anchors, dist_thr, name='anchor_extractor', project=True,
+    def __init__(self, num_anchors, dist_thr, initial_temperature=1.0, name='anchor_extractor', project=True,
                  mask_token=-1., pad_token=-2., return_att_weights=False):
         super().__init__()
         assert isinstance(dist_thr, list) and len(dist_thr) == 2
@@ -556,6 +728,7 @@ class AnchorPositionExtractor(keras.layers.Layer):
         self.num_anchors = num_anchors
         self.dist_thr = dist_thr
         self.name = name
+        self.initial_temperature = initial_temperature
         self.project = project
         self.mask_token = mask_token
         self.pad_token = pad_token
@@ -565,13 +738,13 @@ class AnchorPositionExtractor(keras.layers.Layer):
         b, n, e = input_shape[0], input_shape[1], input_shape[2]
         self.barcode = tf.random.uniform(shape=(1, 1, e))  # add as a token to input
         self.q = self.add_weight(shape=(e, e),
-                                 initializer='random_normal',
+                                 initializer='orthogonal',
                                  trainable=True, name=f'query_{self.name}')
         self.k = self.add_weight(shape=(e, e),
-                                 initializer='random_normal',
+                                 initializer='orthogonal',
                                  trainable=True, name=f'key_{self.name}')
         self.v = self.add_weight(shape=(e, e),
-                                 initializer='random_normal',
+                                 initializer='orthogonal',
                                  trainable=True, name=f'value_{self.name}')
         self.ln = layers.LayerNormalization(name=f'ln_{self.name}')
         if self.project:
@@ -581,6 +754,12 @@ class AnchorPositionExtractor(keras.layers.Layer):
             self.w = self.add_weight(shape=(1, self.num_anchors, e, e),
                                      initializer='random_normal',
                                      trainable=True, name=f'w_{self.name}')
+        self.log_temperature = self.add_weight(
+            shape=(),  # Scalar variable
+            initializer=tf.keras.initializers.Constant(tf.math.log(self.initial_temperature)),
+            trainable=True,
+            name='log_temperature'
+        )
 
     def call(self, input, mask):  # (B,N,E) this is peptide embedding and (B,N) for mask
 
@@ -598,7 +777,8 @@ class AnchorPositionExtractor(keras.layers.Layer):
         mask_exp = tf.expand_dims(mask, axis=1)
         additive_mask = (1.0 - mask_exp) * -1e9
         barcode_att += additive_mask
-        barcode_att = tf.nn.softmax(barcode_att)
+        temperature = tf.exp(self.log_temperature)
+        barcode_att = tf.nn.softmax(barcode_att / temperature)
         barcode_att *= mask_exp  # to remove the impact of row wise attention of padded tokens. since all are 1e-9
         barcode_out = tf.matmul(barcode_att, v)  # (B,1,N)*(B,N,E)->(B,1,E)
         # barcode_out represents a vector for all information from peptide
