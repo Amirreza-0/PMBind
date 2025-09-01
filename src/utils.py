@@ -5,6 +5,7 @@ from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit
 from sklearn.utils import resample
 from tensorflow import keras
 from tensorflow.keras import layers
+from keras_hub.src.layers.modeling.rotary_embedding import RotaryEmbedding
 import numpy as np
 from typing import Dict, List, Hashable
 from Bio.PDB import PDBParser
@@ -1250,7 +1251,8 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
                  return_att_weights=False, name='SelfAttentionWith2DMask',
-                 epsilon=1e-6, mask_token=-1., pad_token=-2., do_not_mask_mhc=False):
+                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True,
+                 use_flash_attn=False):
         super().__init__(name=name)
         self.query_dim = query_dim
         self.context_dim = context_dim
@@ -1261,7 +1263,9 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self.mask_token = mask_token
         self.pad_token = pad_token
         self.att_dim = output_dim // heads  # Attention dimension per head
-        self.do_not_mask_mhc = do_not_mask_mhc
+        self.self_attn_mhc = self_attn_mhc
+        self.apply_rope = apply_rope # flag for rotary positional embedding
+        self.use_flash_attn = use_flash_attn  # new: opt-in fused SDPA/flash
 
     def build(self, x):
         # Projection weights
@@ -1276,21 +1280,26 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
                                       initializer='random_uniform', trainable=True, name=f'g_proj_{self.name}')
         self.norm2 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln2_{self.name}')
 
-
         self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
                                      initializer='random_normal', trainable=True, name=f'outw_{self.name}')
         self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
                                      trainable=True, name=f'outb_{self.name}')
         self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.float32))
 
+        if self.apply_rope:
+            if (self.att_dim % 2) != 0:
+                raise ValueError(f"RotaryEmbedding requires even att_dim, got {self.att_dim}.")
+            # q/k have shape (B, H, S, D): sequence_axis=2, feature_axis=-1
+            self.rope = RotaryEmbedding(sequence_axis=2, feature_axis=-1, name=f'rope_{self.name}')
+
     def call(self, x_pmhc, p_mask, m_mask):
         """
         Args:
-            x: Tensor of shape (B, N+M, query_dim) for query.
-            mask: Tensor of shape (B, N, M) for 2D mask.
-        :param x:
-        :param mask:
-        :return:
+            x_pmhc: Tensor of shape (B, N+M, query_dim) for query.
+            p_mask: Tensor of shape (B, N) for peptide mask.
+            m_mask: Tensor of shape (B, M) for mhc mask.
+        Returns:
+            Tensor of shape (B, N+M, output_dim)
         """
         x_pmhc = self.norm1(x_pmhc)  # Normalize input
         p_mask = tf.cast(p_mask, tf.float32)
@@ -1298,19 +1307,44 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         p_mask = tf.where(p_mask==self.pad_token, x=0., y=1.)  # (B, N)
         m_mask = tf.where(m_mask==self.pad_token, x=0., y=1.)  # (B, M)
 
-        q = tf.einsum('bxd,hde->bhxe', x_pmhc , self.q_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        g = tf.einsum('bxd,hde->bhxe', x_pmhc, self.g_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        q = tf.einsum('bxd,hde->bhxe', x_pmhc , self.q_proj)  # (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj)   # (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj)   # (B, H, N+M, D)
+        g = tf.einsum('bxd,hde->bhxe', x_pmhc, self.g_proj)   # (B, H, N+M, D)
 
-        att = tf.matmul(q, k, transpose_b=True) * self.scale  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
+        if self.apply_rope:
+            q = self.rope(q)
+            k = self.rope(k)
+
         # Create 2D mask
-        mask_2d = self.mask_2d(p_mask, m_mask)
-        mask_2d = tf.cast(mask_2d, tf.float32)  # (B, N+M, N+M)
-        mask_2d_neg = (1.0 - mask_2d) * -1e9  # Apply mask to attention scores
-        att = tf.nn.softmax(att + tf.expand_dims(mask_2d_neg, axis=1), axis=-1)  # Apply softmax to attention scores
-        att *= tf.expand_dims(mask_2d, axis=1) # remove the impact of row wise attention of padded tokens. since all are 1e-9
-        out = tf.matmul(att, v)  # (B, H, N+M, N+M) * (B, H, N+M, D) -> (B, H, N+M, D)
+        mask_2d = self.mask_2d(p_mask, m_mask)               # (B, N+M, N+M), 1=allowed, 0=masked
+        mask_2d = tf.cast(mask_2d, q.dtype)
+        mask_bias = (1.0 - mask_2d) * tf.constant(-1e9, dtype=q.dtype)  # additive mask bias
+        mask_bias = tf.expand_dims(mask_bias, axis=1)        # (B, 1, T, S) broadcast over heads
+
+        can_use_flash = (
+            self.use_flash_attn and
+            hasattr(tf.nn, "scaled_dot_product_attention") and
+            (not self.return_att_weights)
+        )
+
+        if can_use_flash:
+            # Fused SDPA path (uses flash kernel when available). It applies scaling internally.
+            out = tf.nn.scaled_dot_product_attention(q, k, v, mask=mask_bias)  # (B, H, T, D)
+
+            # Match original behavior: zero-out outputs for rows with no valid targets (e.g., padded queries).
+            row_mask = tf.reduce_max(mask_2d, axis=-1, keepdims=True)          # (B, T, 1), 1 if any target allowed
+            out *= tf.expand_dims(row_mask, axis=1)                            # (B, 1, T, 1)
+            att = None  # not available in fused path
+        else:
+            # Original path
+            att = tf.matmul(q, k, transpose_b=True) * self.scale              # (B, H, T, T)
+            att = att + mask_bias                                             # add -inf where masked
+            att = tf.nn.softmax(att, axis=-1)
+            # remove the impact of row-wise attention of padded tokens. since all are 1e-9
+            att *= tf.expand_dims(mask_2d, axis=1)                            # (B, H, T, T)
+            out = tf.matmul(att, v)                                           # (B, H, T, D)
+
         out *= tf.nn.sigmoid(g)  # Apply gating mechanism
         out = tf.transpose(out, [0, 2, 1, 3])
         out = tf.reshape(out, [tf.shape(x_pmhc)[0], tf.shape(x_pmhc)[1], self.heads * self.att_dim])
@@ -1330,10 +1364,10 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self_peptide_mask = tf.zeros_like(p_mask, dtype=tf.float32) # (B, N, 1)
         self_peptide_mask_2d = tf.broadcast_to(self_peptide_mask, (
             tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(p_mask)[1])) #(B, N, N)
-        if not self.do_not_mask_mhc:
-          self_mhc_mask = tf.zeros_like(m_mask, dtype=tf.float32)
+        if self.self_attn_mhc:
+            self_mhc_mask = m_mask
         else:
-          self_mhc_mask = m_mask
+            self_mhc_mask = tf.zeros_like(m_mask, dtype=tf.float32)
         self_mhc_mask_2d = tf.broadcast_to(self_mhc_mask, (
             tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(m_mask)[1])) # (B, M, M)
         # one and zero masks
