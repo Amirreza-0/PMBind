@@ -49,7 +49,7 @@ from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOK
 
 from models import pmbind_multitask as pmbind
 
-from visualizations import _analyze_latents, _plot_umap, _run_dbscan_and_plot
+from visualizations import _analyze_latents
 
 # ──────────────────────────────────────────────────────────────────────
 # Globals & Data Preparation

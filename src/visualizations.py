@@ -148,7 +148,6 @@ def _plot_umap(
         point_size: int = 2,
         legend_: bool = True,
         legend_style: str = "detailed",
-        bar_cmap_name: str = "tab20",
         legend_font_size: int = 16,
         cbar_font_size: int = 12,
 ):
@@ -361,6 +360,8 @@ def _run_dbscan_and_plot(
             figsize=(40, 15),
             point_size=2,
             highlight_mask: np.ndarray | None = None,
+            legend_font_size: int = 16,
+            cbar_font_size: int = 12
     ):
         """Helper to run DBSCAN, estimate eps, and plot results."""
         print(f"\nRunning DBSCAN on {latent_type} UMAP embedding...")
@@ -411,14 +412,19 @@ def _run_dbscan_and_plot(
             alleles_to_highlight=random_alleles_to_highlight,
             highlight_labels_series=alleles,  # Pass original alleles for highlighting,
             figsize=figsize,
-            point_size=point_size
+            point_size=point_size,
+            legend_=True,
+            legend_style='detailed',
+            legend_font_size=legend_font_size,
+            cbar_font_size=cbar_font_size
         )
         return clusters
 
 
 def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_highlight,
                      latent_type: str, out_dir: str, dataset_name: str,
-                     figsize=(40, 15), point_size=2, highlight_mask: np.ndarray | None = None):
+                     figsize=(40, 15), point_size=2, highlight_mask: np.ndarray | None = None,
+                     legend_font_size: int = 25, cbar_font_size: int = 20):
     """
     Internal helper to run UMAP, DBSCAN, and generate standard plots for a given latent space.
     """
@@ -443,6 +449,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         point_size=point_size,
         legend_=False,
         highlight_mask=highlight_mask,
+        legend_font_size=legend_font_size,
+        cbar_font_size=cbar_font_size
     )
 
     # --- DBSCAN Clustering ---
@@ -453,7 +461,10 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_assigned_label.png"),
         legend_name='Assigned Label (0=Neg, 1=Pos)',
         highlight_mask=highlight_mask,
-        figsize=figsize, point_size=point_size
+        figsize=figsize, point_size=point_size,
+        legend_=True,
+        legend_font_size=legend_font_size,
+        cbar_font_size=cbar_font_size
     )
 
     clusters = _run_dbscan_and_plot(
@@ -462,7 +473,9 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         latent_type=latent_type, out_dir=out_dir,
         figsize=figsize,
         point_size=point_size,
-        highlight_mask=highlight_mask
+        highlight_mask=highlight_mask,
+        legend_font_size=legend_font_size,
+        cbar_font_size=cbar_font_size
     )
     df[f'cluster_id_{latent_type}'] = clusters
 
@@ -480,7 +493,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         embedding=embedding, labels=pep_lengths, color_map=length_color_map,
         title=f'UMAP of {latent_type.capitalize()} Latents Colored by Peptide Length\n({len(unique_lengths)} unique lengths)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_pep_length.png"),
-        legend_name='Peptide Length', highlight_mask=highlight_mask, figsize=figsize, point_size=point_size
+        legend_name='Peptide Length', highlight_mask=highlight_mask, figsize=figsize, point_size=point_size,
+        legend_=True, legend_font_size=legend_font_size, cbar_font_size=cbar_font_size
     )
 
     # Plot by Major Allele Group
@@ -504,7 +518,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         embedding=embedding, labels=group_labels, color_map=group_color_map,
         title=f'UMAP of {latent_type.capitalize()} Latents by Major Allele Groups\n({len(unique_groups)} groups)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_allele_group.png"),
-        legend_name='Allele Group', figsize=figsize, point_size=point_size
+        legend_name='Allele Group', figsize=figsize, point_size=point_size,
+        legend_=True, legend_font_size=legend_font_size, cbar_font_size=cbar_font_size
     )
 
     # Plot by Reduced Anchor Pair
@@ -519,7 +534,7 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
         title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair.png"),
-        legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True, legend_font_size=10, cbar_font_size=8
+        legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True, legend_font_size=legend_font_size//2, cbar_font_size=cbar_font_size//2
     )
 
     # Plot by C/N-terminal Amino Acid Type
@@ -535,7 +550,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
             embedding=embedding, labels=prop_values, color_map=segment_color_map,
             title=f'UMAP of {latent_type.capitalize()} Latents by Peptide {pos} Type',
             filename=os.path.join(out_dir, f"umap_{latent_type}_by_pep_{pos}_type.png"),
-            legend_name=f'Peptide {pos} Type', figsize=figsize, point_size=point_size, legend_=True
+            legend_name=f'Peptide {pos} Type', figsize=figsize, point_size=point_size, legend_=True,
+            legend_font_size=legend_font_size, cbar_font_size=cbar_font_size
         )
 
     # --- UMAP Plots with Continuous Coloring (Physiochemical Properties) ---
@@ -549,7 +565,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
             embedding=embedding, labels=prop_values, color_map=prop_color_map,
             title=f'UMAP of {latent_type.capitalize()} Latents by Peptide {prop.capitalize()}',
             filename=os.path.join(out_dir, f"umap_{latent_type}_by_pep_{prop}.png"),
-            legend_style='bar', figsize=figsize, point_size=point_size
+            legend_style='bar', figsize=figsize, point_size=point_size,
+            legend_=True, legend_font_size=legend_font_size, cbar_font_size=cbar_font_size
         )
 
     print(f"✓ All visualizations for {latent_type.capitalize()} latents saved.")
