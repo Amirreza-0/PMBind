@@ -1251,8 +1251,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
                  return_att_weights=False, name='SelfAttentionWith2DMask',
-                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True,
-                 use_flash_attn=False):
+                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True):
         super().__init__(name=name)
         self.query_dim = query_dim
         self.context_dim = context_dim
@@ -1265,7 +1264,6 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self.att_dim = output_dim // heads  # Attention dimension per head
         self.self_attn_mhc = self_attn_mhc
         self.apply_rope = apply_rope # flag for rotary positional embedding
-        self.use_flash_attn = use_flash_attn  # new: opt-in fused SDPA/flash
 
     def build(self, x):
         # Projection weights
@@ -1279,6 +1277,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self.g_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
                                       initializer='random_uniform', trainable=True, name=f'g_proj_{self.name}')
         self.norm2 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln2_{self.name}')
+
 
         self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
                                      initializer='random_normal', trainable=True, name=f'outw_{self.name}')
@@ -1295,7 +1294,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
     def call(self, x_pmhc, p_mask, m_mask):
         """
         Args:
-            x_pmhc: Tensor of shape (B, N+M, query_dim) for query.
+            x: Tensor of shape (B, N+M, query_dim) for query.
             p_mask: Tensor of shape (B, N) for peptide mask.
             m_mask: Tensor of shape (B, M) for mhc mask.
         Returns:
@@ -1307,44 +1306,23 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         p_mask = tf.where(p_mask==self.pad_token, x=0., y=1.)  # (B, N)
         m_mask = tf.where(m_mask==self.pad_token, x=0., y=1.)  # (B, M)
 
-        q = tf.einsum('bxd,hde->bhxe', x_pmhc , self.q_proj)  # (B, H, N+M, D)
-        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj)   # (B, H, N+M, D)
-        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj)   # (B, H, N+M, D)
-        g = tf.einsum('bxd,hde->bhxe', x_pmhc, self.g_proj)   # (B, H, N+M, D)
+        q = tf.einsum('bxd,hde->bhxe', x_pmhc , self.q_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        g = tf.einsum('bxd,hde->bhxe', x_pmhc, self.g_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
 
         if self.apply_rope:
             q = self.rope(q)
             k = self.rope(k)
 
+        att = tf.matmul(q, k, transpose_b=True) * self.scale  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
         # Create 2D mask
-        mask_2d = self.mask_2d(p_mask, m_mask)               # (B, N+M, N+M), 1=allowed, 0=masked
-        mask_2d = tf.cast(mask_2d, q.dtype)
-        mask_bias = (1.0 - mask_2d) * tf.constant(-1e9, dtype=q.dtype)  # additive mask bias
-        mask_bias = tf.expand_dims(mask_bias, axis=1)        # (B, 1, T, S) broadcast over heads
-
-        can_use_flash = (
-            self.use_flash_attn and
-            hasattr(tf.nn, "scaled_dot_product_attention") and
-            (not self.return_att_weights)
-        )
-
-        if can_use_flash:
-            # Fused SDPA path (uses flash kernel when available). It applies scaling internally.
-            out = tf.nn.scaled_dot_product_attention(q, k, v, mask=mask_bias)  # (B, H, T, D)
-
-            # Match original behavior: zero-out outputs for rows with no valid targets (e.g., padded queries).
-            row_mask = tf.reduce_max(mask_2d, axis=-1, keepdims=True)          # (B, T, 1), 1 if any target allowed
-            out *= tf.expand_dims(row_mask, axis=1)                            # (B, 1, T, 1)
-            att = None  # not available in fused path
-        else:
-            # Original path
-            att = tf.matmul(q, k, transpose_b=True) * self.scale              # (B, H, T, T)
-            att = att + mask_bias                                             # add -inf where masked
-            att = tf.nn.softmax(att, axis=-1)
-            # remove the impact of row-wise attention of padded tokens. since all are 1e-9
-            att *= tf.expand_dims(mask_2d, axis=1)                            # (B, H, T, T)
-            out = tf.matmul(att, v)                                           # (B, H, T, D)
-
+        mask_2d = self.mask_2d(p_mask, m_mask)
+        mask_2d = tf.cast(mask_2d, tf.float32)  # (B, N+M, N+M)
+        mask_2d_neg = (1.0 - mask_2d) * -1e9  # Apply mask to attention scores
+        att = tf.nn.softmax(att + tf.expand_dims(mask_2d_neg, axis=1), axis=-1)  # Apply softmax to attention scores
+        att *= tf.expand_dims(mask_2d, axis=1) # remove the impact of row wise attention of padded tokens. since all are 1e-9
+        out = tf.matmul(att, v)  # (B, H, N+M, N+M) * (B, H, N+M, D) -> (B, H, N+M, D)
         out *= tf.nn.sigmoid(g)  # Apply gating mechanism
         out = tf.transpose(out, [0, 2, 1, 3])
         out = tf.reshape(out, [tf.shape(x_pmhc)[0], tf.shape(x_pmhc)[1], self.heads * self.att_dim])
@@ -1379,6 +1357,8 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         combined_mask_1 = tf.concat([self_peptide_mask_2d, pep_mhc_mask_secondpart], axis=2) # (B, N, N+M)
         combined_mask_2 = tf.concat([mhc_pep_mask_secondpart, self_mhc_mask_2d], axis=2) # (B, M, N+M)
         final_mask = tf.concat([combined_mask_1, combined_mask_2], axis=1) # (B, N+M, N+M)
+        final_mask_t = tf.transpose(final_mask, perm=[0,2,1]) # (B,... same)
+        final_mask = tf.multiply(final_mask, final_mask_t)
         return final_mask
 
 
@@ -2348,6 +2328,158 @@ class Sampling(layers.Layer):
         kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
         return z, kl_loss
 
+
+def create_k_fold_leave_one_out_stratified_cv(
+    df: pd.DataFrame,
+    k: int = 5,
+    target_col: str = "label",
+    id_col: str = "allele",
+    subset_prop: float = 1.0,
+    train_size: float = 0.8,
+    random_state: int = 42,
+    augmentation: str = None  # "down_sampling" or "GNUSS"
+):
+    """
+    Build *k* folds such that
+
+    1. **One whole ID (group) is left out of both train & val** (`left_out_id`).
+    2. **Validation contains exactly one additional ID** (`val_only_id`)
+       that never appears in train.
+    3. Remaining rows are split *stratified* on `target_col`
+       (`train_size` fraction for training).
+    4. Train & val are **down-sampled** to perfectly balanced label counts.
+
+    Returns
+    -------
+    list[tuple[pd.DataFrame, pd.DataFrame, Hashable]]
+        Each tuple = (train_df, val_df, left_out_id).
+    """
+    rng = np.random.RandomState(random_state)
+    if subset_prop < 1.0:
+        if subset_prop <= 0.0 or subset_prop > 1.0:
+            raise ValueError(f"subset_prop must be in (0, 1], got {subset_prop}")
+        # Take a random subset of the DataFrame
+        print(f"Taking {subset_prop * 100:.2f}% of the data for k-fold CV")
+        df = df.sample(frac=subset_prop, random_state=random_state).reset_index(drop=True)
+
+    # --- pick the k IDs that will be held out completely -------------------
+    unique_ids = df[id_col].unique()
+    if k > len(unique_ids):
+        raise ValueError(f"k={k} > unique {id_col} count ({len(unique_ids)})")
+    left_out_ids = rng.choice(unique_ids, size=k, replace=False)
+
+    folds = []
+    for fold_idx, left_out_id in enumerate(left_out_ids, 1):
+        fold_seed = random_state + fold_idx
+        mask_left_out = df[id_col] == left_out_id
+        working_df = df.loc[~mask_left_out].copy()
+
+        # ---------------------------------------------------------------
+        # 1) choose ONE id that will appear *only* in validation
+        #    (GroupShuffleSplit with test_size=1 group)
+        # ---------------------------------------------------------------
+        gss = GroupShuffleSplit(
+            n_splits=1, test_size=1, random_state=fold_seed
+        )
+        (train_groups_idx, val_only_groups_idx), = gss.split(
+            X=np.zeros(len(working_df)), y=None, groups=working_df[id_col]
+        )
+        val_only_group_id = working_df.iloc[val_only_groups_idx][id_col].unique()[0]
+
+        mask_val_only = working_df[id_col] == val_only_group_id
+        df_val_only = working_df[mask_val_only]
+        df_eligible = working_df[~mask_val_only]
+
+        # ---------------------------------------------------------------
+        # 2) stratified split of *eligible* rows
+        # ---------------------------------------------------------------
+        sss = StratifiedShuffleSplit(
+            n_splits=1, train_size=train_size, random_state=fold_seed
+        )
+        train_idx, extra_val_idx = next(
+            sss.split(df_eligible, df_eligible[target_col])
+        )
+        df_train = df_eligible.iloc[train_idx]
+        df_val   = pd.concat(
+            [df_val_only, df_eligible.iloc[extra_val_idx]], ignore_index=True
+        )
+
+        print(f"Fold size: train={len(df_train)}, val={len(df_val)} | ")
+
+        # ---------------------------------------------------------------
+        # 3) balance train and val via down-sampling
+        # ---------------------------------------------------------------
+        def _balance_down_sampling(frame: pd.DataFrame) -> pd.DataFrame:
+            min_count = frame[target_col].value_counts().min()
+            print(f"Balancing {len(frame)} rows to {min_count} per class")
+            balanced_parts = [
+                resample(
+                    frame[frame[target_col] == lbl],
+                    replace=False,
+                    n_samples=min_count,
+                    random_state=fold_seed,
+                )
+                for lbl in frame[target_col].unique()
+            ]
+            return pd.concat(balanced_parts, ignore_index=True)
+
+        def _balance_GNUSS(frame: pd.DataFrame) -> pd.DataFrame:
+            """
+            Balance the DataFrame by upsampling the minority class with Gaussian noise.
+            """
+            # Determine label counts and the maximum class size
+            counts = frame[target_col].value_counts()
+            max_count = counts.max()
+
+            # Identify numeric columns for noise injection
+            numeric_cols = frame.select_dtypes(include="number").columns
+
+            balanced_parts = []
+            for label, count in counts.items():
+                df_label = frame[frame[target_col] == label]
+                balanced_parts.append(df_label)
+                if count < max_count:
+                    # Upsample with replacement
+                    n_needed = max_count - count
+                    sampled = df_label.sample(n=n_needed, replace=True, random_state=fold_seed)
+                    # Add Gaussian noise to numeric features
+                    noise = pd.DataFrame(
+                        rng.normal(loc=0, scale=1e-6, size=(n_needed, len(numeric_cols))),
+                        columns=numeric_cols,
+                        index=sampled.index
+                    )
+                    sampled[numeric_cols] = sampled[numeric_cols] + noise
+                    balanced_parts.append(sampled)
+
+            # Combine and return
+            return pd.concat(balanced_parts).reset_index(drop=True)
+
+        if augmentation == "GNUSS":
+            df_train_bal = _balance_GNUSS(df_train)
+            df_val_bal   = _balance_GNUSS(df_val)
+        elif augmentation == "down_sampling":  # default to down-sampling
+            df_train_bal = _balance_down_sampling(df_train)
+            df_val_bal   = _balance_down_sampling(df_val)
+        elif not augmentation:
+            df_train_bal = df_train.copy()
+            df_val_bal = df_val.copy()
+            print("No augmentation applied, using original train and val sets.")
+        else:
+            raise ValueError(f"Unknown augmentation method: {augmentation}")
+
+        # Shuffle both datasets to avoid any ordering bias
+        df_train_bal = df_train_bal.sample(frac=1.0, random_state=fold_seed).reset_index(drop=True)
+        df_val_bal = df_val_bal.sample(frac=1.0, random_state=fold_seed).reset_index(drop=True)
+        folds.append((df_train_bal, df_val_bal, left_out_id))
+
+        print(
+            f"[fold {fold_idx}/{k}] left-out={left_out_id} | "
+            f"val-only={val_only_group_id} | "
+            f"train={len(df_train_bal)}, val={len(df_val_bal)}"
+        )
+
+    return folds
+
 # # --- Example Usage ---
 # if __name__ == '__main__':
 #     # Create a dummy DataFrame similar to your use case
@@ -2375,11 +2507,3 @@ class Sampling(layers.Layer):
 #
 # df_analysis = pd.read_csv("analysis_dataset_with_clusters.csv")
 #
-# folds = create_k_fold_leave_one_cluster_out_stratified_cv(
-#     df_analysis,
-#     k=5,
-#     target_col="assigned_label",
-#     cluster_col="cluster",
-#     id_col="allele",
-#     augmentation="down_sampling",
-# )
