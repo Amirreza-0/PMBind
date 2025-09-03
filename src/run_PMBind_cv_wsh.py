@@ -654,7 +654,7 @@ def main():
         "description": "Focal Loss (gamma=2, alpha=0.25) + Automatic loss weighting. no additional embedding masking"
     }
 
-    base_output_folder = "/media/amirreza/Crucial-500/PMBind_runs/"
+    base_output_folder = "../results/PMBind_runs/"
     log_file_path = os.path.join(base_output_folder, "experiment_log.csv")
     os.makedirs(base_output_folder, exist_ok=True)
 
@@ -692,13 +692,13 @@ def main():
                 print(f"--- Description: {config['description']} ---")
                 print(f"{'=' * 80}\n")
 
-                fold_dir_base = "/home/amirreza/Desktop/PMBind/data/cross_validation_dataset/mhc1/cv_folds"
+                fold_dir_base = "../data/cross_validation_dataset/mhc1/cv_folds"
                 paths = {
                     "train": os.path.join(fold_dir_base, f"fold_{fold:02d}_train.parquet"),
                     "val": os.path.join(fold_dir_base, f"fold_{fold:02d}_val.parquet"),
-                    "test": os.path.join(os.path.dirname(fold_dir_base), "benchmark_allele_holdout.parquet"),
-                    "embed_npz": f"/media/amirreza/Crucial-500/ESM/esm3-open/PMGen_whole_seq_/mhc{config['MHC_CLASS']}_encodings.npz",
-                    "embed_key": f"/media/amirreza/Crucial-500/ESM/esm3-open/PMGen_whole_seq_/mhc{config['MHC_CLASS']}_encodings.csv",
+                    "test": os.path.join(os.path.dirname(fold_dir_base), "test_set_rarest_alleles.parquet"),
+                    "embed_npz": f"../data/ESM/esm3-open/PMGen_whole_seq_/mhc{config['MHC_CLASS']}_encodings.npz",
+                    "embed_key": f"../data/ESM/esm3-open/PMGen_whole_seq_/mhc{config['MHC_CLASS']}_encodings.csv",
                     "seq_csv": f"../data/alleles/aligned_PMGen_class_{config['MHC_CLASS']}.csv",
                     "out_dir": out_dir,
                 }
@@ -754,7 +754,7 @@ def main():
                     source_col='source'
                 )
 
-                bench_root = "/home/amirreza/Desktop/PMBind/data/cross_validation_dataset/mhc1/benchmarks"
+                bench_root = "../data/cross_validation_dataset/mhc1/benchmarks"
                 print(f"\n--- Starting Benchmark Inference under {bench_root} ---")
                 if os.path.exists(bench_root):
                     for root, _, files in os.walk(bench_root):
