@@ -1651,6 +1651,8 @@ def clean_key(allele_key: str) -> str:
     Clean allele keys by removing special characters and converting to uppercase.
     This is useful for matching keys in embedding dictionaries.
     """
+    if allele_key is None:
+        return "None"
     mapping = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})
     return allele_key.translate(mapping).upper()
 
@@ -2337,6 +2339,7 @@ def create_k_fold_leave_one_out_stratified_cv(
     subset_prop: float = 1.0,
     train_size: float = 0.8,
     random_state: int = 42,
+    n_val_ids: int = 1,
     augmentation: str = None  # "down_sampling" or "GNUSS"
 ):
     """
@@ -2373,22 +2376,32 @@ def create_k_fold_leave_one_out_stratified_cv(
         fold_seed = random_state + fold_idx
         mask_left_out = df[id_col] == left_out_id
         working_df = df.loc[~mask_left_out].copy()
+        available_ids = working_df[id_col].unique()
+        if len(available_ids) < n_val_ids:
+            raise ValueError(f"Not enough unique IDs ({len(available_ids)}) to select 10 for validation")
 
-        # ---------------------------------------------------------------
-        # 1) choose ONE id that will appear *only* in validation
-        #    (GroupShuffleSplit with test_size=1 group)
-        # ---------------------------------------------------------------
-        gss = GroupShuffleSplit(
-            n_splits=1, test_size=1, random_state=fold_seed
-        )
-        (train_groups_idx, val_only_groups_idx), = gss.split(
-            X=np.zeros(len(working_df)), y=None, groups=working_df[id_col]
-        )
-        val_only_group_id = working_df.iloc[val_only_groups_idx][id_col].unique()[0]
+        # # ---------------------------------------------------------------
+        # # 1) choose ONE id that will appear *only* in validation
+        # #    (GroupShuffleSplit with test_size=1 group)
+        # # ---------------------------------------------------------------
+        # gss = GroupShuffleSplit(
+        #     n_splits=1, test_size=1.0, random_state=fold_seed
+        # )
+        # (train_groups_idx, val_only_groups_idx), = gss.split(
+        #     X=np.zeros(len(working_df)), y=None, groups=working_df[id_col]
+        # )
 
-        mask_val_only = working_df[id_col] == val_only_group_id
-        df_val_only = working_df[mask_val_only]
-        df_eligible = working_df[~mask_val_only]
+        val_only_group_ids = rng.choice(available_ids, size=n_val_ids, replace=False)
+
+        # Ensure we get all rows for the selected validation groups
+        mask_val_only = working_df[id_col].isin(val_only_group_ids)
+        df_val_only = working_df[mask_val_only].copy()
+        df_eligible = working_df[~mask_val_only].copy()
+
+        # Verify the selection worked correctly
+        actual_val_ids = df_val_only[id_col].unique()
+        if len(actual_val_ids) != n_val_ids:
+            print(f"Warning: Expected {n_val_ids} validation IDs, got {len(actual_val_ids)}")
 
         # ---------------------------------------------------------------
         # 2) stratified split of *eligible* rows
@@ -2400,9 +2413,10 @@ def create_k_fold_leave_one_out_stratified_cv(
             sss.split(df_eligible, df_eligible[target_col])
         )
         df_train = df_eligible.iloc[train_idx]
-        df_val   = pd.concat(
-            [df_val_only, df_eligible.iloc[extra_val_idx]], ignore_index=True
-        )
+        # df_val   = pd.concat(
+        #     [df_val_only, df_eligible.iloc[extra_val_idx]], ignore_index=True
+        # )
+        df_val = df_val_only
 
         print(f"Fold size: train={len(df_train)}, val={len(df_val)} | ")
 
@@ -2474,7 +2488,7 @@ def create_k_fold_leave_one_out_stratified_cv(
 
         print(
             f"[fold {fold_idx}/{k}] left-out={left_out_id} | "
-            f"val-only={val_only_group_id} | "
+            f"val-only={val_only_group_ids} | "
             f"train={len(df_train_bal)}, val={len(df_val_bal)}"
         )
 
