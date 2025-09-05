@@ -354,9 +354,9 @@ def _plot_umap(
 def _run_dbscan_and_plot(
             embedding: np.ndarray,
             alleles: pd.Series,
-            random_alleles_to_highlight: list,
             latent_type: str,
             out_dir: str,
+            random_alleles_to_highlight: list | None = None,
             figsize=(40, 15),
             point_size=2,
             highlight_mask: np.ndarray | None = None,
@@ -409,7 +409,7 @@ def _run_dbscan_and_plot(
             filename=os.path.join(out_dir, f"umap_dbscan_{latent_type}.png"),
             legend_name='DBSCAN Clusters',
             highlight_mask=highlight_mask,
-            alleles_to_highlight=random_alleles_to_highlight,
+            alleles_to_highlight=random_alleles_to_highlight if random_alleles_to_highlight else None,
             highlight_labels_series=alleles,  # Pass original alleles for highlighting,
             figsize=figsize,
             point_size=point_size,
@@ -469,7 +469,6 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
 
     clusters = _run_dbscan_and_plot(
         embedding=embedding, alleles=alleles,
-        random_alleles_to_highlight=random_alleles_to_highlight,
         latent_type=latent_type, out_dir=out_dir,
         figsize=figsize,
         point_size=point_size,
@@ -519,7 +518,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         title=f'UMAP of {latent_type.capitalize()} Latents by Major Allele Groups\n({len(unique_groups)} groups)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_allele_group.png"),
         legend_name='Allele Group', figsize=figsize, point_size=point_size,
-        legend_=True, legend_font_size=legend_font_size, cbar_font_size=cbar_font_size
+        legend_=True, legend_font_size=legend_font_size, cbar_font_size=cbar_font_size,
+        alleles_to_highlight=random_alleles_to_highlight,
     )
 
     # Plot by Reduced Anchor Pair
@@ -570,4 +570,9 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         )
 
     print(f"✓ All visualizations for {latent_type.capitalize()} latents saved.")
+
+    # --- 4. Other Visualizations (Inputs and Predictions) ---
+
+
+
     return df
