@@ -315,6 +315,7 @@ def pmbind_multitask(max_pep_len: int,
     mhc = layers.LayerNormalization()(mhc)
 
     # add Gaussian noise
+    pep = AddGaussianNoise(noise_std, name="pep_gaussian_noise")(pep)
     mhc = AddGaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc)
 
     pmhc_concat = layers.Concatenate(axis=1, name="pmhc_concat")([pep, mhc])  # (B, P+M, D)
@@ -339,13 +340,13 @@ def pmbind_multitask(max_pep_len: int,
     # -------------------------------------------------------------------
     # TASK 1: BINDING PREDICTION HEAD # TODO this part directly affects clustering
     # -------------------------------------------------------------------
-    # pooled_mean2 = GlobalMeanPooling1D(name="latent_vector_pool-2", axis=-2)(latent_sequence) # (B, P+M)
-    pooled_std2 = GlobalMeanPooling1D(name="latent_vector_std-2", axis=-2)(latent_sequence) # (B, P+M)
-    pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(latent_sequence)  # (B, D)
-    # pooled_std1 = GlobalMeanPooling1D(name="latent_vector_std-1", axis=-1)(latent_sequence)  # (B, D)
+    pooled_mean2 = GlobalMeanPooling1D(name="latent_vector_pool-2", axis=-2)(latent_sequence) # (B, P+M)
+    # pooled_std2 = GlobalSTDPooling1D(name="latent_vector_std-2", axis=-2)(latent_sequence) # (B, P+M)
+    # pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(latent_sequence)  # (B, D)
+    pooled_std1 = GlobalSTDPooling1D(name="latent_vector_std-1", axis=-1)(latent_sequence)  # (B, D)
 
     # concatenate mean and std pooled vectors
-    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_std2, pooled_mean1]) # (B,
+    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_std1, pooled_mean2]) # (B, 1*(P+M+D))
 
     binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1")(pooled_latent)
     binding_head = layers.GaussianDropout(0.2, name="binding_gaussian_dropout")(binding_head)
