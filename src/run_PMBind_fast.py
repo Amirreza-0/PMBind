@@ -54,7 +54,7 @@ class OptimizedDataGenerator(keras.utils.Sequence):
     """Optimized data generator with caching and vectorized operations."""
 
     def __init__(self, df, seq_map, embed_map, max_pep_len, max_mhc_len, batch_size,
-                 is_training=True, shuffle=True, negs_pool=None, pos_df=None):
+                 is_training=True, shuffle=True):
         super().__init__()
         self.df = df
         self.seq_map = seq_map
@@ -64,8 +64,6 @@ class OptimizedDataGenerator(keras.utils.Sequence):
         self.batch_size = batch_size
         self.is_training = is_training
         self.shuffle = shuffle
-        self.negs_pool = negs_pool
-        self.pos_df = pos_df
 
         # Pre-process and cache frequently used data
         self._preprocess_data()
@@ -111,28 +109,43 @@ class OptimizedDataGenerator(keras.utils.Sequence):
         batch_df = self.df.iloc[batch_indices]
         return self._generate_batch(batch_df)
 
-    def on_epoch_end(self):
-        """Resample negatives and shuffle data."""
-        if self.is_training and self.negs_pool is not None and self.pos_df is not None:
-            n_neg_samples = len(self.df) - len(self.pos_df)
-            df_neg_resampled = self.negs_pool.sample(n=n_neg_samples, replace=True)
-            # Pre-process resampled negatives
-            df_neg_resampled = df_neg_resampled.copy()
-            df_neg_resampled['_cleaned_key'] = df_neg_resampled.apply(
-                lambda r: r.get('mhc_embedding_key', r['allele'].replace(' ', '').replace('*', '').replace(':', '')),
-                axis=1
-            )
-            df_neg_resampled['_emb_key'] = df_neg_resampled['_cleaned_key'].apply(
-                lambda k: get_embed_key(clean_key(k), self.embed_map)
-            )
-            if MHC_CLASS == 2:
-                df_neg_resampled['_mhc_seq'] = df_neg_resampled['_cleaned_key'].apply(self._get_mhc_seq_class2)
-            else:
-                df_neg_resampled['_mhc_seq'] = df_neg_resampled['_emb_key'].apply(
-                    lambda k: self.seq_map.get(get_embed_key(clean_key(k), self.seq_map), '')
-                )
-            self.df = pd.concat([self.pos_df, df_neg_resampled], ignore_index=True)
+    # def on_epoch_end(self):
+    #     """Resample negatives and shuffle data."""
+    #     if self.is_training and self.negs_pool is not None and self.pos_df is not None:
+    #         n_neg_samples = len(self.df) - len(self.pos_df)
+    #         df_neg_resampled = self.negs_pool.sample(n=n_neg_samples, replace=True)
+    #         # Pre-process resampled negatives
+    #         df_neg_resampled = df_neg_resampled.copy()
+    #         df_neg_resampled['_cleaned_key'] = df_neg_resampled.apply(
+    #             lambda r: r.get('mhc_embedding_key', r['allele'].replace(' ', '').replace('*', '').replace(':', '')),
+    #             axis=1
+    #         )
+    #         df_neg_resampled['_emb_key'] = df_neg_resampled['_cleaned_key'].apply(
+    #             lambda k: get_embed_key(clean_key(k), self.embed_map)
+    #         )
+    #         if MHC_CLASS == 2:
+    #             df_neg_resampled['_mhc_seq'] = df_neg_resampled['_cleaned_key'].apply(self._get_mhc_seq_class2)
+    #         else:
+    #             df_neg_resampled['_mhc_seq'] = df_neg_resampled['_emb_key'].apply(
+    #                 lambda k: self.seq_map.get(get_embed_key(clean_key(k), self.seq_map), '')
+    #             )
+    #         self.df = pd.concat([self.pos_df, df_neg_resampled], ignore_index=True)
+    #
+    #     self.indices = np.arange(len(self.df))
+    #     if self.shuffle:
+    #         np.random.shuffle(self.indices)
 
+    def on_epoch_end(self):
+        """down sample to balance classes and shuffle data."""
+        if self.is_training and self.df is not None:
+            tf.random.set_seed(None)
+            df = self.df.copy()
+            df_pos = self.df[self.df['assigned_label'] == 1]
+            df_neg = self.df[self.df['assigned_label'] == 0]
+            n_negs_to_sample = len(df_pos)
+            df_neg_resampled = df_neg.sample(n=n_negs_to_sample, replace=True)
+            self.df = pd.concat([df_pos, df_neg_resampled], ignore_index=True)
+            tf.print(f'Sampled {len(df_pos)} new samples')
         self.indices = np.arange(len(self.df))
         if self.shuffle:
             np.random.shuffle(self.indices)
@@ -211,6 +224,7 @@ class OptimizedDataGenerator(keras.utils.Sequence):
 def train_step(model, batch_data, focal_loss_fn, log_vars, optimizer):
     """Compiled training step for better performance."""
     log_var_cls, log_var_pep, log_var_mhc = log_vars
+    pep_focus_factor = tf.constant(2.0, dtype=tf.float32)
 
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
@@ -227,7 +241,7 @@ def train_step(model, batch_data, focal_loss_fn, log_vars, optimizer):
         # Reconstruction losses
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         precision_pep = tf.exp(-log_var_pep)
-        recon_loss_pep = precision_pep * raw_recon_loss_pep + 2*tf.nn.softplus(log_var_pep)
+        recon_loss_pep = precision_pep * raw_recon_loss_pep + tf.nn.softplus(log_var_pep) * pep_focus_factor
 
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
         precision_mhc = tf.exp(-log_var_mhc)
@@ -262,7 +276,7 @@ def evaluate_model_batched(model, generator):
     return roc_auc_score(y_true, y_pred) if len(np.unique(y_true)) > 1 else float('nan')
 
 
-def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv, embd_key_path, out_dir,
+def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_dir,
           mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std):
     """Optimized training function."""
     global EMB_DB, MHC_CLASS, ESM_DIM
@@ -277,22 +291,16 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
 
     df_train = pq.ParquetFile(train_path).read().to_pandas()
     df_val = pq.ParquetFile(validation_path).read().to_pandas()
-    df_test = pq.ParquetFile(test_path).read().to_pandas()
-
-    # Load negative samples pool
-    if not os.path.exists(negs_pool):
-        raise FileNotFoundError(f"Negative samples pool not found at: {negs_pool}")
-    df_neg_pool = pq.ParquetFile(negs_pool).read().to_pandas()
 
     # Separate positive samples
     df_train_pos = df_train[df_train['assigned_label'] == 1].copy()
     n_neg_samples = len(df_train) - len(df_train_pos)
 
-    print(f"Loaded {len(df_train)} training, {len(df_val)} validation, {len(df_test)} test samples.")
+    print(f"Loaded {len(df_train)} training, {len(df_val)} validation")
     print(f"Training has {len(df_train_pos)} positive and {n_neg_samples} negative samples.")
 
     # Calculate max lengths
-    max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"], df_test["long_mer"]]).str.len().max())
+    max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"]]).str.len().max()) + 5 # buffer
     max_mhc_len = 500 if mhc_class == 2 else int(next(iter(EMB_DB.values())).shape[0])
     print(f"Max peptide length: {max_pep_len}, Max MHC length: {max_mhc_len}")
 
@@ -338,12 +346,6 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
         batch_size=batch_size, is_training=False, shuffle=False
     )
 
-    test_gen = OptimizedDataGenerator(
-        df=df_test, seq_map=seq_map, embed_map=embed_map,
-        max_pep_len=max_pep_len, max_mhc_len=max_mhc_len,
-        batch_size=batch_size, is_training=False, shuffle=False
-    )
-
     # Pre-process positive training samples
     df_train_pos = df_train_pos.copy()
     df_train_pos['_cleaned_key'] = df_train_pos.apply(
@@ -364,8 +366,8 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
 
     # Training history
     history = {
-        "train_loss": [], "val_loss": [], "test_loss": [],
-        "train_auc": [], "val_auc": [], "test_auc": [],
+        "train_loss": [], "val_loss": [],
+        "train_auc": [], "val_auc": [],
         "train_cls_loss": [], "val_cls_loss": [],
         "train_recon_loss": [], "val_recon_loss": []
     }
@@ -391,7 +393,6 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
             df=df_train, seq_map=seq_map, embed_map=embed_map,
             max_pep_len=max_pep_len, max_mhc_len=max_mhc_len,
             batch_size=batch_size, is_training=True, shuffle=True,
-            negs_pool=df_neg_pool, pos_df=df_train_pos
         )
 
         # Reset metrics
@@ -404,11 +405,10 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
 
         # Get previous epoch's validation AUC for display
         prev_val_auc = history['val_auc'][-1] if history['val_auc'] else 0.0
-        prev_test_auc = history['test_auc'][-1] if history['test_auc'] else 0.0
 
         # Training progress bar
         pbar = tqdm(range(len(train_gen)), desc=f"Training", file=sys.stdout)
-        pbar.set_postfix({'prev_val_auc': f"{prev_val_auc:.4f}", 'prev_test_auc': f"{prev_test_auc:.4f}"})
+        pbar.set_postfix({'prev_val_auc': f"{prev_val_auc:.4f}"})
 
         for batch_idx in pbar:
             batch_data = train_gen[batch_idx]
@@ -428,7 +428,6 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
                 'tot_loss': f"{train_loss_metric.result():.4f}",
                 'train_auc': f"{train_auc_metric.result():.4f}",
                 'prev_val_auc': f"{prev_val_auc:.4f}",
-                'prev_test_auc': f"{prev_test_auc:.4f}",
                 'pep_rec': f"{pep_loss.result():.4f}",
                 'mhc_rec': f"{mhc_loss.result():.4f}",
                 'cls_loss': f"{cls_loss.result():.4f}"
@@ -438,15 +437,12 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
         print("\nEvaluating on validation set...")
         val_auc = evaluate_model_batched(model, val_gen)
 
-        # Evaluate on test set
-        print("Evaluating on test set...")
-        test_auc = evaluate_model_batched(model, test_gen)
+
 
         # Record metrics
         history['train_loss'].append(float(train_loss_metric.result()))
         history['train_auc'].append(float(train_auc_metric.result()))
         history['val_auc'].append(float(val_auc))
-        history['test_auc'].append(float(test_auc))
         history['train_cls_loss'].append(float(cls_loss.result()))
         history["train_pep_recon_loss"] = history.get("train_pep_recon_loss", []) + [float(pep_loss.result())]
         history["train_mhc_recon_loss"] = history.get("train_mhc_recon_loss", []) + [float(mhc_loss.result())]
@@ -454,7 +450,6 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
         print(f"\nEpoch {epoch + 1} Summary:")
         print(f"  Train Loss: {history['train_loss'][-1]:.4f}, Train AUC: {history['train_auc'][-1]:.4f}, Cls Loss: {history['train_cls_loss'][-1]:.4f}, Pep Recon Loss: {history['train_pep_recon_loss'][-1]:.4f}, MHC Recon Loss: {history['train_mhc_recon_loss'][-1]:.4f}")
         print(f"  Val AUC: {val_auc:.4f}")
-        print(f"  Test AUC: {test_auc:.4f}")
         print(
             f"  Log Variances - Cls: {log_var_cls.numpy():.4f}, Pep: {log_var_pep.numpy():.4f}, MHC: {log_var_mhc.numpy():.4f}")
 
@@ -480,7 +475,7 @@ def train(train_path, validation_path, test_path, negs_pool, embed_npz, seq_csv,
 # ----------------------------------------------------------------------
 def infer(model_weights_path, data_path, out_dir, name,
           max_pep_len, max_mhc_len, seq_map, embed_map,
-          mhc_class, embed_dim, heads, noise_std, batch_size, source_col=None):
+          mhc_class, embed_dim, heads, noise_std, batch_size, source_col=None, allow_cache=False):
     """Optimized inference function."""
     global MHC_CLASS, ESM_DIM
     MHC_CLASS = mhc_class
@@ -510,7 +505,8 @@ def infer(model_weights_path, data_path, out_dir, name,
     latents_seq_path = os.path.join(out_dir, f"latents_seq_{name}.mmap")
     latents_pooled_path = os.path.join(out_dir, f"latents_pooled_{name}.mmap")
 
-    if os.path.exists(latents_pooled_path) and os.path.exists(latents_seq_path):
+    if os.path.exists(latents_pooled_path) and os.path.exists(latents_seq_path) and allow_cache:
+        print("Caching enabled for inference.")
         print(f"Latents already exist, loading from disk...")
         latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='r',
                                 shape=(len(df_infer), max_pep_len + max_mhc_len, embed_dim))
@@ -621,11 +617,9 @@ def visualize_training_history(history, out_dir):
     plt.plot(history["train_loss"], label="Train Loss")
     if "val_loss" in history and history["val_loss"]:
         plt.plot(history["val_loss"], label="Val Loss")
-    if "test_loss" in history and history["test_loss"]:
-        plt.plot(history["test_loss"], label="Test Loss", linestyle='--', color='green')
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Training, Validation, and Test Loss")
+    plt.title("Training and Validation Loss")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -633,11 +627,9 @@ def visualize_training_history(history, out_dir):
     plt.subplot(1, 2, 2)
     plt.plot(history["train_auc"], label="Train AUC")
     plt.plot(history["val_auc"], label="Val AUC")
-    if "test_auc" in history and history["test_auc"]:
-        plt.plot(history["test_auc"], label="Test AUC", linestyle='--', color='green')
     plt.xlabel("Epoch")
     plt.ylabel("AUC")
-    plt.title("Training, Validation, and Test AUC")
+    plt.title("Training and Validation AUC")
     plt.legend()
     plt.grid(True, alpha=0.3)
 
@@ -693,7 +685,7 @@ def visualize_inference_results(df_with_results, true_labels, prediction_scores,
     plt.close()
 
 
-def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, max_mhc_len,
+def run_visualizations(df, latents_pooled, latents_seq, enc_dec, max_pep_len, max_mhc_len,
                        seq_map, embed_map, out_dir, dataset_name, highlight_mask=None,
                        figsize=(40, 15), point_size=2):
     """Generate latent space visualizations."""
@@ -729,9 +721,12 @@ def run_visualizations(df, latents_seq, latents_pooled, enc_dec, max_pep_len, ma
     )
 
     # Save results
-    output_parquet_path = os.path.join(out_dir, f"{dataset_name}_with_clusters.parquet")
-    df_seq.to_parquet(output_parquet_path, index=False)
-    print(f"✓ Saved dataset with cluster IDs to {output_parquet_path}")
+    output_parquet_path_seq = os.path.join(out_dir, f"{dataset_name}_with_seq_clusters.parquet")
+    df_seq.to_parquet(output_parquet_path_seq, index=False)
+    print(f"✓ Saved dataset with cluster IDs to {output_parquet_path_seq}")
+    output_parquet_path_pooled = os.path.join(out_dir, f"{dataset_name}_with_pooled_clusters.parquet")
+    df_pooled.to_parquet(output_parquet_path_pooled, index=False)
+    print(f"✓ Saved dataset with cluster IDs to {output_parquet_path_pooled}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -806,8 +801,6 @@ def run_fold(fold, config, run_id_base, base_output_folder, num_cpus):
             max_pep_len, max_mhc_len, seq_map, embed_map = train(
                 train_path=paths["train"],
                 validation_path=paths["val"],
-                test_path=paths["test"],
-                negs_pool=paths["neg_pool"],
                 embed_npz=paths["embed_npz"],
                 seq_csv=paths["seq_csv"],
                 embd_key_path=paths["embed_key"],
@@ -830,7 +823,8 @@ def run_fold(fold, config, run_id_base, base_output_folder, num_cpus):
                 return
 
             # Inference on each dataset
-            for dset_name in ["train", "val", "test"]:
+            for dset_name in ["test", "val", "train"]:
+                print(f"\nStarting Inference on {dset_name.capitalize()} Set...")
                 infer_out_dir = os.path.join(paths["out_dir"], f"inference_{dset_name}")
                 infer(
                     model_weights_path=best_model_path,
@@ -909,12 +903,13 @@ def run_fold(fold, config, run_id_base, base_output_folder, num_cpus):
 def main(fold_to_run, num_cpus=1):
     """Main function to run the training and inference pipeline for multiple configurations."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 15, "BATCH_SIZE": 100, "LEARNING_RATE": 1e-4,
+        "MHC_CLASS": 1, "EPOCHS": 5, "BATCH_SIZE": 100, "LEARNING_RATE": 1e-3,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
-        "description": "Focal Loss + Automatic loss weighting. no additional embedding masking + negative resampling"
+        "description": "Focal Loss + Automatic loss weighting with softplus and 2.0 pep focus. no additional embedding masking + negative resampling down, pooled_std1, pooled_mean2"
     }
 
-    base_output_folder = "../results/PMBind_runs/"
+    # base_output_folder = "../results/PMBind_runs/"
+    base_output_folder = "/media/amirreza/Crucial-500/PMBind_runs/"
     log_file_path = os.path.join(base_output_folder, "experiment_log.csv")
     os.makedirs(base_output_folder, exist_ok=True)
 
