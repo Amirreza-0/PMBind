@@ -553,8 +553,6 @@ class MaskedEmbedding(keras.layers.Layer):
         """Serializes the layer's configuration."""
         config = super().get_config()
         config.update({
-            'embed_dim': self.embed_dim,
-            'max_len': self.max_len,
             'mask_token': self.mask_token,
             'pad_token': self.pad_token,
         })
@@ -2332,22 +2330,22 @@ class Sampling(layers.Layer):
 
 
 def create_k_fold_leave_one_out_stratified_cv(
-    df: pd.DataFrame,
-    k: int = 5,
-    target_col: str = "label",
-    id_col: str = "allele",
-    subset_prop: float = 1.0,
-    train_size: float = 0.8,
-    random_state: int = 42,
-    n_val_ids: int = 1,
-    augmentation: str = None  # "down_sampling" or "GNUSS"
+        df: pd.DataFrame,
+        k: int = 5,
+        target_col: str = "label",
+        id_col: str = "allele",
+        subset_prop: float = 1.0,
+        train_size: float = 0.8,
+        random_state: int = 42,
+        n_val_ids: int = 1,
+        augmentation: str = None  # "down_sampling" or "GNUSS"
 ):
     """
     Build *k* folds such that
 
     1. **One whole ID (group) is left out of both train & val** (`left_out_id`).
-    2. **Validation contains exactly one additional ID** (`val_only_id`)
-       that never appears in train.
+    2. **Validation contains exactly n_val_ids additional IDs**
+       (half from positive samples, half from negative samples) that never appear in train.
     3. Remaining rows are split *stratified* on `target_col`
        (`train_size` fraction for training).
     4. Train & val are **down-sampled** to perfectly balanced label counts.
@@ -2369,42 +2367,56 @@ def create_k_fold_leave_one_out_stratified_cv(
     unique_ids = df[id_col].unique()
     if k > len(unique_ids):
         raise ValueError(f"k={k} > unique {id_col} count ({len(unique_ids)})")
-    left_out_ids = rng.choice(unique_ids, size=k, replace=False)
+
+    # Filter out rarest alleles from potential left_out_ids
+    # Assuming you have a way to identify rare alleles - adjust this logic as needed
+    allele_counts = df[id_col].value_counts()
+    min_samples_threshold = 10  # or whatever threshold defines "rare"
+    frequent_ids = allele_counts[allele_counts >= min_samples_threshold].index.tolist()
+
+    if k > len(frequent_ids):
+        raise ValueError(f"k={k} > frequent {id_col} count ({len(frequent_ids)}). Consider reducing k or threshold.")
+
+    left_out_ids = rng.choice(frequent_ids, size=k, replace=False)
 
     folds = []
     for fold_idx, left_out_id in enumerate(left_out_ids, 1):
         fold_seed = random_state + fold_idx
         mask_left_out = df[id_col] == left_out_id
         working_df = df.loc[~mask_left_out].copy()
-        available_ids = working_df[id_col].unique()
-        if len(available_ids) < n_val_ids:
-            raise ValueError(f"Not enough unique IDs ({len(available_ids)}) to select 10 for validation")
-
-        # # ---------------------------------------------------------------
-        # # 1) choose ONE id that will appear *only* in validation
-        # #    (GroupShuffleSplit with test_size=1 group)
-        # # ---------------------------------------------------------------
-        # gss = GroupShuffleSplit(
-        #     n_splits=1, test_size=1.0, random_state=fold_seed
-        # )
-        # (train_groups_idx, val_only_groups_idx), = gss.split(
-        #     X=np.zeros(len(working_df)), y=None, groups=working_df[id_col]
-        # )
-
-        val_only_group_ids = rng.choice(available_ids, size=n_val_ids, replace=False)
-
-        # Ensure we get all rows for the selected validation groups
-        mask_val_only = working_df[id_col].isin(val_only_group_ids)
-        df_val_only = working_df[mask_val_only].copy()
-        df_eligible = working_df[~mask_val_only].copy()
-
-        # Verify the selection worked correctly
-        actual_val_ids = df_val_only[id_col].unique()
-        if len(actual_val_ids) != n_val_ids:
-            print(f"Warning: Expected {n_val_ids} validation IDs, got {len(actual_val_ids)}")
 
         # ---------------------------------------------------------------
-        # 2) stratified split of *eligible* rows
+        # 1) Choose validation IDs
+        # ---------------------------------------------------------------
+        allele_counts = working_df[id_col].value_counts()
+        available_alleles = allele_counts.index.tolist()
+
+        # Ensure we don't try to select more alleles than available
+        actual_n_val_ids = min(n_val_ids, len(available_alleles))
+
+        if actual_n_val_ids == 0:
+            # No validation-only
+            raise ValueError("No alleles available for validation after leaving one out.")
+        else:
+            # Select the rarest alleles for validation, excluding the left_out_id
+            rarest_alleles = allele_counts.tail(actual_n_val_ids).index.tolist()
+            # Remove left_out_id if it's in the rarest alleles
+            if left_out_id in rarest_alleles:
+                raise ValueError(f"Left-out ID {left_out_id} should not be in the rarest alleles.")
+
+            rarest_mask = working_df[id_col].isin(rarest_alleles)
+            df_val_only = working_df.loc[rarest_mask].copy().reset_index(drop=True)
+            df_eligible = working_df.loc[~rarest_mask].copy().reset_index(drop=True)
+            actual_val_ids = df_val_only[id_col].unique()
+
+        print(f"Validation-only data: {len(df_val_only):,} samples from {len(actual_val_ids)} alleles")
+
+        if len(actual_val_ids) != n_val_ids:
+            print(f"Warning: Expected {n_val_ids} validation IDs, got {len(actual_val_ids)}")
+            print(f"  val IDs: {actual_val_ids}")
+
+        # ---------------------------------------------------------------
+        # 2) stratified split of *eligible* rows for training
         # ---------------------------------------------------------------
         sss = StratifiedShuffleSplit(
             n_splits=1, train_size=train_size, random_state=fold_seed
@@ -2413,15 +2425,17 @@ def create_k_fold_leave_one_out_stratified_cv(
             sss.split(df_eligible, df_eligible[target_col])
         )
         df_train = df_eligible.iloc[train_idx]
-        # df_val   = pd.concat(
-        #     [df_val_only, df_eligible.iloc[extra_val_idx]], ignore_index=True
-        # )
-        df_val = df_val_only
+
+        # Combine validation-only IDs with extra validation samples for better representation
+        df_val = pd.concat(
+            [df_val_only, df_eligible.iloc[extra_val_idx]],
+            ignore_index=True
+        )
 
         print(f"Fold size: train={len(df_train)}, val={len(df_val)} | ")
 
         # ---------------------------------------------------------------
-        # 3) balance train and val via down-sampling
+        # 3) balance train and val via down-sampling or GNUSS
         # ---------------------------------------------------------------
         def _balance_down_sampling(frame: pd.DataFrame) -> pd.DataFrame:
             min_count = frame[target_col].value_counts().min()
@@ -2470,10 +2484,10 @@ def create_k_fold_leave_one_out_stratified_cv(
 
         if augmentation == "GNUSS":
             df_train_bal = _balance_GNUSS(df_train)
-            df_val_bal   = _balance_GNUSS(df_val)
+            df_val_bal = _balance_GNUSS(df_val)
         elif augmentation == "down_sampling":  # default to down-sampling
             df_train_bal = _balance_down_sampling(df_train)
-            df_val_bal   = _balance_down_sampling(df_val)
+            df_val_bal = _balance_down_sampling(df_val)
         elif not augmentation:
             df_train_bal = df_train.copy()
             df_val_bal = df_val.copy()
@@ -2488,7 +2502,7 @@ def create_k_fold_leave_one_out_stratified_cv(
 
         print(
             f"[fold {fold_idx}/{k}] left-out={left_out_id} | "
-            f"val-only={val_only_group_ids} | "
+            f"val-only={actual_val_ids} | "
             f"train={len(df_train_bal)}, val={len(df_val_bal)}"
         )
 
