@@ -99,6 +99,7 @@ class OptimizedDataGenerator(keras.utils.Sequence):
         Efficiently resample negative indices and shuffle the data for the next epoch.
         This is now extremely fast as it only manipulates numpy arrays of integers.
         """
+        tf.random.set_seed(None)
         if self.is_training:
             # Resample indices from the pool of negative indices
             resampled_neg_indices = np.random.choice(
@@ -170,7 +171,7 @@ class OptimizedDataGenerator(keras.utils.Sequence):
             if self.is_training:
                 valid_positions = np.where(batch_data["pep_mask"][i] == NORM_TOKEN)[0]
                 if len(valid_positions) > 0:
-                    mask_fraction = 0.30
+                    mask_fraction = 0.15
                     n_mask = max(2, int(mask_fraction * len(valid_positions)))  # At least 2 positions (possible anchors)
                     mask_indices = np.random.choice(valid_positions, size=n_mask, replace=False)
                     batch_data["pep_mask"][i, mask_indices] = MASK_TOKEN  # Masked positions get MASK_TOKEN (-1.0)
@@ -195,8 +196,8 @@ class OptimizedDataGenerator(keras.utils.Sequence):
             if self.is_training:
                 valid_mhc_positions = np.where(batch_data["mhc_mask"][i] == NORM_TOKEN)[0]
                 if len(valid_mhc_positions) > 0:
-                    mask_fraction = 0.30
-                    n_mask = max(10, int(mask_fraction * len(valid_mhc_positions)))  # At least 10 positions (possible binding groove)
+                    mask_fraction = 0.15
+                    n_mask = max(5, int(mask_fraction * len(valid_mhc_positions)))  # At least 10 positions (possible binding groove)
                     mask_indices = np.random.choice(valid_mhc_positions, size=n_mask, replace=False)
                     batch_data["mhc_mask"][i, mask_indices] = MASK_TOKEN  # Masked positions get MASK_TOKEN (-1.0)
                     # Zero out the corresponding embeddings for masked positions
@@ -208,7 +209,7 @@ class OptimizedDataGenerator(keras.utils.Sequence):
                         # Only apply dimension-wise masking to positions that remain unmasked (NORM_TOKEN)
                         emb_positions = np.where(batch_data["mhc_mask"][i] == NORM_TOKEN)[0]
                         if emb_positions.size > 0:
-                            mask_fraction = 0.30 # (to force the model to use all features)
+                            mask_fraction = 0.15 # (to force the model to use all features)
                             k = emb_positions.size
                             # Random boolean mask: True => mask this embedding dimension
                             dim_mask = np.random.rand(k, emb_dim) < mask_fraction
@@ -228,73 +229,33 @@ class OptimizedDataGenerator(keras.utils.Sequence):
 # ──────────────────────────────────────────────────────────────────────
 # Training Functions
 # ----------------------------------------------------------------------
-@tf.function
-def train_step(model, batch_data, focal_loss_fn, log_vars, optimizer):
-    """Compiled training step for better performance."""
-    log_tau = log_vars
-
-    with tf.GradientTape() as tape:
-        outputs = model(batch_data, training=True)
-
-        # Classification loss with focal loss
-        raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
-        cls_loss = raw_cls_loss
-
-        # Reconstruction losses
-        raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
-        recon_loss_pep = raw_recon_loss_pep
-
-        raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
-        recon_loss_mhc = raw_recon_loss_mhc
-
-        # Smooth max approximation for total loss
-        # tau = tf.exp(log_tau)
-        # losses = [cls_loss, recon_loss_pep, recon_loss_mhc]
-        # max_l = tf.reduce_max(losses)
-        # exp_terms = tf.add_n([tf.exp(tau * (l - max_l)) for l in losses])
-        # total_loss_weighted = max_l + (1.0 / tau) * tf.math.log(exp_terms)
-
-        total_loss_weighted = 3.0 * cls_loss + recon_loss_pep + recon_loss_mhc
-
-    trainable_vars = model.trainable_variables + list(log_vars)
-    grads = tape.gradient(total_loss_weighted, trainable_vars)
-    optimizer.apply_gradients(zip(grads, trainable_vars))
-
-    return {
-        'total_loss_weighted': total_loss_weighted,
-        'cls_loss': raw_cls_loss,
-        'recon_loss_pep': raw_recon_loss_pep,
-        'recon_loss_mhc': raw_recon_loss_mhc
-    }
-
-
-def evaluate_model_batched(model, generator):
-    """Evaluate model over full dataset with batched processing."""
-    y_true, y_pred = [], []
-
-    for batch in generator:
-        outputs = model(batch, training=False)
-        y_true.append(batch["labels"].numpy())
-        y_pred.append(outputs["cls_ypred"].numpy())
-
-    y_true = np.concatenate(y_true).ravel()
-    y_pred = np.concatenate(y_pred).ravel()
-
-    return roc_auc_score(y_true, y_pred) if len(np.unique(y_true)) > 1 else float('nan')
-
-def evaluate_model_acc(model, generator):
-    """Evaluate model accuracy over full dataset with batched processing."""
-    y_true, y_pred = [], []
-
-    for batch in generator:
-        outputs = model(batch, training=False)
-        y_true.append(batch["labels"].numpy())
-        y_pred.append(np.round(outputs["cls_ypred"].numpy()))
-
-    y_true = np.concatenate(y_true).ravel()
-    y_pred = np.concatenate(y_pred).ravel()
-
-    return np.mean(y_true == y_pred)
+# def evaluate_model_batched(model, generator):
+#     """Evaluate model over full dataset with batched processing."""
+#     y_true, y_pred = [], []
+#
+#     for batch in generator:
+#         outputs = model(batch, training=False)
+#         y_true.append(batch["labels"].numpy())
+#         y_pred.append(outputs["cls_ypred"].numpy())
+#
+#     y_true = np.concatenate(y_true).ravel()
+#     y_pred = np.concatenate(y_pred).ravel()
+#
+#     return roc_auc_score(y_true, y_pred) if len(np.unique(y_true)) > 1 else float('nan')
+#
+# def evaluate_model_acc(model, generator):
+#     """Evaluate model accuracy over full dataset with batched processing."""
+#     y_true, y_pred = [], []
+#
+#     for batch in generator:
+#         outputs = model(batch, training=False)
+#         y_true.append(batch["labels"].numpy())
+#         y_pred.append(np.round(outputs["cls_ypred"].numpy()))
+#
+#     y_true = np.concatenate(y_true).ravel()
+#     y_pred = np.concatenate(y_pred).ravel()
+#
+#     return np.mean(y_true == y_pred)
 
 def process_chunk(chunk, seq_map, embed_map):
     """Process a single chunk of the DataFrame."""
@@ -365,9 +326,74 @@ def preprocess_df(df, seq_map, embed_map, num_workers=None):
     return result_df
 
 
+@tf.function
+def train_step(model, batch_data, focal_loss_fn, optimizer, train_auc_metric, train_acc_metric):
+    """Compiled training step with proper metric updates."""
+
+    with tf.GradientTape() as tape:
+        outputs = model(batch_data, training=True)
+
+        # Classification loss with focal loss
+        raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
+
+        # Reconstruction losses - assuming these functions exist in utils
+        raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
+        raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
+
+        # Total loss
+        total_loss_weighted = raw_cls_loss + raw_recon_loss_pep + raw_recon_loss_mhc
+
+    # Apply gradients
+    trainable_vars = model.trainable_variables
+    grads = tape.gradient(total_loss_weighted, trainable_vars)
+    optimizer.apply_gradients(zip(grads, trainable_vars))
+
+    # Update metrics - ensure correct shapes and types
+    labels_flat = tf.reshape(batch_data["labels"], [-1])  # Flatten to 1D
+    preds_flat = tf.reshape(outputs["cls_ypred"], [-1])  # Flatten to 1D
+
+    # Update metrics
+    train_acc_metric.update_state(labels_flat, preds_flat)
+    train_auc_metric.update_state(labels_flat, preds_flat)
+
+    return {
+        'total_loss_weighted': total_loss_weighted,
+        'cls_loss': raw_cls_loss,
+        'recon_loss_pep': raw_recon_loss_pep,
+        'recon_loss_mhc': raw_recon_loss_mhc
+    }
+
+
+@tf.function
+def eval_step(model, batch_data, focal_loss_fn, val_auc_metric, val_acc_metric):
+    """Evaluation step with proper metric updates."""
+    outputs = model(batch_data, training=False)
+
+    # Classification loss
+    raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
+
+    # Reconstruction losses
+    raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
+    raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
+
+    # Update metrics - ensure correct shapes and types
+    labels_flat = tf.reshape(batch_data["labels"], [-1])  # Flatten to 1D
+    preds_flat = tf.reshape(outputs["cls_ypred"], [-1])  # Flatten to 1D
+
+    # Update metrics
+    val_acc_metric.update_state(labels_flat, preds_flat)
+    val_auc_metric.update_state(labels_flat, preds_flat)
+
+    return {
+        'cls_loss': raw_cls_loss,
+        'recon_loss_pep': raw_recon_loss_pep,
+        'recon_loss_mhc': raw_recon_loss_mhc
+    }
+
+
 def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_dir,
           mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std):
-    """Optimized training function."""
+    """Fixed training function with proper metric handling."""
     global EMB_DB, MHC_CLASS, ESM_DIM
     EMB_DB = load_embedding_db(embed_npz)
     MHC_CLASS = mhc_class
@@ -385,28 +411,29 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
     df_train = preprocess_df(df_train, seq_map, embed_map)
     df_val = preprocess_df(df_val, seq_map, embed_map)
 
+    # labels count
+    print("Training label distribution:", df_train['assigned_label'].value_counts().to_dict())
+
     # Separate positive samples
     df_train_pos = df_train[df_train['assigned_label'] == 1].copy()
     n_neg_samples = len(df_train) - len(df_train_pos)
+    negs_ratio = float(n_neg_samples) / float(len(df_train)) if len(df_train) > 0 else 0.0
+    print("ratio of negatives using for focal loss alpha:", negs_ratio)
 
     print(f"Loaded {len(df_train)} training, {len(df_val)} validation")
     print(f"Training has {len(df_train_pos)} positive and {n_neg_samples} negative samples.")
 
     # Calculate max lengths
-    max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"]]).str.len().max())+1 # buffer
+    max_pep_len = int(pd.concat([df_train["long_mer"], df_val["long_mer"]]).str.len().max()) + 1  # buffer
     max_mhc_len = 500 if mhc_class == 2 else int(next(iter(EMB_DB.values())).shape[0])
     print(f"Max peptide length: {max_pep_len}, Max MHC length: {max_mhc_len}")
 
     # Initialize model
     model = pmbind(
         max_pep_len=max_pep_len, max_mhc_len=max_mhc_len, emb_dim=embed_dim,
-        heads=heads, noise_std=noise_std, transformer_layers=2,
-        latent_dim=embed_dim * 2, ESM_dim=ESM_DIM
+        heads=heads, noise_std=noise_std,
+        latent_dim=embed_dim * 2, ESM_dim=ESM_DIM, drop_out_rate=0.2
     )
-
-    # Learnable loss weights
-    log_tau = tf.Variable(tf.math.log(10.0), trainable=True, name='log_tau')
-    log_vars = [log_tau]
 
     # Optimizer with cosine decay
     num_train_steps = (len(df_train) // batch_size) * epochs
@@ -417,7 +444,12 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
 
     # Loss function
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-        from_logits=False, reduction="sum_over_batch_size", alpha=0.25, gamma=2.0
+        from_logits=False,
+        reduction="sum_over_batch_size",
+        # apply_class_balancing=True,
+        label_smoothing=0.1,
+        # alpha=1-negs_ratio,
+        gamma=2.0
     )
 
     # Build model
@@ -430,13 +462,20 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
     model(dummy_data)
     model.summary()
 
+    # save model config
+    with open(os.path.join(out_dir, "model_config.json"), "w") as f:
+        json.dump(model.get_config(), f, indent=4)
+
+    # save model architecture plot
+    tf.keras.utils.plot_model(model, to_file=os.path.join(out_dir, "model_architecture.png"), show_shapes=True)
+
+    # Create data generators
     train_gen = OptimizedDataGenerator(
         df=df_train, seq_map=seq_map, embed_map=embed_map,
         max_pep_len=max_pep_len, max_mhc_len=max_mhc_len,
         batch_size=batch_size, is_training=True, shuffle=True
     )
 
-    # Create validation generators
     val_gen = OptimizedDataGenerator(
         df=df_val, seq_map=seq_map, embed_map=embed_map,
         max_pep_len=max_pep_len, max_mhc_len=max_mhc_len,
@@ -447,7 +486,7 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
         for i in range(len(train_gen)):
             yield train_gen[i]
 
-    # Make dynamic output signature (batch dim = None)
+    # Make dynamic output signature
     dummy_batch = dummy_gen[0]
 
     def to_dynamic_spec(t):
@@ -469,19 +508,24 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
         "train_acc": [],
         "val_auc": [],
         "val_acc": [],
-        "train_cls_loss": []
+        "train_cls_loss": [],
+        "train_pep_recon_loss": [],
+        "train_mhc_recon_loss": []
     }
 
     best_val_auc = 0.0
+    best_val_acc = 0.0
     os.makedirs(out_dir, exist_ok=True)
 
-    # Training metrics
-    train_loss_metric = tf.keras.metrics.Mean()
-    train_auc_metric = tf.keras.metrics.AUC()
-    train_acc_metric = tf.keras.metrics.Accuracy()
-    pep_loss = tf.keras.metrics.Mean()
-    mhc_loss = tf.keras.metrics.Mean()
-    cls_loss = tf.keras.metrics.Mean()
+    # Initialize metrics - PROPER INITIALIZATION WITH UNIQUE NAMES
+    train_loss_metric = tf.keras.metrics.Mean(name='train_loss')
+    train_auc_metric = tf.keras.metrics.AUC(name='train_auc')
+    train_acc_metric = tf.keras.metrics.BinaryAccuracy(name='train_accuracy')
+    val_auc_metric = tf.keras.metrics.AUC(name='val_auc')
+    val_acc_metric = tf.keras.metrics.BinaryAccuracy(name='val_accuracy')
+    pep_loss_metric = tf.keras.metrics.Mean(name='pep_loss')
+    mhc_loss_metric = tf.keras.metrics.Mean(name='mhc_loss')
+    cls_loss_metric = tf.keras.metrics.Mean(name='cls_loss')
 
     # Training loop
     for epoch in range(epochs):
@@ -490,67 +534,90 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
         print(f"{'=' * 60}")
 
         tf.print("Shuffling and resampling training data...")
-        if epoch % 3 == 0 and epoch > 0:
-            train_gen.on_epoch_end()
+        # if epoch % 3 == 0 and epoch > 0:
+        #     train_gen.on_epoch_end()
+        train_gen.on_epoch_end()
 
-        # Reset metrics
+        # Reset all metrics at the start of each epoch
         train_loss_metric.reset_state()
         train_auc_metric.reset_state()
         train_acc_metric.reset_state()
-        pep_loss.reset_state()
-        mhc_loss.reset_state()
-        cls_loss.reset_state()
+        val_auc_metric.reset_state()
+        val_acc_metric.reset_state()
+        pep_loss_metric.reset_state()
+        mhc_loss_metric.reset_state()
+        cls_loss_metric.reset_state()
 
-
+        # Training loop
         pbar = tqdm(train_ds, desc="Training", total=len(train_gen), file=sys.stdout)
         for batch_data in pbar:
-            # Execute training step
-            losses = train_step(model, batch_data, focal_loss_fn, log_vars, optimizer)
+            # Execute training step - PASS ALL REQUIRED ARGUMENTS
+            losses = train_step(
+                model,
+                batch_data,
+                focal_loss_fn,
+                optimizer,
+                train_auc_metric,  # Pass this
+                train_acc_metric  # AND this
+            )
 
-            # Update metrics
-            train_loss_metric(losses['total_loss_weighted'])
-            train_auc_metric(batch_data["labels"], model(batch_data, training=False)["cls_ypred"])
-            train_acc_metric(tf.round(batch_data["labels"]), tf.round(model(batch_data, training=False)["cls_ypred"]))
-            pep_loss(losses['recon_loss_pep'])
-            mhc_loss(losses['recon_loss_mhc'])
-            cls_loss(losses['cls_loss'])
+            # Update loss metrics
+            train_loss_metric.update_state(losses['total_loss_weighted'])
+            pep_loss_metric.update_state(losses['recon_loss_pep'])
+            mhc_loss_metric.update_state(losses['recon_loss_mhc'])
+            cls_loss_metric.update_state(losses['cls_loss'])
 
-            # Update progress bar
+            # Update progress bar - use .result() to get current values
             pbar.set_postfix({
                 'tot_loss': f"{train_loss_metric.result():.4f}",
                 'train_auc': f"{train_auc_metric.result():.4f}",
                 'train_acc': f"{train_acc_metric.result():.4f}",
-                'pep_rec': f"{pep_loss.result():.4f}",
-                'mhc_rec': f"{mhc_loss.result():.4f}",
-                'cls_loss': f"{cls_loss.result():.4f}"
+                'pep_rec': f"{pep_loss_metric.result():.4f}",
+                'mhc_rec': f"{mhc_loss_metric.result():.4f}",
+                'cls_loss': f"{cls_loss_metric.result():.4f}"
             })
 
         # Evaluate on validation set
         print("\nEvaluating on validation set...")
-        val_auc = evaluate_model_batched(model, val_gen)
-        val_acc = evaluate_model_acc(model, val_gen)
+        for batch_data in val_gen:
+            eval_losses = eval_step(
+                model,
+                batch_data,
+                focal_loss_fn,
+                val_auc_metric,  # Pass validation metrics
+                val_acc_metric
+            )
 
-        # Record metrics
+        # Get metric results WITHOUT overwriting the metric objects
+        current_val_auc = val_auc_metric.result().numpy()
+        current_val_acc = val_acc_metric.result().numpy()
+        print(f"Validation AUC: {current_val_auc:.4f}, Validation Acc: {current_val_acc:.4f}")
+
+        # Record metrics in history
         history['train_loss'].append(float(train_loss_metric.result()))
         history['train_auc'].append(float(train_auc_metric.result()))
         history['train_acc'].append(float(train_acc_metric.result()))
-        history['val_auc'].append(float(val_auc))
-        history['val_acc'].append(float(val_acc))
-        history['train_cls_loss'].append(float(cls_loss.result()))
-        history["train_pep_recon_loss"] = history.get("train_pep_recon_loss", []) + [float(pep_loss.result())]
-        history["train_mhc_recon_loss"] = history.get("train_mhc_recon_loss", []) + [float(mhc_loss.result())]
+        history['val_auc'].append(float(current_val_auc))
+        history['val_acc'].append(float(current_val_acc))
+        history['train_cls_loss'].append(float(cls_loss_metric.result()))
+        history['train_pep_recon_loss'].append(float(pep_loss_metric.result()))
+        history['train_mhc_recon_loss'].append(float(mhc_loss_metric.result()))
 
         print(f"\nEpoch {epoch + 1} Summary:")
-        print(f"  Train Loss: {history['train_loss'][-1]:.4f}, Train AUC: {history['train_auc'][-1]:.4f}, Cls Loss: {history['train_cls_loss'][-1]:.4f}, Pep Recon Loss: {history['train_pep_recon_loss'][-1]:.4f}, MHC Recon Loss: {history['train_mhc_recon_loss'][-1]:.4f}")
-        print(f"  Val AUC: {val_auc:.4f}, Val Acc: {val_acc:.4f}")
-        print(
-            f"  Log Variance - Tau: {log_tau.numpy():.4f} (tau_exp={tf.exp(log_tau).numpy():.4f})")
+        print(f"  Train Loss: {history['train_loss'][-1]:.4f}, "
+              f"Train AUC: {history['train_auc'][-1]:.4f}, "
+              f"Train Acc: {history['train_acc'][-1]:.4f}")
+        print(f"  Val AUC: {current_val_auc:.4f}, Val Acc: {current_val_acc:.4f}")
+        print(f"  Cls Loss: {history['train_cls_loss'][-1]:.4f}, "
+              f"Pep Recon: {history['train_pep_recon_loss'][-1]:.4f}, "
+              f"MHC Recon: {history['train_mhc_recon_loss'][-1]:.4f}")
 
-        # Save best model
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
+        # Save best model - use current values, not overwritten variables
+        if current_val_auc > best_val_auc:
+            best_val_auc = current_val_auc
+            best_val_acc = current_val_acc
             model.save_weights(os.path.join(out_dir, "best_model.weights.h5"))
-            print(f"  -> Saved best model with Val AUC: {best_val_auc:.4f}")
+            print(f"  -> Saved best model with Val AUC: {best_val_auc:.4f}, Val Acc: {best_val_acc:.4f}")
 
     # Save final model and history
     model.save_weights(os.path.join(out_dir, "final_model.weights.h5"))
@@ -558,11 +625,55 @@ def train(train_path, validation_path, embed_npz, seq_csv, embd_key_path, out_di
         json.dump(history, f, indent=4)
 
     print("\nTraining complete!")
+    print(f"Best Validation AUC: {best_val_auc:.4f}, Best Validation Acc: {best_val_acc:.4f}")
     visualize_training_history(history, out_dir)
 
     return max_pep_len, max_mhc_len, seq_map, embed_map
 
 
+# Additional helper function for computing metrics during inference
+def compute_metrics_batched(model, generator, metric_list=None):
+    """
+    Compute metrics over a dataset using batched processing.
+
+    Args:
+        model: The trained model
+        generator: Data generator
+        metric_list: List of metric names to compute (default: ['auc', 'accuracy'])
+
+    Returns:
+        Dictionary of metric values
+    """
+    if metric_list is None:
+        metric_list = ['auc', 'accuracy']
+
+    # Initialize metrics
+    metrics = {}
+    if 'auc' in metric_list:
+        metrics['auc'] = tf.keras.metrics.AUC()
+    if 'accuracy' in metric_list:
+        metrics['accuracy'] = tf.keras.metrics.BinaryAccuracy()
+    if 'precision' in metric_list:
+        metrics['precision'] = tf.keras.metrics.Precision()
+    if 'recall' in metric_list:
+        metrics['recall'] = tf.keras.metrics.Recall()
+
+    # Process batches
+    for batch in generator:
+        outputs = model(batch, training=False)
+
+        # Flatten labels and predictions
+        labels_flat = tf.reshape(batch["labels"], [-1])
+        preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
+
+        # Update all metrics
+        for metric in metrics.values():
+            metric.update_state(labels_flat, preds_flat)
+
+    # Get results
+    results = {name: float(metric.result()) for name, metric in metrics.items()}
+
+    return results
 # ──────────────────────────────────────────────────────────────────────
 # Inference Functions
 # ----------------------------------------------------------------------
@@ -584,7 +695,7 @@ def infer(model_weights_path, data_path, out_dir, name,
     # Initialize model
     model = pmbind(
         max_pep_len=max_pep_len, max_mhc_len=max_mhc_len, emb_dim=embed_dim,
-        heads=heads, noise_std=noise_std, transformer_layers=2,
+        heads=heads, noise_std=0, drop_out_rate=0.0,
         latent_dim=embed_dim * 2, ESM_dim=ESM_DIM
     )
 
@@ -619,7 +730,7 @@ def infer(model_weights_path, data_path, out_dir, name,
         latents_seq = np.memmap(latents_seq_path, dtype='float32', mode='w+',
                                 shape=(len(df_infer), max_pep_len + max_mhc_len, embed_dim))
         latents_pooled = np.memmap(latents_pooled_path, dtype='float32', mode='w+',
-                                   shape=(len(df_infer), (max_pep_len + max_mhc_len + embed_dim))) # Adjusted shape
+                                   shape=(len(df_infer), 1*(max_pep_len + max_mhc_len + embed_dim))) # Adjusted shape
 
         # Create inference generator
         infer_gen = OptimizedDataGenerator(
@@ -654,9 +765,31 @@ def infer(model_weights_path, data_path, out_dir, name,
         all_predictions = np.concatenate(all_predictions, axis=0).squeeze()
         all_labels = np.concatenate(all_labels, axis=0).squeeze()
 
-        # Save predictions
+        print("Min/Max/mean prediction scores:", np.min(all_predictions), np.max(all_predictions), np.mean(all_predictions))
+
+        # Calculate optimal threshold using Youden's J statistic if labels are available
+        optimal_threshold = 0.5  # Default threshold
+        if "assigned_label" in df_infer.columns and all_labels is not None and len(np.unique(all_labels)) > 1:
+            try:
+                fpr, tpr, thresholds = roc_curve(all_labels, all_predictions)
+                # Find threshold that maximizes Youden's J statistic
+                j_scores = tpr - fpr
+                optimal_idx = np.argmax(j_scores)
+                optimal_threshold = thresholds[optimal_idx]
+                print(f"Optimal threshold (Youden's J): {optimal_threshold:.3f}")
+            except Exception as e:
+                print(f"Warning: Could not calculate optimal threshold, using default 0.5. Error: {e}")
+                optimal_threshold = 0.5
+        else:
+            print("Using default threshold 0.5 (no labels available or insufficient data for ROC curve)")
+
+        # Save predictions using optimal threshold
         df_infer["prediction_score"] = all_predictions
-        df_infer["prediction_label"] = (all_predictions >= 0.5).astype(int)
+        df_infer["prediction_label"] = (all_predictions >= optimal_threshold).astype(int)
+
+        # Save predictions using default threshold of 0.5
+        # df_infer["prediction_score"] = all_predictions
+        # df_infer["prediction_label"] = (all_predictions >= 0.5).astype(int)
 
         output_path = os.path.join(out_dir, f"inference_results_{name}.csv")
         df_infer.to_csv(output_path, index=False)
@@ -1119,9 +1252,9 @@ def run_fold(fold, config, run_id_base, base_output_folder, num_cpus):
 def main(fold_to_run, num_cpus=1):
     """Main function to run the training and inference pipeline for multiple configurations."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 50, "BATCH_SIZE": 100, "LEARNING_RATE": 1e-5,
+        "MHC_CLASS": 1, "EPOCHS": 150, "BATCH_SIZE": 100, "LEARNING_RATE": 1e-5,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
-        "description": "Focal Loss + manual loss weighting with 2 * cls loss. additional embedding masking + negative re down sampling, pooled_std1, pooled_mean2"
+        "description": "mhc additional mask 1-negs Focal Loss + negative re down sampling, pooled_std2, pooled_mean1 saving best model by val - predicting with optimal threshold from ROC curve"
     }
 
     # base_output_folder = "../results/PMBind_runs/"
