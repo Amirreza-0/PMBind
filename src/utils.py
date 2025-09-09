@@ -293,6 +293,29 @@ def blosum62_to_seq(blosum_matrix: np.ndarray) -> str:
 
     return "".join(sequence)
 
+
+AMINO_ACID_VOCAB = "".join(list(BLOSUM62.keys()))
+AMINO_ACID_MAP = {k: i for i, k in enumerate(AMINO_ACID_VOCAB)}
+PAD_INDEX = len(AMINO_ACID_MAP) # Will be 23
+
+def seq_to_indices(seq, max_seq_len):
+    """Converts an amino acid sequence to an array of integer indices FOR BLOSUM62."""
+    indices = np.full(max_seq_len, PAD_INDEX, dtype=np.int8)
+    for i, aa in enumerate(seq.upper()[:max_seq_len]):
+        indices[i] = AMINO_ACID_MAP.get(aa, AMINO_ACID_MAP['X'])
+    return indices
+
+
+# We need a separate padding index for the OHE target logic.
+PAD_INDEX_OHE = len(AA) # Will be 21
+
+def seq_to_ohe_indices(seq, max_seq_len):
+    """Converts an amino acid sequence to an array of integer indices FOR OHE TARGET."""
+    indices = np.full(max_seq_len, PAD_INDEX_OHE, dtype=np.int8)
+    for i, aa in enumerate(seq.upper()[:max_seq_len]):
+        indices[i] = AA_TO_INT.get(aa, UNK_IDX)
+    return indices
+
 # Custom Attention Layer
 class AttentionLayer(keras.layers.Layer):
     """
@@ -2327,3 +2350,40 @@ class Sampling(layers.Layer):
         kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
         kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
         return z, kl_loss
+
+
+import tensorflow as tf
+
+def binary_focal_loss(y_true,
+                      y_pred,
+                      gamma=2.0,
+                      alpha=0.25,
+                      from_logits=False,
+                      apply_class_balancing=False,
+                      label_smoothing=0.0,
+                      rounding_thr=0.05):
+    """
+    TensorFlow implementation of binary focal loss.
+    """
+    # 1. Apply sigmoid if predictions are logits
+    if from_logits:
+        y_pred = tf.nn.sigmoid(y_pred)
+    # 2. Apply label smoothing if requested
+    if label_smoothing > 0:
+        y_true = y_true * (1.0 - label_smoothing) + 0.5 * label_smoothing
+    # 3. Compute cross-entropy (standard binary CE part)
+    bce = -(y_true * tf.math.log(y_pred + 1e-7) +
+            (1 - y_true) * tf.math.log(1 - y_pred + 1e-7))
+    if rounding_thr > 0:
+        bce = tf.where(bce <= rounding_thr, bce / 2., bce)
+    # 4. Compute modulating factor (focusing on hard examples)
+    p_t = y_true * y_pred + (1 - y_true) * (1 - y_pred)
+    modulating_factor = tf.pow(1.0 - p_t, gamma)
+    # 5. Apply alpha balancing if needed
+    if apply_class_balancing:
+        alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
+    else:
+        alpha_factor = 1.0
+    # 6. Final focal loss
+    focal_loss = alpha_factor * modulating_factor * bce
+    return focal_loss

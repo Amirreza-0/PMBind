@@ -3,7 +3,8 @@
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 import os
-from utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer,ConcatMask,ConcatBarcode, MaskedEmbedding
+from utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask, ConcatBarcode, \
+    MaskedEmbedding
 import uuid
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -14,9 +15,10 @@ from sklearn.neighbors import NearestNeighbors
 from kneed import KneeLocator
 import matplotlib.colors as mcolors
 from utils import reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython
-
-
-
+import os
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
@@ -35,9 +37,10 @@ def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
             return layer_class.from_config(config)
 
         return fn
+
     # Load the model with wrapped custom objects
     model = load_model(
-            model_path,
+        model_path,
         custom_objects={
             'AttentionLayer': wrap_layer(AttentionLayer),
             'PositionalEncoding': wrap_layer(PositionalEncoding),
@@ -59,7 +62,7 @@ def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
         show_shapes=True,
         show_layer_names=True,
         rankdir='TB',  # Top to bottom layout
-        dpi=200,       # Higher resolution
+        dpi=200,  # Higher resolution
         expand_nested=True,  # Expand nested models to show all layers
         show_layer_activations=True  # Show activation functions
     )
@@ -100,6 +103,7 @@ def visualize_cross_attention_weights(cross_attn_scores, peptide_seq, mhc_seq):
     plt.xlabel('Sequence')
     plt.ylabel('Sequence')
     plt.show()
+
 
 # if __name__ == "__main__":
 #     visualize_tf_model()
@@ -200,7 +204,7 @@ def _plot_umap(
     # Ensure labels are sorted for consistent color mapping, especially for numeric labels
     try:
         unique_labels = sorted(unique_labels_from_series)
-    except TypeError: # handles non-sortable types if they occur
+    except TypeError:  # handles non-sortable types if they occur
         unique_labels = list(unique_labels_from_series)
 
     n_labels = len(unique_labels)
@@ -285,13 +289,13 @@ def _plot_umap(
 
             highlight_handles = [h for h, l in zip(handles, legend_labels)
                                  if 'highlighted' in l]
-            highlight_labels  = [l for l in legend_labels
-                                 if 'highlighted' in l]
+            highlight_labels = [l for l in legend_labels
+                                if 'highlighted' in l]
 
             regular_handles = [h for h, l in zip(handles, legend_labels)
                                if 'highlighted' not in l]
-            regular_labels  = [l for   l in legend_labels
-                               if 'highlighted' not in l]
+            regular_labels = [l for l in legend_labels
+                              if 'highlighted' not in l]
 
             # separate legend for highlights
             if highlight_handles:
@@ -299,7 +303,7 @@ def _plot_umap(
                     highlight_handles, highlight_labels,
                     title='Highlighted Alleles', bbox_to_anchor=(1.05, 1),
                     loc='upper left', frameon=True, fontsize=legend_font_size,
-                    title_fontsize=20, markerscale=2.5
+                    title_fontsize=20, markerscale=4.0
                 )
                 ax.add_artist(first_legend)
 
@@ -342,7 +346,7 @@ def _plot_umap(
                     regular_handles, regular_labels, title=legend_name,
                     bbox_to_anchor=(1.05, 0.75 if highlight_handles else 1),
                     loc='upper left', fontsize=legend_font_size, frameon=True,
-                    title_fontsize=20, markerscale=2.5
+                    title_fontsize=20, markerscale=4.0
                 )
 
     # 5.  Save & close
@@ -351,74 +355,75 @@ def _plot_umap(
     plt.close(fig)
     print(f"✓ Plot saved to {filename}")
 
+
 def _run_dbscan_and_plot(
-            embedding: np.ndarray,
-            alleles: pd.Series,
-            latent_type: str,
-            out_dir: str,
-            random_alleles_to_highlight: list | None = None,
-            figsize=(40, 15),
-            point_size=2,
-            highlight_mask: np.ndarray | None = None,
-            legend_font_size: int = 16,
-            cbar_font_size: int = 12
-    ):
-        """Helper to run DBSCAN, estimate eps, and plot results."""
-        print(f"\nRunning DBSCAN on {latent_type} UMAP embedding...")
+        embedding: np.ndarray,
+        alleles: pd.Series,
+        latent_type: str,
+        out_dir: str,
+        random_alleles_to_highlight: list | None = None,
+        figsize=(40, 15),
+        point_size=2,
+        highlight_mask: np.ndarray | None = None,
+        legend_font_size: int = 16,
+        cbar_font_size: int = 12
+):
+    """Helper to run DBSCAN, estimate eps, and plot results."""
+    print(f"\nRunning DBSCAN on {latent_type} UMAP embedding...")
 
-        # 1. Estimate eps using the k-distance graph for robust parameter selection
-        min_samples = 50
-        neighbors = NearestNeighbors(n_neighbors=min_samples).fit(embedding)
-        distances, _ = neighbors.kneighbors(embedding)
-        k_distances = np.sort(distances[:, min_samples - 1], axis=0)
+    # 1. Estimate eps using the k-distance graph for robust parameter selection
+    min_samples = 50
+    neighbors = NearestNeighbors(n_neighbors=min_samples).fit(embedding)
+    distances, _ = neighbors.kneighbors(embedding)
+    k_distances = np.sort(distances[:, min_samples - 1], axis=0)
 
-        kneedle = KneeLocator(range(len(k_distances)), k_distances, curve="convex", direction="increasing")
-        estimated_eps = kneedle.elbow_y
-        if estimated_eps is None:
-            estimated_eps = np.percentile(k_distances, 75)
-            print(f"Warning: KneeLocator failed. Falling back to eps={estimated_eps:.4f}")
-        else:
-            print(f"Estimated DBSCAN eps for {latent_type} latents: {estimated_eps:.4f}")
+    kneedle = KneeLocator(range(len(k_distances)), k_distances, curve="convex", direction="increasing")
+    estimated_eps = kneedle.elbow_y
+    if estimated_eps is None:
+        estimated_eps = np.percentile(k_distances, 75)
+        print(f"Warning: KneeLocator failed. Falling back to eps={estimated_eps:.4f}")
+    else:
+        print(f"Estimated DBSCAN eps for {latent_type} latents: {estimated_eps:.4f}")
 
-        # 2. Run DBSCAN with estimated parameters
-        dbscan = DBSCAN(eps=estimated_eps, min_samples=min_samples, n_jobs=-1)
-        clusters = dbscan.fit_predict(embedding)
-        n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
-        n_noise = np.sum(clusters == -1)
-        print(f"✓ Found {n_clusters} clusters and {n_noise} noise points.")
+    # 2. Run DBSCAN with estimated parameters
+    dbscan = DBSCAN(eps=estimated_eps, min_samples=min_samples, n_jobs=-1)
+    clusters = dbscan.fit_predict(embedding)
+    n_clusters = len(set(clusters)) - (1 if -1 in clusters else 0)
+    n_noise = np.sum(clusters == -1)
+    print(f"✓ Found {n_clusters} clusters and {n_noise} noise points.")
 
-        # 3. Visualize the clustering results
-        cluster_labels = pd.Series([f'Cluster {c}' if c != -1 else 'Noise' for c in clusters])
-        unique_cluster_labels = sorted(cluster_labels.unique(), key=lambda x: (x == 'Noise', x))
+    # 3. Visualize the clustering results
+    cluster_labels = pd.Series([f'Cluster {c}' if c != -1 else 'Noise' for c in clusters])
+    unique_cluster_labels = sorted(cluster_labels.unique(), key=lambda x: (x == 'Noise', x))
 
-        # Use a more distinctive color palette for clusters
-        n_labels = len(unique_cluster_labels)
-        if n_labels <= 20:
-            colors = sns.color_palette("tab20", n_colors=n_labels)
-        else:
-            colors = sns.color_palette("hls", n_colors=n_labels)
-        cluster_color_map = {label: color for label, color in zip(unique_cluster_labels, colors)}
-        if 'Noise' in cluster_color_map:
-            cluster_color_map['Noise'] = [0.7, 0.7, 0.7, 0.5]  # Muted gray for noise points
+    # Use a more distinctive color palette for clusters
+    n_labels = len(unique_cluster_labels)
+    if n_labels <= 20:
+        colors = sns.color_palette("tab20", n_colors=n_labels)
+    else:
+        colors = sns.color_palette("hls", n_colors=n_labels)
+    cluster_color_map = {label: color for label, color in zip(unique_cluster_labels, colors)}
+    if 'Noise' in cluster_color_map:
+        cluster_color_map['Noise'] = [0.7, 0.7, 0.7, 0.5]  # Muted gray for noise points
 
-        _plot_umap(
-            embedding=embedding,
-            labels=cluster_labels,
-            color_map=cluster_color_map,
-            title=f'DBSCAN Clustering of {latent_type.capitalize()} Latents\n({n_clusters} clusters, {n_noise} noise points)',
-            filename=os.path.join(out_dir, f"umap_dbscan_{latent_type}.png"),
-            legend_name='DBSCAN Clusters',
-            highlight_mask=highlight_mask,
-            alleles_to_highlight=random_alleles_to_highlight if random_alleles_to_highlight else None,
-            highlight_labels_series=alleles,  # Pass original alleles for highlighting,
-            figsize=figsize,
-            point_size=point_size,
-            legend_=True,
-            legend_style='detailed',
-            legend_font_size=legend_font_size,
-            cbar_font_size=cbar_font_size
-        )
-        return clusters
+    _plot_umap(
+        embedding=embedding,
+        labels=cluster_labels,
+        color_map=cluster_color_map,
+        title=f'DBSCAN Clustering of {latent_type.capitalize()} Latents\n({n_clusters} clusters, {n_noise} noise points)',
+        filename=os.path.join(out_dir, f"umap_dbscan_{latent_type}.png"),
+        legend_name='DBSCAN Clusters',
+        highlight_mask=highlight_mask,
+        alleles_to_highlight=random_alleles_to_highlight if random_alleles_to_highlight else None,
+        highlight_labels_series=alleles,  # Pass original alleles for highlighting,
+        figsize=figsize,
+        point_size=point_size,
+        legend_=True,
+        legend_style='detailed',
+        legend_font_size=legend_font_size,
+        cbar_font_size=cbar_font_size
+    )
+    return clusters
 
 
 def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_highlight,
@@ -534,7 +539,8 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
         title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair.png"),
-        legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True, legend_font_size=legend_font_size//2, cbar_font_size=cbar_font_size//2
+        legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
+        legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
     )
 
     # Plot by C/N-terminal Amino Acid Type
@@ -573,6 +579,137 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
 
     # --- 4. Other Visualizations (Inputs and Predictions) ---
 
-
-
     return df
+
+
+def visualize_training_history(history, out_path='h5'):
+    """
+    Plots training and validation metrics over epochs.
+
+    Parameters:
+        history: Dict with training history, keys like 'train_loss', 'val_auc', etc.
+        out_path: Path to save the plot image.
+    """
+    import matplotlib.pyplot as plt
+
+    # Create subplots for different metrics
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('Training History', fontsize=16)
+
+    epochs = range(1, len(history['train_loss']) + 1)
+
+    # Plot losses
+    if 'train_loss' in history:
+        axes[0, 0].plot(epochs, history['train_loss'], label='Train Loss', color='blue')
+    if 'cls_loss' in history:
+        axes[0, 0].plot(epochs, history['cls_loss'], label='CLS Loss', color='red')
+    if 'pep_loss' in history:
+        axes[0, 0].plot(epochs, history['pep_loss'], label='PEP Loss', color='green')
+    if 'mhc_loss' in history:
+        axes[0, 0].plot(epochs, history['mhc_loss'], label='MHC Loss', color='orange')
+    axes[0, 0].set_title('Losses')
+    axes[0, 0].set_xlabel('Epochs')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
+
+    # Plot AUC
+    if 'train_auc' in history:
+        axes[0, 1].plot(epochs, history['train_auc'], label='Train AUC', color='blue')
+    if 'val_auc' in history:
+        axes[0, 1].plot(epochs, history['val_auc'], label='Val AUC', color='orange')
+    axes[0, 1].set_title('AUC')
+    axes[0, 1].set_xlabel('Epochs')
+    axes[0, 1].set_ylabel('AUC')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
+
+    # Plot Accuracy
+    if 'train_acc' in history:
+        axes[1, 0].plot(epochs, history['train_acc'], label='Train Acc', color='blue')
+    if 'val_acc' in history:
+        axes[1, 0].plot(epochs, history['val_acc'], label='Val Acc', color='orange')
+    axes[1, 0].set_title('Accuracy')
+    axes[1, 0].set_xlabel('Epochs')
+    axes[1, 0].set_ylabel('Accuracy')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True)
+
+    # If there's val_loss, plot it, else maybe plot something else or leave empty
+    if 'val_loss' in history:
+        axes[1, 1].plot(epochs, history['val_loss'], label='Val Loss', color='orange')
+        axes[1, 1].set_title('Validation Loss')
+        axes[1, 1].set_xlabel('Epochs')
+        axes[1, 1].set_ylabel('Loss')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
+    else:
+        axes[1, 1].text(0.5, 0.5, 'No Validation Loss\nAvailable', ha='center', va='center',
+                        transform=axes[1, 1].transAxes)
+        axes[1, 1].set_title('Validation Loss (N/A)')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_path, 'training_history.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Training history plot saved to {os.path.join(out_path, 'training_history.png')}")
+
+
+def visualize_inference_results(df_processed, true_labels, predictions, out_dir, dataset_name):
+    """
+    Visualize inference results: ROC curve, Precision-Recall curve, and Confusion Matrix.
+
+    Parameters:
+        df_processed: DataFrame with processed data
+        true_labels: True labels
+        predictions: Predicted probabilities
+        out_dir: Output directory to save plots
+        dataset_name: Name of the dataset
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ROC Curve
+    fpr, tpr, _ = roc_curve(true_labels, predictions)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve - {dataset_name}')
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    plt.savefig(os.path.join(out_dir, f'roc_curve_{dataset_name}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Precision-Recall Curve
+    precision, recall, _ = precision_recall_curve(true_labels, predictions)
+    pr_auc = average_precision_score(true_labels, predictions)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(recall, precision, color='blue', lw=2, label=f'PR curve (AP = {pr_auc:.2f})')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title(f'Precision-Recall Curve - {dataset_name}')
+    plt.legend(loc="lower left")
+    plt.grid(True)
+    plt.savefig(os.path.join(out_dir, f'pr_curve_{dataset_name}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Confusion Matrix
+    pred_labels = (predictions >= 0.5).astype(int)
+    cm = confusion_matrix(true_labels, pred_labels)
+
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.title(f'Confusion Matrix - {dataset_name}')
+    plt.savefig(os.path.join(out_dir, f'confusion_matrix_{dataset_name}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"✓ Inference visualizations saved to {out_dir}")

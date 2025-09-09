@@ -349,8 +349,8 @@ def pmbind_multitask(max_pep_len: int,
     # concatenate mean and std pooled vectors
     pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_std2, pooled_mean1]) # (B, 1*(P+M+D))
 
-    binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1")(pooled_latent)
-    binding_head = layers.GaussianDropout(drop_out_rate, name="binding_gaussian_dropout")(binding_head)
+    binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1", kernel_regularizer=keras.regularizers.l2(0.01))(pooled_latent)
+    binding_head = layers.GaussianDropout((drop_out_rate*1.5), name="binding_gaussian_dropout")(binding_head)
     binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred")(binding_head) # (B, 1)
 
     # -------------------------------------------------------------------
