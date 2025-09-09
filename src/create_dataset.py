@@ -17,7 +17,7 @@ K_FOLDS = 5
 MIN_ALLELES_FOR_CV = 15  # Minimum alleles needed for CV after test set extraction
 N_TVAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for Ensemble Validation
 N_VAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for validation in each fold
-TAKE_SUBSET = True  # Whether to save folds as subsets of df/k
+TAKE_SUBSET = False  # Whether to save folds as subsets of df/k
 LEAVE_ALLELE_GROUP_OUT = True  # Whether to leave one allele group out completely (True) or just one allele (False)
 
 # Input/Output paths
@@ -522,7 +522,9 @@ def _execute_main_logic():
         train_size=TRAIN_SIZE,
         random_state=RANDOM_SEED,
         n_val_ids=N_VAL_FOLD_SAMPLES,  # number of alleles to leave out for validation in each fold
-        take_subset=TAKE_SUBSET
+        take_subset=TAKE_SUBSET,
+        LEAVE_ALLELE_GROUP_OUT=LEAVE_ALLELE_GROUP_OUT,
+        major_allele_groups=major_allele_groups
     )
 
     cv_dir = OUT_DIR / "cv_folds"
