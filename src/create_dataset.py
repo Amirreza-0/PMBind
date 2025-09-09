@@ -1,5 +1,6 @@
 import os
 import pathlib
+import sys
 from typing import Set, Tuple, Optional, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7,115 +8,17 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-
-def train_val_split(
-        df: pd.DataFrame,
-        k: int = 5,
-        target_col: str = "assigned_label",
-        id_col: str = "mhc_embedding_key",
-        train_size: float = 0.8,
-        random_state: int = 42,
-        n_val_ids: int = 1,
-):
-    # --------
-    rng = np.random.RandomState(random_state)
-    # --- pick the k IDs that will be held out completely -------------------
-    unique_ids = df[id_col].unique()
-    if len(unique_ids) < k:
-        raise ValueError(f"Not enough unique IDs ({len(unique_ids)}) for {k}-fold CV.")
-    left_out_ids = rng.choice(unique_ids, size=k, replace=False)
-
-    folds = []
-    for fold_idx, left_out_id in enumerate(left_out_ids, 1):
-        fold_seed = random_state + fold_idx
-        rng = np.random.RandomState(fold_seed)
-
-        # select rows not containing the left-out ID
-        df_fold = df[df[id_col] != left_out_id].copy()
-
-        # DEBUG: Check if left_out_id was actually in the data
-        if left_out_id not in df[id_col].values:
-            raise ValueError(f"Left-out ID {left_out_id} not found in data.")
-
-        # DEBUG: Print data types and unique counts
-        print(f"\n[DEBUG fold {fold_idx}]")
-        print(f"  ID column dtype: {df_fold[id_col].dtype}")
-        print(f"  Number of unique IDs in fold: {df_fold[id_col].nunique()}")
-        print(f"  Total rows in fold: {len(df_fold)}")
-
-        # 2) split train and val, val is n_val_ids of rarest IDs in the fold
-        # IMPORTANT: Filter out IDs with 0 counts (happens with categorical columns)
-        id_counts = df_fold[id_col].value_counts()
-        id_counts = id_counts[id_counts > 0]  # Remove IDs with 0 occurrences
-
-        # DEBUG: Print value counts
-        print(f"  ID value counts (first 5):")
-        print(f"    {id_counts.head().to_dict()}")
-        print(f"  ID value counts (last 5):")
-        print(f"    {id_counts.tail().to_dict()}")
-
-        # Now select the rarest IDs that actually exist in the data
-        if len(id_counts) < n_val_ids:
-            print(f"  WARNING: Only {len(id_counts)} unique IDs with data, but requested {n_val_ids} val IDs")
-            n_val_ids = min(n_val_ids, len(id_counts))
-
-        rare_alleles = id_counts.nsmallest(n_val_ids * k).index.tolist()
-        rarest_ids = rng.choice(list(rare_alleles), size=n_val_ids, replace=False)
-        val_ids = set(rarest_ids)
-
-        # DEBUG: Print selected validation IDs
-        print(f"  Selected val_ids: {val_ids}")
-        print(f"  Type of first val_id: {type(list(val_ids)[0]) if val_ids else 'None'}")
-
-        # Select val rows from the original fold data
-        fold_val = df_fold[df_fold[id_col].isin(val_ids)].copy()
-
-        # DEBUG: Check the actual filtering
-        print(f"  Rows matching val_ids: {len(fold_val)}")
-        if len(fold_val) == 0 and val_ids:
-            # Try manual check
-            manual_check = df_fold[id_col].apply(lambda x: x in val_ids).sum()
-            print(f"  Manual check - rows matching val_ids: {manual_check}")
-
-            # Check if the IDs actually exist
-            for vid in val_ids:
-                exists = (df_fold[id_col] == vid).sum()
-                print(f"    ID {vid} (type: {type(vid)}) exists in fold: {exists} times")
-
-        # Select remaining rows for training from the original fold data
-        fold_remaining = df_fold[~df_fold[id_col].isin(val_ids)].copy()
-
-        if fold_remaining.empty:
-            raise ValueError(f"No remaining data for training after leaving out IDs: {val_ids}")
-
-        # verify if left_out id and val_ids are not present in remaining data
-        if left_out_id in fold_remaining[id_col].values:
-            raise ValueError(f"Left-out ID {left_out_id} found in remaining data.")
-        if any(vid in fold_remaining[id_col].values for vid in val_ids):
-            raise ValueError(f"Validation IDs {val_ids} found in remaining data.")
-
-        print(
-            f"[fold {fold_idx}/{k}] left-out={left_out_id} | "
-            f"val-only={val_ids} | fold-ids={set(df_fold[id_col])} | fold-remaining-ids={set(fold_remaining[id_col])} | "
-            f"train={len(fold_remaining)}, val={len(fold_val)} | "
-            f"len-fold-ids={df_fold[id_col].nunique()} | len-fold-remaining-ids={fold_remaining[id_col].nunique()} | len-val-only-ids={len(val_ids)}"
-        )
-
-        # IMPORTANT: Actually append the fold data to the folds list!
-        folds.append((fold_remaining, fold_val, left_out_id, val_ids))
-
-    return folds
-
-
 # ---------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------
 MHC_CLASS = 1
 RANDOM_SEED = 999
-K_FOLDS = 10
-N_RAREST_ALLELES = 200  # Number of rarest alleles for test set
+K_FOLDS = 5
 MIN_ALLELES_FOR_CV = 15  # Minimum alleles needed for CV after test set extraction
-N_VAL_FOLD_SAMPLES = 15  # Number of alleles to leave out for validation in each fold
+N_TVAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for Ensemble Validation
+N_VAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for validation in each fold
+TAKE_SUBSET = True  # Whether to save folds as subsets of df/k
+LEAVE_ALLELE_GROUP_OUT = True  # Whether to leave one allele group out completely (True) or just one allele (False)
 
 # Input/Output paths
 ROOT_DIR = pathlib.Path("../data/binding_affinity_data").resolve()
@@ -136,42 +39,257 @@ AUGMENTATION = None  # "down_sampling", "GNUSS", or None
 pd.options.mode.copy_on_write = True
 KEY_TRANS = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})  # for vectorized cleaning
 
+# manual test alleles
+test_alleles = ["BoLA-3:00101", "DLA-8850801",
+                "Eqca-1600101", "Gogo-B0101",
+                "H-2-Kk", "HLA-A*02:50",
+                "HLA-B*45:06",
+                "HLA-C*12:12", "HLA-E01:03",
+                "Mamu-A7*00103", "Mamu-B*06502",
+                "Patr-B17:01", "SLA-107:01",
+                "HLA-C*18:01"]
+
+tval_alleles = ["SLA-107:02",
+                "Patr-B24:01",
+                "Mamu-B*08701",
+                "Mamu-A1*02601",
+                "HLA-C*15:04",
+                "HLA-B*15:42",
+                "HLA-A*03:19",
+                "H-2-Dd",
+                "BoLA-6:04101"]
+
+major_allele_groups = ['MAMU', 'PATR', 'SLA', 'BOLA', 'DLA', 'H-2', 'HLA-A', 'HLA-B', 'HLA-C', 'HLA-E', 'HLA-DRB',
+                       'HLA-DQA', 'HLA-DQB', 'HLA-DPA', 'HLA-DPB', 'EQCA', 'GOGO']
+
+
+def train_val_split(
+        df: pd.DataFrame,
+        k: int = 5,
+        target_col: str = "assigned_label",
+        id_col: str = "mhc_embedding_key",
+        train_size: float = 0.8,
+        random_state: int = 42,
+        n_val_ids: int = 1,
+        take_subset: bool = False,
+        LEAVE_ALLELE_GROUP_OUT: bool = False,
+        major_allele_groups: list = None
+):
+    """
+    Perform k-fold cross-validation split with option to leave out entire allele groups.
+
+    When LEAVE_ALLELE_GROUP_OUT is True:
+    - Selects k major allele groups to leave out (one per fold)
+    - Each fold leaves out ALL alleles from one major group
+    - This results in more left_out_ids compared to individual allele selection
+    """
+    # --------
+    rng = np.random.RandomState(random_state)
+
+    if LEAVE_ALLELE_GROUP_OUT:
+        if major_allele_groups is None:
+            raise ValueError("major_allele_groups must be provided when LEAVE_ALLELE_GROUP_OUT is True")
+
+        # Group alleles by major groups (e.g., HLA-A, HLA-B, MAMU, etc.)
+        def get_major_group(allele: str) -> str:
+            allele = str(allele).upper()
+            for group in major_allele_groups:
+                if allele.startswith(group):
+                    return group
+            return "OTHER"
+
+        df['major_group'] = df[id_col].apply(get_major_group)
+        unique_groups = df['major_group'].unique()
+
+        if len(unique_groups) < k:
+            raise ValueError(f"Not enough unique allele groups ({len(unique_groups)}) for {k}-fold CV.")
+
+        # Select k groups for k-fold CV (one group left out per fold)
+        left_out_groups = rng.choice(unique_groups, size=k, replace=False)
+
+        # Create a mapping of groups to their IDs
+        group_to_ids = {}
+        for group in left_out_groups:
+            ids_in_group = df[df['major_group'] == group][id_col].unique().tolist()
+            group_to_ids[group] = ids_in_group
+
+        # Calculate all IDs that will be left out across all folds
+        all_left_out_ids = []
+        for group in left_out_groups:
+            all_left_out_ids.extend(group_to_ids[group])
+        all_left_out_ids = np.array(all_left_out_ids)
+
+        print(f"Selected allele groups for left-out: {left_out_groups}")
+        print(f"Total number of left-out IDs: {len(all_left_out_ids)}")
+        for group in left_out_groups:
+            print(f"  Group {group}: {len(group_to_ids[group])} IDs")
+
+        # Create the pool of data not in any left-out group
+        left_out_df = df[df[id_col].isin(all_left_out_ids)].copy()
+        df_rest_pool = df[~df[id_col].isin(all_left_out_ids)].copy()
+
+        # Clean up the temporary column
+        df = df.drop(columns=['major_group'])
+        left_out_df = left_out_df.drop(columns=['major_group'])
+        df_rest_pool = df_rest_pool.drop(columns=['major_group'])
+
+    else:
+        # Simple random selection of k unique IDs
+        unique_ids = df[id_col].unique()
+        if len(unique_ids) < k:
+            raise ValueError(f"Not enough unique IDs ({len(unique_ids)}) for {k}-fold CV.")
+
+        left_out_ids = rng.choice(unique_ids, size=k, replace=False)
+        left_out_df = df[df[id_col].isin(left_out_ids)].copy()
+        df_rest_pool = df[~df[id_col].isin(left_out_ids)].copy()
+
+        # Create a dummy mapping for consistency
+        group_to_ids = {id: [id] for id in left_out_ids}
+        left_out_groups = left_out_ids  # For iteration purposes
+
+    fold_size = int(len(df_rest_pool) / k)
+    folds = []
+
+    for fold_idx, left_out_group in enumerate(left_out_groups, 1):
+        fold_seed = random_state + fold_idx
+        rng = np.random.RandomState(fold_seed)
+
+        # Get the IDs for this fold's left-out group
+        if LEAVE_ALLELE_GROUP_OUT:
+            fold_left_out_ids = group_to_ids[left_out_group]
+        else:
+            fold_left_out_ids = [left_out_group]  # Single ID case
+
+        # Create extended dataset: rest_pool + all left_out data except current fold's left-out IDs
+        df_extended = pd.concat([
+            df_rest_pool,
+            left_out_df[~left_out_df[id_col].isin(fold_left_out_ids)]
+        ], ignore_index=True)
+
+        if take_subset:
+            if fold_size < len(df_extended):
+                # Sample from df_extended
+                df_fold = df_extended.sample(n=fold_size, random_state=fold_seed).copy()
+                # Identify which rows from the sample came from the rest_pool
+                indices_to_remove = df_rest_pool.index.intersection(df_fold.index)
+                # Remove these rows from df_rest_pool for the next fold
+                if not indices_to_remove.empty:
+                    df_rest_pool = df_rest_pool.drop(indices_to_remove)
+            else:
+                df_fold = df_extended.copy()
+                # If we use all data, clear the rest pool
+                df_rest_pool = df_rest_pool.iloc[0:0].copy()
+        else:
+            df_fold = df_extended.copy()
+
+        # Verify that left-out IDs are not in the fold
+        for lid in fold_left_out_ids:
+            if lid in df_fold[id_col].values:
+                raise ValueError(f"Left-out ID {lid} found in fold {fold_idx} data.")
+
+        # DEBUG: Print fold statistics
+        print(f"\n[DEBUG fold {fold_idx}]")
+        if LEAVE_ALLELE_GROUP_OUT:
+            print(f"  Left-out group: {left_out_group} ({len(fold_left_out_ids)} IDs)")
+        else:
+            print(f"  Left-out ID: {left_out_group}")
+        print(f"  Number of unique IDs in fold: {df_fold[id_col].nunique()}")
+        print(f"  Total rows in fold: {len(df_fold)}")
+
+        # Select validation IDs from the fold
+        id_counts = df_fold[id_col].value_counts()
+        id_counts = id_counts[id_counts > 0]  # Remove IDs with 0 occurrences
+
+        # Select validation data: aim for approximately (1 - train_size) of fold size
+        fold_val = pd.DataFrame(columns=df_fold.columns)
+        val_target_size = int((1 - train_size) * len(df_fold))
+
+        # Collect validation IDs until we reach the target size
+        val_ids = set()
+        while len(fold_val) < val_target_size and len(val_ids) < len(id_counts):
+            # Select a random ID that hasn't been selected yet
+            available_ids = [id for id in id_counts.index if id not in val_ids]
+            if not available_ids:
+                break
+            val_id = rng.choice(available_ids)
+            val_ids.add(val_id)
+            fold_val = pd.concat([fold_val, df_fold[df_fold[id_col] == val_id]], ignore_index=True)
+
+        print(f"  Selected {len(val_ids)} unique IDs for validation ({len(fold_val)} rows)")
+
+        # Add left-out IDs' data to validation set
+        left_out_data = left_out_df[left_out_df[id_col].isin(fold_left_out_ids)]
+        fold_val = pd.concat([fold_val, left_out_data], ignore_index=True)
+
+        print(f"  Added {len(left_out_data)} rows from left-out IDs to validation")
+        print(f"  Final validation size: {len(fold_val)} rows")
+
+        # Select remaining rows for training
+        fold_train = df_fold[~df_fold[id_col].isin(val_ids)].copy()
+
+        if fold_train.empty:
+            raise ValueError(f"No remaining data for training after leaving out IDs")
+
+        # Final verification
+        for lid in fold_left_out_ids:
+            if lid in fold_train[id_col].values:
+                raise ValueError(f"Left-out ID {lid} found in training data.")
+
+        if any(vid in fold_train[id_col].values for vid in val_ids):
+            overlapping = [vid for vid in val_ids if vid in fold_train[id_col].values]
+            raise ValueError(f"Validation IDs {overlapping} found in training data.")
+
+        print(f"[fold {fold_idx}/{k}] "
+              f"left-out={'group:' + str(left_out_group) if LEAVE_ALLELE_GROUP_OUT else left_out_group} "
+              f"({len(fold_left_out_ids)} IDs) | "
+              f"val-only={len(val_ids)} IDs | "
+              f"train={len(fold_train)}, val={len(fold_val)}")
+
+        # Store the fold
+        folds.append((fold_train, fold_val, fold_left_out_ids, val_ids))
+
+    return folds
+
 
 def clean_key_vectorized(s: pd.Series) -> pd.Series:
     """Vectorized allele cleaning."""
     return s.astype(str).str.translate(KEY_TRANS).str.upper()
 
 
-def extract_test_set_from_rarest_alleles(df: pd.DataFrame, n_rarest: int = 20,
-                                         id_col: str = "mhc_embedding_key") -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Extract test set from the n rarest alleles in the dataset.
+def extract_test_tval_set(df: pd.DataFrame,
+                          test_alleles: List[str],
+                          tval_alleles: List[str],
+                          id_col: str = "mhc_embedding_key") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Extract test set from the dataset.
 
     Returns: (remaining_df, test_df)
     """
-    print("\n=== Extracting Test Set from Rarest Alleles (Balanced) ===")
+    print("\n=== Extracting Test Set ===")
 
-    # get rarest alleles based on counts
-    allele_counts = df[id_col].value_counts()
-    total_alleles = len(allele_counts)
-    print(f"Total unique alleles in dataset: {total_alleles}")
-    rarest_alleles = allele_counts.tail(n_rarest).index.tolist()
+    # Split dataset into test alleles and the rest
+    test_mask = df[id_col].isin(test_alleles)
+    test_df = df.loc[test_mask].copy()
+    remaining_df = df.loc[~test_mask].copy().reset_index(drop=True)
+    print(f"Test alleles data: {len(test_df):,} samples from {test_df[id_col].nunique()} alleles")
 
-    # Split dataset into rarest alleles and the rest
-    rarest_mask = df[id_col].isin(rarest_alleles)
-    rarest_df = df.loc[rarest_mask].copy()
-    remaining_df = df.loc[~rarest_mask].copy().reset_index(drop=True)
-    print(f"Rarest alleles data: {len(rarest_df):,} samples from {rarest_df[id_col].nunique()} alleles")
+    tval_mask = remaining_df[id_col].isin(tval_alleles)
+    tval_df = remaining_df.loc[tval_mask].copy()
+    remaining_df2 = remaining_df.loc[~tval_mask].copy().reset_index(drop=True)
 
     # verify we have enough alleles for CV after test set extraction
-    if remaining_df[id_col].nunique() < MIN_ALLELES_FOR_CV:
-        raise ValueError(f"Not enough alleles ({remaining_df[id_col].nunique()}) left for CV after extracting "
-                         f"test set from {n_rarest} rarest alleles. Minimum required: {MIN_ALLELES_FOR_CV}")
+    if remaining_df2[id_col].nunique() < MIN_ALLELES_FOR_CV:
+        raise ValueError(f"Not enough alleles ({remaining_df2[id_col].nunique()}) left for CV after extracting "
+                         f"test set from manual test alleles. Minimum required: {MIN_ALLELES_FOR_CV}")
 
-    # verify if rarest alleles are not in remaining data
-    if any(allele in remaining_df[id_col].values for allele in rarest_alleles):
-        raise ValueError("Rarest alleles found in remaining data after extraction.")
+    # verify if test alleles are not in remaining data
+    if any(allele in remaining_df2[id_col].values for allele in test_alleles):
+        raise ValueError("Test alleles found in remaining data after extraction.")
 
-    return remaining_df, rarest_df
+    # verify if tval alleles are not in remaining data
+    if any(allele in remaining_df2[id_col].values for allele in tval_alleles):
+        raise ValueError("TVal alleles found in remaining data after extraction.")
+
+    return remaining_df2, test_df, tval_df
 
 
 def _read_benchmark_file_to_pairs_df(fpath: pathlib.Path) -> Optional[pd.DataFrame]:
@@ -254,14 +372,54 @@ def find_benchmark_pairs_df(benchmarks_path: pathlib.Path) -> pd.DataFrame:
     return bench_pairs
 
 
+# Main execution
 def main():
     """Main execution function."""
+    # Redirect stdout to a log file
+    log_file_path = OUT_DIR / "dataset_creation_log.txt"
+
+    # Create a tee-like functionality to write to both file and console
+    class Tee:
+        def __init__(self, *files):
+            self.files = files
+
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+
+        def flush(self):
+            for f in self.files:
+                f.flush()
+
+    # Open log file and redirect stdout
+    with open(log_file_path, 'w') as log_file:
+        original_stdout = sys.stdout
+        sys.stdout = Tee(sys.stdout, log_file)
+
+        try:
+            print("=== Simplified K-Fold Leave-One-Allele-Out Cross-Validation with Test Set ===")
+            print(f"K folds: {K_FOLDS}")
+            print(f"Train size: {TRAIN_SIZE}")
+            print(f"Augmentation: {AUGMENTATION}")
+            print(f"Random seed: {RANDOM_SEED}")
+            print(f"Output directory: {OUT_DIR}")
+            print(f"Log file: {log_file_path}")
+
+            _execute_main_logic()
+
+        finally:
+            sys.stdout = original_stdout
+            print(f"✓ All output has been saved to: {log_file_path}")
+
+
+def _execute_main_logic():
+    """Execute the main logic (separated for cleaner stdout handling)."""
     print("=== Simplified K-Fold Leave-One-Allele-Out Cross-Validation with Test Set ===")
     print(f"K folds: {K_FOLDS}")
     print(f"Train size: {TRAIN_SIZE}")
     print(f"Augmentation: {AUGMENTATION}")
     print(f"Random seed: {RANDOM_SEED}")
-    print(f"Requested test set from {N_RAREST_ALLELES} rarest alleles")
 
     # 1. Load main dataset (only needed columns)
     print(f"\nLoading data from: {BINDING_PQ_PATH}")
@@ -330,13 +488,18 @@ def main():
     print(f"  Unique (allele, long_mer) pairs: {df.drop_duplicates(['mhc_embedding_key', 'long_mer']).shape[0]}")
 
     # 3. Extract test set from rarest alleles BEFORE cross-validation
-    df_remaining, df_test = extract_test_set_from_rarest_alleles(
-        df, n_rarest=N_RAREST_ALLELES, id_col='mhc_embedding_key'
+    df_remaining, df_test, df_tval = extract_test_tval_set(
+        df, test_alleles=test_alleles, tval_alleles=tval_alleles, id_col='mhc_embedding_key'
     )
     # Save test set
     test_set_path = OUT_DIR / "test_set_rarest_alleles.parquet"
     df_test.to_parquet(test_set_path, index=False)
     print(f"✓ Test set saved to: {test_set_path}")
+
+    # Save tval set
+    tval_set_path = OUT_DIR / "tval_set_rarest_alleles.parquet"
+    df_tval.to_parquet(tval_set_path, index=False)
+    print(f"✓ TVal set saved to: {tval_set_path}")
 
     # Show final dataset info for CV
     print("\nFinal dataset for CV (after removing test set):")
@@ -358,21 +521,22 @@ def main():
         id_col="mhc_embedding_key",
         train_size=TRAIN_SIZE,
         random_state=RANDOM_SEED,
-        n_val_ids=N_VAL_FOLD_SAMPLES  # number of alleles to leave out for validation in each fold
+        n_val_ids=N_VAL_FOLD_SAMPLES,  # number of alleles to leave out for validation in each fold
+        take_subset=TAKE_SUBSET
     )
 
     cv_dir = OUT_DIR / "cv_folds"
     cv_dir.mkdir(exist_ok=True)
 
     for i, (df_train, df_val, left_out_allele, val_ids) in enumerate(folds):
-        train_path = cv_dir / f"fold_{i+1:02d}_train.parquet"
-        val_path = cv_dir / f"fold_{i+1:02d}_val.parquet"
+        train_path = cv_dir / f"fold_{i + 1:02d}_train.parquet"
+        val_path = cv_dir / f"fold_{i + 1:02d}_val.parquet"
 
         df_train.to_parquet(train_path, index=False)
         df_val.to_parquet(val_path, index=False)
 
         actual_ratio = len(df_train) / max(1, (len(df_train) + len(df_val)))
-        print(f"  ✓ Saved fold {i+1:02d} (left-out: {left_out_allele}, val-ids {val_ids}): "
+        print(f"  ✓ Saved fold {i + 1:02d} (left-out: {left_out_allele}, val-ids {val_ids}): "
               f"Train={len(df_train):,}, Val={len(df_val):,}, Ratio={actual_ratio:.3f}")
 
         # Memory cleanup
@@ -385,12 +549,16 @@ def main():
         'total_original_samples': int(len(df) + len(df_test) + benchmark_removed),
         'benchmark_pairs_removed': benchmark_removed,
         'test_set_samples': int(len(df_test)),
-        'test_set_alleles_requested': int(N_RAREST_ALLELES),
+        'test_set_alleles_manual': len(test_alleles),
         'test_set_alleles_actual': actual_test_alleles,
+        'tval_set_samples': int(len(df_tval)),
+        'tval_set_alleles_manual': len(tval_alleles),
+        'tval_set_alleles_actual': int(df_tval['mhc_embedding_key'].nunique()),
         'cv_samples': int(len(df_remaining)),
         'cv_alleles': int(df_remaining['mhc_embedding_key'].nunique()),
         'n_folds': int(K_FOLDS),
         'test_set_path': str(test_set_path),
+        'tval_set_path': str(tval_set_path),
         'cv_folds_path': str(cv_dir),
         'benchmark_cache_path': str(BENCHMARK_CACHE_PQ if BENCHMARK_CACHE_PQ.exists() else BENCHMARK_CACHE_PKL),
     }
@@ -402,7 +570,8 @@ def main():
             f.write(f"{key}: {value}\n")
 
     print(f"\n✓ Successfully created {K_FOLDS} cross-validation folds")
-    print(f"✓ Test set: {len(df_test):,} samples from {actual_test_alleles} rarest alleles")
+    print(f"✓ Test set: {len(df_test):,} samples from {actual_test_alleles} manual alleles")
+    print(f"✓ TVal set: {len(df_tval):,} samples from {df_tval['mhc_embedding_key'].nunique()} manual alleles")
     print(f"✓ CV data: {len(df_remaining):,} samples from {df_remaining['mhc_embedding_key'].nunique()} alleles")
     print(f"✓ Files saved in: {cv_dir}")
     print(f"✓ Summary saved to: {summary_path}")
