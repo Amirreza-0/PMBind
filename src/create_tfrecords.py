@@ -10,7 +10,7 @@ from functools import partial
 import json
 
 # Local utilities for sequence and key processing
-from utils import (get_embed_key, clean_key, PAD_VALUE,
+from utils import (get_embed_key, get_seq, clean_key, PAD_VALUE,
                    seq_to_indices, seq_to_ohe_indices)
 
 # --- Globals for worker processes ---
@@ -92,7 +92,7 @@ def process_chunk_preprocess(chunk, seq_map, embed_map, mhc_class):
     Worker function for the initial DataFrame preprocessing.
     This is the location of the critical fix.
     """
-    chunk['_cleaned_key'] = chunk.apply(lambda r: clean_key(r.get('mhc_allele', r['allele'])), axis=1)
+    chunk['_cleaned_key'] = chunk['allele'].apply(lambda k: clean_key(k))
     chunk['_emb_key'] = chunk['_cleaned_key'].apply(lambda k: get_embed_key(k, embed_map))
 
     # Safely handle sequence lookup, especially for None keys
@@ -110,11 +110,19 @@ def process_chunk_preprocess(chunk, seq_map, embed_map, mhc_class):
 
         chunk['_mhc_seq'] = chunk['_cleaned_key'].apply(get_mhc_seq_class2)
     else:
-        chunk['_mhc_seq'] = chunk['_emb_key'].apply(lambda k: seq_map.get(k, '') if k is not None else '')
+        chunk['_mhc_seq'] = chunk['_cleaned_key'].apply(lambda k: get_seq(k, seq_map) if k is not None else '')
 
-    # --- THE FIX ---
     # Filter out any rows where we failed to find a valid embedding key or sequence.
     # This prevents 'None' from ever entering the main DataFrame.
+    # Print the dropped rows for debugging
+    dropped_no_emb_key = chunk[chunk['_emb_key'].isna()]
+    dropped_no_mhc_seq = chunk[chunk['_mhc_seq'] == ""]
+    if not dropped_no_emb_key.empty:
+        print("Dropped rows with no emb_key unique alleles:")
+        print(dropped_no_emb_key['allele'].unique())
+    if not dropped_no_mhc_seq.empty:
+        print("Dropped rows with no mhc_seq unique alleles:")
+        print(dropped_no_mhc_seq['allele'].unique())
     return chunk.dropna(subset=['_emb_key']).query('_mhc_seq != ""')
 
 
@@ -193,8 +201,8 @@ def main(args):
     print("Calculating maximum sequence lengths from datasets...")
     df_train = pd.read_parquet(args.train_path)
     df_val = pd.read_parquet(args.val_path)
-    MAX_PEP_LEN = int(pd.concat([df_train["long_mer"], df_val["long_mer"]]).str.len().max()) + 2
-    MAX_MHC_LEN = 500 if MHC_CLASS == 2 else int(max(len(seq) for seq in SEQ_MAP.values())) + 2
+    MAX_PEP_LEN = int(pd.concat([df_train["long_mer"], df_val["long_mer"]]).str.len().max()) + 2  # + 2 Buffer
+    MAX_MHC_LEN = 500 if MHC_CLASS == 2 else int(max(len(seq) for seq in SEQ_MAP.values())) + 2  # + 2 Buffer
     print(f"Using MAX_PEP_LEN={MAX_PEP_LEN}, MAX_MHC_LEN={MAX_MHC_LEN}, ESM_DIM={ESM_DIM}")
 
     os.makedirs(args.output_dir, exist_ok=True)
