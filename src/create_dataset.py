@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 MHC_CLASS = 1
 RANDOM_SEED = 999
 K_FOLDS = 5
-MIN_ALLELES_FOR_CV = 15  # Minimum alleles needed for CV after test set extraction
+MIN_ALLELES_FOR_CV = 10  # Minimum alleles needed for CV after test set extraction
 N_TVAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for Ensemble Validation
 N_VAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for validation in each fold
 TAKE_SUBSET = False  # Whether to save folds as subsets of df/k
@@ -24,7 +24,7 @@ LEAVE_ALLELE_GROUP_OUT = True  # Whether to leave one allele group out completel
 ROOT_DIR = pathlib.Path("../data/binding_affinity_data").resolve()
 BINDING_PQ_PATH = ROOT_DIR / f"concatenated_class{MHC_CLASS}_all.parquet"
 BENCHMARKS_PATH = pathlib.Path(f"../data/cross_validation_dataset/mhc{MHC_CLASS}/benchmarks")
-OUT_DIR = pathlib.Path(f"../data/cross_validation_dataset/mhc{MHC_CLASS}")
+OUT_DIR = pathlib.Path(f"../data/cross_validation_dataset3/mhc{MHC_CLASS}")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Cache file for benchmark processing
@@ -32,7 +32,7 @@ BENCHMARK_CACHE_PKL = OUT_DIR / "benchmark_pairs_cache.pkl"  # legacy cache (if 
 BENCHMARK_CACHE_PQ = OUT_DIR / "benchmark_pairs_cache.parquet"  # faster cache format
 
 # CV parameters
-TRAIN_SIZE = 0.8
+TRAIN_SIZE = 0.95
 AUGMENTATION = None  # "down_sampling", "GNUSS", or None
 
 # Performance/memory tweaks
@@ -147,6 +147,7 @@ def train_val_split(
         group_to_ids = {id: [id] for id in left_out_ids}
         left_out_groups = left_out_ids  # For iteration purposes
 
+    used_val_ids: Set[str] = set()
     fold_size = int(len(df_rest_pool) / k)
     folds = []
 
@@ -205,17 +206,18 @@ def train_val_split(
         val_target_size = int((1 - train_size) * len(df_fold))
 
         # Collect validation IDs until we reach the target size
-        val_ids = set()
-        while len(fold_val) < val_target_size and len(val_ids) < len(id_counts):
+        fold_val_ids = set()
+        while len(fold_val) < val_target_size and len(fold_val_ids) < len(id_counts):
             # Select a random ID that hasn't been selected yet
-            available_ids = [id for id in id_counts.index if id not in val_ids]
+            available_ids = [id for id in id_counts.index if id not in used_val_ids]
             if not available_ids:
                 break
-            val_id = rng.choice(available_ids)
-            val_ids.add(val_id)
-            fold_val = pd.concat([fold_val, df_fold[df_fold[id_col] == val_id]], ignore_index=True)
+            fold_val_id = rng.choice(available_ids)
+            fold_val = pd.concat([fold_val, df_fold[df_fold[id_col] == fold_val_id]], ignore_index=True)
+            fold_val_ids.add(fold_val_id)
+            used_val_ids.add(fold_val_id)
 
-        print(f"  Selected {len(val_ids)} unique IDs for validation ({len(fold_val)} rows)")
+        print(f"  Selected {len(fold_val_ids)} unique IDs for validation ({len(fold_val)} rows)")
 
         # Add left-out IDs' data to validation set
         left_out_data = left_out_df[left_out_df[id_col].isin(fold_left_out_ids)]
@@ -225,7 +227,7 @@ def train_val_split(
         print(f"  Final validation size: {len(fold_val)} rows")
 
         # Select remaining rows for training
-        fold_train = df_fold[~df_fold[id_col].isin(val_ids)].copy()
+        fold_train = df_fold[~df_fold[id_col].isin(fold_val_ids)].copy()
 
         if fold_train.empty:
             raise ValueError(f"No remaining data for training after leaving out IDs")
@@ -235,18 +237,18 @@ def train_val_split(
             if lid in fold_train[id_col].values:
                 raise ValueError(f"Left-out ID {lid} found in training data.")
 
-        if any(vid in fold_train[id_col].values for vid in val_ids):
-            overlapping = [vid for vid in val_ids if vid in fold_train[id_col].values]
+        if any(vid in fold_train[id_col].values for vid in fold_val_ids):
+            overlapping = [vid for vid in fold_val_ids if vid in fold_train[id_col].values]
             raise ValueError(f"Validation IDs {overlapping} found in training data.")
 
         print(f"[fold {fold_idx}/{k}] "
               f"left-out={'group:' + str(left_out_group) if LEAVE_ALLELE_GROUP_OUT else left_out_group} "
               f"({len(fold_left_out_ids)} IDs) | "
-              f"val-only={len(val_ids)} IDs | "
+              f"val-only={len(fold_val_ids)} IDs | "
               f"train={len(fold_train)}, val={len(fold_val)}")
 
         # Store the fold
-        folds.append((fold_train, fold_val, fold_left_out_ids, val_ids))
+        folds.append((fold_train, fold_val, fold_left_out_ids, fold_val_ids))
 
     return folds
 
@@ -266,13 +268,20 @@ def extract_test_tval_set(df: pd.DataFrame,
     """
     print("\n=== Extracting Test Set ===")
 
+    # Clean test alleles to match the format used in the dataset
+    cleaned_test_alleles = clean_key_vectorized(pd.Series(test_alleles)).tolist()
+    cleaned_tval_alleles = clean_key_vectorized(pd.Series(tval_alleles)).tolist()
+
+    print(f"Original test alleles: {test_alleles}")
+    print(f"Cleaned test alleles: {cleaned_test_alleles}")
+
     # Split dataset into test alleles and the rest
-    test_mask = df[id_col].isin(test_alleles)
+    test_mask = df[id_col].isin(cleaned_test_alleles)
     test_df = df.loc[test_mask].copy()
     remaining_df = df.loc[~test_mask].copy().reset_index(drop=True)
     print(f"Test alleles data: {len(test_df):,} samples from {test_df[id_col].nunique()} alleles")
 
-    tval_mask = remaining_df[id_col].isin(tval_alleles)
+    tval_mask = remaining_df[id_col].isin(cleaned_tval_alleles)
     tval_df = remaining_df.loc[tval_mask].copy()
     remaining_df2 = remaining_df.loc[~tval_mask].copy().reset_index(drop=True)
 
@@ -282,11 +291,11 @@ def extract_test_tval_set(df: pd.DataFrame,
                          f"test set from manual test alleles. Minimum required: {MIN_ALLELES_FOR_CV}")
 
     # verify if test alleles are not in remaining data
-    if any(allele in remaining_df2[id_col].values for allele in test_alleles):
+    if any(allele in remaining_df2[id_col].values for allele in cleaned_test_alleles):
         raise ValueError("Test alleles found in remaining data after extraction.")
 
     # verify if tval alleles are not in remaining data
-    if any(allele in remaining_df2[id_col].values for allele in tval_alleles):
+    if any(allele in remaining_df2[id_col].values for allele in cleaned_tval_alleles):
         raise ValueError("TVal alleles found in remaining data after extraction.")
 
     return remaining_df2, test_df, tval_df
