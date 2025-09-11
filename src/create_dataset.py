@@ -11,12 +11,12 @@ from tqdm.auto import tqdm
 # ---------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------
-MHC_CLASS = 1
+MHC_CLASS = 2
 RANDOM_SEED = 999
-K_FOLDS = 5
-MIN_ALLELES_FOR_CV = 10  # Minimum alleles needed for CV after test set extraction
-N_TVAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for Ensemble Validation
-N_VAL_FOLD_SAMPLES = 20  # Number of alleles to leave out for validation in each fold
+K_FOLDS = 3
+MIN_ALLELES_FOR_CV = 1  # Minimum alleles needed for CV after test set extraction
+N_TVAL_FOLD_SAMPLES = 4  # Number of alleles to leave out for Ensemble Validation
+N_VAL_FOLD_SAMPLES = 4  # Number of alleles to leave out for validation in each fold
 TAKE_SUBSET = False  # Whether to save folds as subsets of df/k
 LEAVE_ALLELE_GROUP_OUT = True  # Whether to leave one allele group out completely (True) or just one allele (False)
 
@@ -40,24 +40,40 @@ pd.options.mode.copy_on_write = True
 KEY_TRANS = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})  # for vectorized cleaning
 
 # manual test alleles
-test_alleles = ["BoLA-3:00101", "DLA-8850801",
-                "Eqca-1600101", "Gogo-B0101",
-                "H-2-Kk", "HLA-A*02:50",
-                "HLA-B*45:06",
-                "HLA-C*12:12", "HLA-E01:03",
-                "Mamu-A7*00103", "Mamu-B*06502",
-                "Patr-B17:01", "SLA-107:01",
-                "HLA-C*18:01"]
 
-tval_alleles = ["SLA-107:02",
-                "Patr-B24:01",
-                "Mamu-B*08701",
-                "Mamu-A1*02601",
-                "HLA-C*15:04",
-                "HLA-B*15:42",
-                "HLA-A*03:19",
-                "H-2-Dd",
-                "BoLA-6:04101"]
+
+if MHC_CLASS == 2:
+    test_alleles = ["H-2-IAd-A/H-2-IAd-B",
+                    "HLA-DPA1*03:01/HLA-DPB1*04:02",
+                    "HLA-DQA1*02:01/HLA-DQB1*04:02",
+                    "HLA-DRA/HLA-DRB1*16:02",
+                    # "HLA-DRA/HLA-DRB3*03:01"
+                    ]
+    tval_alleles = ["H-2-Iek-A/H-2-Iek-B",
+                    "HLA-DQA1*01:01/HLA-DQB1*05:03",
+                    "HLA-DPA1*01:03/HLA-DPB1*17:01",
+                    "HLA-DRA/HLA-DRB1*12:02",
+                    ]
+
+else:
+    test_alleles = ["BoLA-3:00101", "DLA-8850801",
+                    "Eqca-1600101", "Gogo-B0101",
+                    "H-2-Kk", "HLA-A*02:50",
+                    "HLA-B*45:06",
+                    "HLA-C*12:12", "HLA-E01:03",
+                    "Mamu-A7*00103", "Mamu-B*06502",
+                    "Patr-B17:01", "SLA-107:01",
+                    "HLA-C*18:01"]
+
+    tval_alleles = ["SLA-107:02",
+                    "Patr-B24:01",
+                    "Mamu-B*08701",
+                    "Mamu-A1*02601",
+                    "HLA-C*15:04",
+                    "HLA-B*15:42",
+                    "HLA-A*03:19",
+                    "H-2-Dd",
+                    "BoLA-6:04101"]
 
 major_allele_groups = ['MAMU', 'PATR', 'SLA', 'BOLA', 'DLA', 'H-2', 'HLA-A', 'HLA-B', 'HLA-C', 'HLA-E', 'HLA-DRB',
                        'HLA-DQA', 'HLA-DQB', 'HLA-DPA', 'HLA-DPB', 'EQCA', 'GOGO']
