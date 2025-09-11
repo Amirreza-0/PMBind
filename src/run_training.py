@@ -29,7 +29,7 @@ from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, 
 from models import pmbind_multitask as pmbind
 from visualizations import visualize_training_history
 
-mixed_precision = False # TODO not implemented yet
+mixed_precision = True  # Enable mixed precision for significant speedup
 
 if mixed_precision:
     policy = tf.keras.mixed_precision.Policy('mixed_float16')
@@ -102,12 +102,12 @@ def _parse_tf_example(example_proto):
     labels = tf.cast(parsed['label'], tf.int32)
     labels = tf.expand_dims(labels, axis=-1)
     return {
-        "pep_blossom62": pep_blossom62_input,
+        "pep_blossom62": pep_blossom62_input, # Shape: (..., 23)
         "pep_mask": pep_mask,
         "mhc_emb": mhc_emb,
         "mhc_mask": mhc_mask,
         "pep_ohe_target": pep_ohe_target,  # Shape: (..., 21)
-        "mhc_ohe_target": mhc_ohe_target,  # FIXED: Now has shape (..., 21)
+        "mhc_ohe_target": mhc_ohe_target, # Shape: (..., 21)
         "labels": labels
     }
 
@@ -181,7 +181,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
 # dataset = dataset.map(lambda x: apply_dynamic_masking(x, emd_mask_d2=False), num_parallel_calls=tf.data.AUTOTUNE)
 
 
-def create_dataset(filepath_pattern, batch_size, is_training=True):
+def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking=True):
     """Creates a tf.data.Dataset from a set of sharded, compressed TFRecord files."""
     file_list = tf.io.gfile.glob(filepath_pattern)
     if not file_list:
@@ -191,11 +191,11 @@ def create_dataset(filepath_pattern, batch_size, is_training=True):
     dataset = tf.data.TFRecordDataset(file_list, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
 
     if is_training:
-        dataset = dataset.shuffle(buffer_size=10000, reshuffle_each_iteration=True)
+        dataset = dataset.shuffle(buffer_size=50000, reshuffle_each_iteration=True)
 
     dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
 
-    if is_training:
+    if is_training and apply_masking:
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
     # Add num_parallel_calls to batch
     dataset = dataset.batch(
@@ -210,7 +210,7 @@ def create_dataset(filepath_pattern, batch_size, is_training=True):
 # ──────────────────────────────────────────────────────────────────────
 # Training & Evaluation Steps
 # ----------------------------------------------------------------------
-@tf.function
+@tf.function(jit_compile=True)  # Enable XLA compilation for faster execution
 def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     """Compiled training step with proper metric updates."""
     with tf.GradientTape() as tape:
@@ -218,9 +218,11 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
-        total_loss_weighted = raw_cls_loss + (1.2 * raw_recon_loss_pep) + raw_recon_loss_mhc
+        total_loss_weighted = (3 * raw_cls_loss) + (1.2 * raw_recon_loss_pep) + raw_recon_loss_mhc
 
     grads = tape.gradient(total_loss_weighted, model.trainable_variables)
+    if mixed_precision:
+        grads = optimizer.get_unscaled_gradients(grads)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
@@ -234,7 +236,7 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     metrics['cls_loss'].update_state(raw_cls_loss)
 
 
-@tf.function
+@tf.function(jit_compile=True)  # Enable XLA compilation for faster execution
 def eval_step(model, batch_data, metrics):
     """Compiled evaluation step."""
     outputs = model(batch_data, training=False)
@@ -248,7 +250,7 @@ def eval_step(model, batch_data, metrics):
 # Main Training Function
 # ----------------------------------------------------------------------
 def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std,
-          resume_from_weights=None):
+          resume_from_weights=None, enable_masking=True):
     """Fully optimized training function using the new data pipeline."""
 
     global MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS
@@ -277,8 +279,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     train_pattern = os.path.join(tfrecord_dir, "train_shard_*.tfrecord")
     val_pattern = os.path.join(tfrecord_dir, "validation_shard_*.tfrecord")
-    train_ds = create_dataset(train_pattern, batch_size, is_training=True)
-    val_ds = create_dataset(val_pattern, batch_size, is_training=False)
+    train_ds = create_dataset(train_pattern, batch_size, is_training=True, apply_masking=enable_masking)
+    val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False)
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
@@ -300,8 +302,14 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         json.dump(model.get_config(), f, indent=4)
 
     optimizer = keras.optimizers.Lion(learning_rate=lr)
+    if mixed_precision:
+        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-        from_logits=False, reduction="sum_over_batch_size", label_smoothing=0.15, gamma=3.0, apply_class_balancing=True,
+        from_logits=False,
+        reduction="sum_over_batch_size",
+        label_smoothing=0.15,
+        gamma=3.0,
+        apply_class_balancing=True,
         alpha=0.95)
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
@@ -377,9 +385,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-3,
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
-        "description": "Fully optimized TFRecord pipeline with BLOSUM62 input."
+        "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }
 
     base_output_folder = "../results/PMBind_runs_optimized/"
@@ -412,7 +420,8 @@ def main(args):
         embed_dim=config["EMBED_DIM"],
         heads=config["HEADS"],
         noise_std=config["NOISE_STD"],
-        resume_from_weights=args.resume_from # Pass the new argument
+        resume_from_weights=args.resume_from,
+        enable_masking=True
    )
 
 

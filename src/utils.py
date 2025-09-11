@@ -1165,6 +1165,7 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
 #     result = determine_ks_dict(initial_input, output_dims)
 #     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
 
+@tf.function
 def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sample_weight=None, type='cce'):
     """
     Compute masked categorical cross-entropy loss.
@@ -1679,18 +1680,24 @@ class SubtractLayer(keras.layers.Layer):
         pep_mask = tf.where(pep_mask == self.pad_token, x=0., y=1.)  # (B,P)
         mhc_mask = tf.where(mhc_mask == self.pad_token, x=0., y=1.)
 
-        # peptide  (B,P,D) -> (B,P*D) -> (B,M,P*D)
-        peptide_flat = tf.reshape(peptide, (B, P_D))
-        peptide_exp = tf.repeat(peptide_flat[:, tf.newaxis, :], repeats=M, axis=1)
-        # mhc       (B,M,D) -> tile last axis P times -> (B,M,P*D)
-        mhc_exp = tf.tile(mhc, [1, 1, P])
-        result = mhc_exp - peptide_exp  # (B,M,P*D)
-        # peptide mask  (B,P) -> (B,P,D) -> flatten -> (B,P*D) -> (B,M,P*D)
-        pep_mask_PD = tf.tile(pep_mask[:, :, tf.newaxis], [1, 1, D])  # (B,P,D)
-        pep_mask_PD = tf.reshape(pep_mask_PD, (B, P_D))  # (B,P*D)
-        pep_mask_PD = tf.repeat(pep_mask_PD[:, tf.newaxis, :], repeats=M, axis=1)  # (B,M,P*D)
-        # mhc mask      (B,M) -> (B,M,1) -> repeat P*D along last axis
-        mhc_mask_PD = tf.repeat(mhc_mask[:, :, tf.newaxis], repeats=P_D, axis=2)  # (B,M,P*D)
+        # More efficient approach using broadcasting
+        # peptide: (B,P,D) -> (B,1,P,D) -> (B,M,P,D) via broadcasting
+        # mhc:     (B,M,D) -> (B,M,1,D) -> (B,M,P,D) via broadcasting
+        peptide_expanded = peptide[:, tf.newaxis, :, :]  # (B,1,P,D)
+        mhc_expanded = mhc[:, :, tf.newaxis, :]  # (B,M,1,D)
+        result_4d = mhc_expanded - peptide_expanded  # (B,M,P,D) via broadcasting
+        # Flatten to (B,M,P*D)
+        result = tf.reshape(result_4d, (B, M, P_D))
+        # Optimize masking operations using broadcasting
+        # peptide mask: (B,P) -> (B,1,P,1) -> (B,M,P,D) via broadcasting
+        pep_mask_4d = pep_mask[:, tf.newaxis, :, tf.newaxis]  # (B,1,P,1)
+        pep_mask_expanded = tf.broadcast_to(pep_mask_4d, (B, M, P, D))  # (B,M,P,D)
+        pep_mask_PD = tf.reshape(pep_mask_expanded, (B, M, P_D))  # (B,M,P*D)
+        
+        # mhc mask: (B,M) -> (B,M,1,1) -> (B,M,P,D) via broadcasting  
+        mhc_mask_4d = mhc_mask[:, :, tf.newaxis, tf.newaxis]  # (B,M,1,1)
+        mhc_mask_expanded = tf.broadcast_to(mhc_mask_4d, (B, M, P, D))  # (B,M,P,D)
+        mhc_mask_PD = tf.reshape(mhc_mask_expanded, (B, M, P_D))  # (B,M,P*D)
         combined_mask = tf.logical_and(tf.cast(pep_mask_PD, tf.bool), tf.cast(mhc_mask_PD, tf.bool))
         masked_result = tf.where(combined_mask, result, tf.zeros_like(result))
         return masked_result
