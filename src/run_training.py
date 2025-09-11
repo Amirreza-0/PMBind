@@ -27,8 +27,14 @@ from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, 
                    clean_key, masked_categorical_crossentropy, seq_to_indices,
                    AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE)
 from models import pmbind_multitask as pmbind
-from visualizations import visualize_training_history, _analyze_latents
+from visualizations import visualize_training_history
 
+mixed_precision = False # TODO not implemented yet
+
+if mixed_precision:
+    policy = tf.keras.mixed_precision.Policy('mixed_float16')
+    tf.keras.mixed_precision.set_global_policy(policy)
+    print(f'Mixed precision enabled: {policy}')
 # --- Globals for the tf.data pipeline ---
 MHC_EMBEDDING_TABLE = None
 MAX_PEP_LEN = 0
@@ -106,7 +112,7 @@ def _parse_tf_example(example_proto):
     }
 
 
-def apply_dynamic_masking(features, emd_mask_d2=False):  # Added optional flag
+def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     """
     Applies random masking for training augmentation inside the tf.data pipeline.
     This version is corrected to match the original DataGenerator logic.
@@ -191,8 +197,12 @@ def create_dataset(filepath_pattern, batch_size, is_training=True):
 
     if is_training:
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
-
-    dataset = dataset.batch(batch_size, drop_remainder=is_training)
+    # Add num_parallel_calls to batch
+    dataset = dataset.batch(
+        batch_size,
+        drop_remainder=is_training,
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
     dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
     return dataset
 
@@ -237,9 +247,10 @@ def eval_step(model, batch_data, metrics):
 # ──────────────────────────────────────────────────────────────────────
 # Main Training Function
 # ----------------------------------------------------------------------
-
-def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std):
+def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std,
+          resume_from_weights=None):
     """Fully optimized training function using the new data pipeline."""
+
     global MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS
     MHC_CLASS = mhc_class
 
@@ -274,12 +285,24 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
                    ESM_dim=ESM_DIM, drop_out_rate=0.2)
 
     model.build(train_ds.element_spec)
+
+    if resume_from_weights:
+        if os.path.exists(resume_from_weights):
+            print(f"\nLoading weights from {resume_from_weights} to resume training...")
+            model.load_weights(resume_from_weights)
+            print("✓ Weights loaded successfully.")
+        else:
+            print(f"\nWarning: Weight file not found at {resume_from_weights}. Starting from scratch.")
     model.summary()
+
+    # save model config
+    with open(os.path.join(out_dir, "model_config.json"), "w") as f:
+        json.dump(model.get_config(), f, indent=4)
 
     optimizer = keras.optimizers.Lion(learning_rate=lr)
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-        from_logits=False, reduction="sum_over_batch_size", label_smoothing=0.15, gamma=2.0)
-
+        from_logits=False, reduction="sum_over_batch_size", label_smoothing=0.15, gamma=3.0, apply_class_balancing=True,
+        alpha=0.95)
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
         'train_auc': tf.keras.metrics.AUC(name='train_auc'),
@@ -351,7 +374,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 # ──────────────────────────────────────────────────────────────────────
 # Main Execution
 # ----------------------------------------------------------------------
-def main(fold_to_run):
+def main(args):
     """Main function to run the training pipeline."""
     config = {
         "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-3,
@@ -362,6 +385,7 @@ def main(fold_to_run):
     base_output_folder = "../results/PMBind_runs_optimized/"
     run_id_base = 0
 
+    fold_to_run = args.fold # Get fold from args
     run_id = run_id_base + fold_to_run
     run_name = f"run_{run_id}_mhc{config['MHC_CLASS']}_dim{config['EMBED_DIM']}_h{config['HEADS']}_fold{fold_to_run}"
     out_dir = os.path.join(base_output_folder, run_name)
@@ -387,12 +411,28 @@ def main(fold_to_run):
         lr=config["LEARNING_RATE"],
         embed_dim=config["EMBED_DIM"],
         heads=config["HEADS"],
-        noise_std=config["NOISE_STD"]
-    )
+        noise_std=config["NOISE_STD"],
+        resume_from_weights=args.resume_from # Pass the new argument
+   )
 
 
 if __name__ == "__main__":
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Set memory growth for each GPU
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"Enabled memory growth for {len(gpus)} GPU(s).")
+        except RuntimeError as e:
+            # Memory growth must be set before GPUs have been initialized
+            print(e)
+    try:
+        tf.config.experimental.enable_tensor_float_32_execution(True)
+    except:
+        pass
     parser = argparse.ArgumentParser(description="Run training for specified folds.")
     parser.add_argument("--fold", type=int, required=True, help="Fold number to run (e.g., 0-4).")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to model weights (.h5 file) to resume training from.")
     args = parser.parse_args()
-    main(args.fold)
+    main(args)
