@@ -553,12 +553,14 @@ class SubtractAttentionLayer(keras.layers.Layer):
         return out
 
 
+@tf.keras.utils.register_keras_serializable(package='custom_layers')
 class MaskedEmbedding(keras.layers.Layer):
     def __init__(self, mask_token=-1., pad_token=-2., name='masked_embedding'):
         super().__init__(name=name)
         self.mask_token = mask_token
         self.pad_token = pad_token
 
+    @tf.function(reduce_retracing=True)
     def call(self, x, mask):
         """
         Args:
@@ -615,6 +617,7 @@ class PositionalEncoding(keras.layers.Layer):
         pos_encoding = pos_encoding[tf.newaxis, ...]  # (1, max_len, embed_dim)
         self.pos_encoding = tf.cast(pos_encoding, dtype=tf.float32)
 
+    @tf.function(reduce_retracing=True)
     def call(self, x, mask):
         """
         Args:
@@ -1141,6 +1144,7 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
 #     result = determine_ks_dict(initial_input, output_dims)
 #     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
 
+@tf.function
 def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sample_weight=None, type='cce'):
     """
     Compute masked categorical cross-entropy loss.
@@ -1312,6 +1316,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
             # q/k have shape (B, H, S, D): sequence_axis=2, feature_axis=-1
             self.rope = RotaryEmbedding(sequence_axis=2, feature_axis=-1, name=f'rope_{self.name}')
 
+    @tf.function(experimental_relax_shapes=True)
     def call(self, x_pmhc, p_mask, m_mask):
         """
         Args:
@@ -1354,6 +1359,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         else:
             return out
 
+    @tf.function(experimental_relax_shapes=True)
     def mask_2d(self, p_mask, m_mask):
         p_mask = tf.cast(p_mask, tf.float32)
         m_mask = tf.cast(m_mask, tf.float32)
@@ -1402,11 +1408,18 @@ class MaskedCategoricalCrossentropyLoss(layers.Layer):
 
 
 class AddGaussianNoise(layers.Layer):
-    def __init__(self, std=0.1, **kw): super().__init__(**kw); self.std = std
+    def __init__(self, std=0.1, **kw):
+        super().__init__(**kw)
+        self.std = std
 
+    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
     def call(self, x, training=None):
-        if training: return x + tf.random.normal(tf.shape(x), stddev=self.std)
-        return x
+        training = tf.cast(False if training is None else training, tf.bool)
+
+        def add_noise():
+            return x + tf.random.normal(tf.shape(x), stddev=self.std, dtype=x.dtype)
+
+        return tf.cond(training, add_noise, lambda: x)
 
 
 def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10):
@@ -2083,6 +2096,7 @@ class GlobalMeanPooling1D(layers.Layer):
         self.name = name
         self.axis = axis
 
+    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
     def call(self, input_tensor, ):
         """
         Computes the global mean pooling over the input tensor.
@@ -2106,6 +2120,7 @@ class GlobalSTDPooling1D(layers.Layer):
         super(GlobalSTDPooling1D, self).__init__(name=name)
         self.axis = axis
 
+    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
     def call(self, input_tensor, ):
         """
         Args:
