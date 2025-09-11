@@ -22,6 +22,15 @@ from Bio import AlignIO
 from Bio.Align.Applications import MafftCommandline
 from collections import Counter
 
+# detect mixed precision status - check if it's enabled
+policy = tf.keras.mixed_precision.global_policy()
+print(f"Mixed precision policy: {policy}")
+if policy.compute_dtype == 'mixed_float16':
+    print("Mixed precision is enabled.")
+    GLOBAL_DTYPE = tf.float16
+else:
+    print("Mixed precision is not enabled.")
+    GLOBAL_DTYPE = tf.float32
 
 # Constants
 BLOSUM62 = {
@@ -66,7 +75,7 @@ MASK_VALUE = 0.0
 
 def seq_to_onehot(sequence: str, max_seq_len: int) -> np.ndarray:
     """Convert peptide sequence to one-hot encoding"""
-    arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32) # initialize padding with 0
+    arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32)  # initialize padding with 0
     for j, aa in enumerate(sequence.upper()[:max_seq_len]):
         arr[j, AA_TO_INT.get(aa, UNK_IDX)] = 1.0
         # print number of UNKs in the sequence
@@ -120,6 +129,7 @@ def OHE_to_seq_single(ohe: np.ndarray, gap=False) -> str:
             seq.append(AA[aa_index])
     return ''.join(seq)  # Join the list into a string
 
+
 def peptides_to_onehot_kmer_windows(seq, max_seq_len, k=9, pad_token=-1.0) -> np.ndarray:
     """
     Converts a peptide sequence into a sliding window of k-mers, one-hot encoded.
@@ -141,6 +151,7 @@ def peptides_to_onehot_kmer_windows(seq, max_seq_len, k=9, pad_token=-1.0) -> np
             RFs[window, :, pad_token] = 1.0
     return np.array(RFs)
 
+
 class OHEKmerWindows(tf.keras.layers.Layer):
     """
     A TensorFlow layer that converts a batch of one-hot encoded sequences
@@ -150,6 +161,7 @@ class OHEKmerWindows(tf.keras.layers.Layer):
     4D tensor of one-hot encoded sliding windows. It is a more direct alternative
     to the string-based version when data is already pre-processed.
     """
+
     def __init__(self, max_seq_len: int, k: int = 9, alphabet_size: int = 21, name='ohe_kmer_windows'):
         """
         Initializes the layer.
@@ -181,9 +193,9 @@ class OHEKmerWindows(tf.keras.layers.Layer):
         # --- Input Validation (Optional but Recommended) ---
         input_shape = tf.shape(inputs)
         tf.debugging.assert_equal(input_shape[1], self.max_seq_len,
-            message=f"Input sequence length must be {self.max_seq_len}")
+                                  message=f"Input sequence length must be {self.max_seq_len}")
         tf.debugging.assert_equal(input_shape[2], self.alphabet_size,
-            message=f"Input alphabet size must be {self.alphabet_size}")
+                                  message=f"Input alphabet size must be {self.alphabet_size}")
 
         # 1. Reshape the input to be compatible with `extract_patches`
         # We treat the sequence as a 1D "image" with `alphabet_size` channels.
@@ -194,10 +206,10 @@ class OHEKmerWindows(tf.keras.layers.Layer):
         # We slide a window of size `k` along the `max_seq_len` dimension.
         patches = tf.image.extract_patches(
             images=images,
-            sizes=[1, self.k, 1, 1],      # Window size: (batch, height, width, channels)
-            strides=[1, 1, 1, 1],    # Slide one step at a time
+            sizes=[1, self.k, 1, 1],  # Window size: (batch, height, width, channels)
+            strides=[1, 1, 1, 1],  # Slide one step at a time
             rates=[1, 1, 1, 1],
-            padding='VALID'          # 'VALID' ensures we only take full windows
+            padding='VALID'  # 'VALID' ensures we only take full windows
         )
         # The output shape of extract_patches is (batch, num_windows_h, num_windows_w, k * 1 * alphabet_size)
         # In our case: (batch_size, self.rf, 1, k * self.alphabet_size)
@@ -296,7 +308,8 @@ def blosum62_to_seq(blosum_matrix: np.ndarray) -> str:
 
 AMINO_ACID_VOCAB = "".join(list(BLOSUM62.keys()))
 AMINO_ACID_MAP = {k: i for i, k in enumerate(AMINO_ACID_VOCAB)}
-PAD_INDEX = len(AMINO_ACID_MAP) # Will be 23
+PAD_INDEX = len(AMINO_ACID_MAP)  # Will be 23
+
 
 def seq_to_indices(seq, max_seq_len):
     """Converts an amino acid sequence to an array of integer indices FOR BLOSUM62."""
@@ -307,7 +320,8 @@ def seq_to_indices(seq, max_seq_len):
 
 
 # We need a separate padding index for the OHE target logic.
-PAD_INDEX_OHE = len(AA) # Will be 21
+PAD_INDEX_OHE = len(AA)  # Will be 21
+
 
 def seq_to_ohe_indices(seq, max_seq_len):
     """Converts an amino acid sequence to an array of integer indices FOR OHE TARGET."""
@@ -315,6 +329,7 @@ def seq_to_ohe_indices(seq, max_seq_len):
     for i, aa in enumerate(seq.upper()[:max_seq_len]):
         indices[i] = AA_TO_INT.get(aa, UNK_IDX)
     return indices
+
 
 # Custom Attention Layer
 class AttentionLayer(keras.layers.Layer):
@@ -335,6 +350,7 @@ class AttentionLayer(keras.layers.Layer):
         mask_token (float): Value for masked tokens.
         pad_token (float): Value for padded tokens.
     """
+
     def __init__(self, query_dim, context_dim, output_dim, type, heads=4,
                  resnet=True, return_att_weights=False, name='attention',
                  epsilon=1e-6, gate=True, mask_token=-1., pad_token=-2., dtype="float32"):
@@ -359,23 +375,29 @@ class AttentionLayer(keras.layers.Layer):
     def build(self, input_shape):
         # Projection weights
         self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
-                                      initializer='random_normal', trainable=True, name=f'q_proj_{self.name}', dtype=self.dtype)
+                                      initializer='random_normal', trainable=True, name=f'q_proj_{self.name}',
+                                      dtype=self.dtype)
         self.k_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
-                                      initializer='random_normal', trainable=True, name=f'k_proj_{self.name}', dtype=self.dtype)
+                                      initializer='random_normal', trainable=True, name=f'k_proj_{self.name}',
+                                      dtype=self.dtype)
         self.v_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
-                                      initializer='random_normal', trainable=True, name=f'v_proj_{self.name}', dtype=self.dtype)
+                                      initializer='random_normal', trainable=True, name=f'v_proj_{self.name}',
+                                      dtype=self.dtype)
         if self.gate:
             self.g = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
-                                     initializer='random_uniform', trainable=True, name=f'gate_{self.name}', dtype=self.dtype)
+                                     initializer='random_uniform', trainable=True, name=f'gate_{self.name}',
+                                     dtype=self.dtype)
         self.norm = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_{self.name}', dtype=self.dtype)
         if self.type == 'cross':
-            self.norm_context = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_context_{self.name}', dtype=self.dtype)
+            self.norm_context = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_context_{self.name}',
+                                                          dtype=self.dtype)
         self.norm_out = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_out_{self.name}', dtype=self.dtype)
         self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
-                                     initializer='random_normal', trainable=True, name=f'outw_{self.name}', dtype=self.dtype)
+                                     initializer='random_normal', trainable=True, name=f'outw_{self.name}',
+                                     dtype=self.dtype)
         self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
                                      trainable=True, name=f'outb_{self.name}', dtype=self.dtype)
-        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.float32))
+        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, GLOBAL_DTYPE))
 
     def call(self, x, mask, context=None, context_mask=None):
         """
@@ -445,8 +467,9 @@ class SubtractAttentionLayer(keras.layers.Layer):
     All other arguments / behaviour are identical to the original
     `AttentionLayer` (projection sizes, heads, residual, gating, …).
     """
+
     def __init__(self,
-                 feature_dim,          # == P*D   (input & output dim)
+                 feature_dim,  # == P*D   (input & output dim)
                  heads=4,
                  resnet=True,
                  return_att_weights=False,
@@ -457,15 +480,15 @@ class SubtractAttentionLayer(keras.layers.Layer):
 
         assert feature_dim % heads == 0, "feature_dim must be divisible by heads"
         self.feature_dim = feature_dim
-        self.output_dim  = feature_dim
-        self.heads       = heads
-        self.resnet      = resnet
-        self.return_att  = return_att_weights
-        self.epsilon     = epsilon
-        self.gate        = gate
-        self.att_dim     = feature_dim // heads          # per-head dim
-        self.scale       = 1.0 / tf.math.sqrt(tf.cast(self.att_dim,
-                                                      tf.float32))
+        self.output_dim = feature_dim
+        self.heads = heads
+        self.resnet = resnet
+        self.return_att = return_att_weights
+        self.epsilon = epsilon
+        self.gate = gate
+        self.att_dim = feature_dim // heads  # per-head dim
+        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim,
+                                                GLOBAL_DTYPE))
 
     # ------------------------------------------------------------------
     # build
@@ -480,10 +503,10 @@ class SubtractAttentionLayer(keras.layers.Layer):
         if self.gate:
             self.g = self.add_weight(name="gate", shape=(hd, fd, self.att_dim), initializer="random_uniform")
 
-        self.ln_in   = layers.LayerNormalization(epsilon=self.epsilon,
-                                                 name="ln_in")
-        self.ln_out  = layers.LayerNormalization(epsilon=self.epsilon,
-                                                 name="ln_out")
+        self.ln_in = layers.LayerNormalization(epsilon=self.epsilon,
+                                               name="ln_in")
+        self.ln_out = layers.LayerNormalization(epsilon=self.epsilon,
+                                                name="ln_out")
         if self.resnet:
             self.ln_res = layers.LayerNormalization(epsilon=self.epsilon,
                                                     name="ln_res")
@@ -503,8 +526,8 @@ class SubtractAttentionLayer(keras.layers.Layer):
         M = tf.shape(x_sub)[1]
 
         # ── token-level mask (B,M) – “is *any* feature in this row valid?” ──
-        token_mask = tf.reduce_any(combined_mask, axis=-1)            # bool
-        token_mask_f = tf.cast(token_mask, tf.float32)                # 1/0
+        token_mask = tf.reduce_any(combined_mask, axis=-1)  # bool
+        token_mask_f = tf.cast(token_mask, GLOBAL_DTYPE)  # 1/0
 
         # ── layer-norm on valid data only (invalid features are already 0) ──
         x_norm = self.ln_in(x_sub)
@@ -519,16 +542,16 @@ class SubtractAttentionLayer(keras.layers.Layer):
         att = tf.einsum('bhmf,bhnf->bhmn', q, k) * self.scale  # (B,H,M,M)
 
         # build broadcast mask  (B,H,M,M)
-        mask_q = tf.expand_dims(token_mask_f, axis=1)          # (B,1,M)
-        mask_k = tf.expand_dims(token_mask_f, axis=1)          # (B,1,M)
+        mask_q = tf.expand_dims(token_mask_f, axis=1)  # (B,1,M)
+        mask_k = tf.expand_dims(token_mask_f, axis=1)  # (B,1,M)
         att_mask = tf.einsum('bqm,bkn->bqmn', mask_q, mask_k)  # (B,1,M,M)
         att_mask = tf.broadcast_to(att_mask, tf.shape(att))
 
         att += (1.0 - att_mask) * -1e9
-        att  = tf.nn.softmax(att, axis=-1) * att_mask          # masked softmax
+        att = tf.nn.softmax(att, axis=-1) * att_mask  # masked softmax
 
         # ── attention output ───────────────────────────────────────────
-        out = tf.einsum('bhmn,bhnf->bhmf', att, v)             # (B,H,M,d)
+        out = tf.einsum('bhmn,bhnf->bhmf', att, v)  # (B,H,M,d)
 
         # optional gating
         if self.gate:
@@ -536,7 +559,7 @@ class SubtractAttentionLayer(keras.layers.Layer):
             out *= tf.nn.sigmoid(g)
 
         # ── merge heads ────────────────────────────────────────────────
-        out = tf.transpose(out, [0, 2, 1, 3])                  # (B,M,H,d)
+        out = tf.transpose(out, [0, 2, 1, 3])  # (B,M,H,d)
         out = tf.reshape(out, [B, M, self.heads * self.att_dim])  # (B,M,F)
         out = tf.matmul(out, self.out_w) + self.out_b
 
@@ -567,10 +590,9 @@ class MaskedEmbedding(keras.layers.Layer):
         Returns:
             Tensor with masked positions set to zero.
         """
-        mask = tf.cast(mask, tf.float32)
+        mask = tf.cast(mask, GLOBAL_DTYPE)
         mask = tf.where((mask == self.pad_token) | (mask == self.mask_token), 0., 1.)
         return x * mask[:, :, tf.newaxis]  # Apply mask to zero out positions
-
 
     def get_config(self):
         """Serializes the layer's configuration."""
@@ -601,10 +623,10 @@ class PositionalEncoding(keras.layers.Layer):
 
     def build(self, x):
         # Create (1, pos_range, embed_dim) encoding matrix
-        pos = tf.range(self.pos_range, dtype=tf.float32)[:, tf.newaxis]  # (pos_range, 1)
-        i = tf.range(self.embed_dim, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim)
-        #angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, tf.float32))
-        angle_rates = tf.pow(300.0, -(2 * tf.floor(i / 2)) / tf.cast(self.embed_dim, tf.float32))
+        pos = tf.range(self.pos_range, dtype=GLOBAL_DTYPE)[:, tf.newaxis]  # (pos_range, 1)
+        i = tf.range(self.embed_dim, dtype=GLOBAL_DTYPE)[tf.newaxis, :]  # (1, embed_dim)
+        # angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, GLOBAL_DTYPE))
+        angle_rates = tf.pow(300.0, -(2 * tf.floor(i / 2)) / tf.cast(self.embed_dim, GLOBAL_DTYPE))
         angle_rads = pos * angle_rates  # (pos_range, embed_dim)
 
         # Apply sin to even indices, cos to odd indices
@@ -613,7 +635,7 @@ class PositionalEncoding(keras.layers.Layer):
 
         pos_encoding = tf.concat([sines, cosines], axis=-1)  # (max_len, embed_dim)
         pos_encoding = pos_encoding[tf.newaxis, ...]  # (1, max_len, embed_dim)
-        self.pos_encoding = tf.cast(pos_encoding, dtype=tf.float32)
+        self.pos_encoding = tf.cast(pos_encoding, dtype=GLOBAL_DTYPE)
 
     def call(self, x, mask):
         """
@@ -625,7 +647,7 @@ class PositionalEncoding(keras.layers.Layer):
         """
         seq_len = tf.shape(x)[1]
         pe = self.pos_encoding[:, :seq_len, :]  # (1, N, D)
-        mask = tf.cast(mask[:, :, tf.newaxis], tf.float32)  # (B, N, 1)
+        mask = tf.cast(mask[:, :, tf.newaxis], GLOBAL_DTYPE)  # (B, N, 1)
         mask = tf.where(mask == self.pad_token, 0., 1.)
         pe = pe * mask  # zero out positions where mask is 0
 
@@ -660,15 +682,15 @@ class RotaryPositionalEncoding(keras.layers.Layer):
         assert self.embed_dim % 2 == 0, f"Input feature dimension {self.embed_dim} must be even for rotary encoding"
 
         # Precompute rotary frequencies
-        pos = tf.range(self.max_len, dtype=tf.float32)[:, tf.newaxis]  # (max_len, 1)
-        dim = tf.range(self.embed_dim // 2, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim//2)
+        pos = tf.range(self.max_len, dtype=GLOBAL_DTYPE)[:, tf.newaxis]  # (max_len, 1)
+        dim = tf.range(self.embed_dim // 2, dtype=GLOBAL_DTYPE)[tf.newaxis, :]  # (1, embed_dim//2)
 
         # Using a base of 10000 is common in RoPE implementations
-        inv_freq = tf.pow(10000.0, -(2 * dim) / tf.cast(self.embed_dim, tf.float32))
+        inv_freq = tf.pow(10000.0, -(2 * dim) / tf.cast(self.embed_dim, GLOBAL_DTYPE))
         freqs = pos * inv_freq  # (max_len, embed_dim//2)
 
-        self.cos_cached = tf.cast(tf.cos(freqs), tf.float32)  # (max_len, embed_dim//2)
-        self.sin_cached = tf.cast(tf.sin(freqs), tf.float32)  # (max_len, embed_dim//2)
+        self.cos_cached = tf.cast(tf.cos(freqs), GLOBAL_DTYPE)  # (max_len, embed_dim//2)
+        self.sin_cached = tf.cast(tf.sin(freqs), GLOBAL_DTYPE)  # (max_len, embed_dim//2)
         super().build(input_shape)
 
     def call(self, x, mask):
@@ -706,12 +728,13 @@ class RotaryPositionalEncoding(keras.layers.Layer):
         x_rot = tf.concat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)  # (B, N, D)
 
         # Apply the padding mask to zero out padded positions
-        mask_expanded = tf.cast(mask[:, :, tf.newaxis], tf.float32)  # (B, N, 1)
+        mask_expanded = tf.cast(mask[:, :, tf.newaxis], GLOBAL_DTYPE)  # (B, N, 1)
         # Create a binary mask where padded tokens are 0 and others are 1
         binary_mask = tf.where(mask_expanded == self.pad_token, 0.0, 1.0)
         x_rot = x_rot * binary_mask  # Zero out positions where mask is 0
 
         return x_rot
+
 
 # @tf.function
 # def select_indices(ind, n, m_range):
@@ -799,7 +822,7 @@ class RotaryPositionalEncoding(keras.layers.Layer):
 #
 #     def call(self, input, mask):  # (B,N,E) this is peptide embedding and (B,N) for mask
 #
-#         mask = tf.cast(mask, tf.float32)  # (B, N)
+#         mask = tf.cast(mask, GLOBAL_DTYPE)  # (B, N)
 #         mask = tf.where(mask == self.pad_token, 0., 1.)
 #
 #         barcode = self.barcode
@@ -807,7 +830,7 @@ class RotaryPositionalEncoding(keras.layers.Layer):
 #         q = tf.matmul(barcode, self.q)  # (B,1,E)*(E,E)->(B,1,E)
 #         k = tf.matmul(input, self.k)  # (B,N,E)*(E,E)->(B,N,E)
 #         v = tf.matmul(input, self.v)  # (B,N,E)*(E,E)->(B,N,E)
-#         scale = 1 / tf.math.sqrt(tf.cast(tf.shape(input)[-1], tf.float32))
+#         scale = 1 / tf.math.sqrt(tf.cast(tf.shape(input)[-1], GLOBAL_DTYPE))
 #         barcode_att = tf.matmul(q, k, transpose_b=True) * scale  # (B,1,E)*(B,E,N)->(B,1,N)
 #         # mask: (B,N) => (B,1,N)
 #         mask_exp = tf.expand_dims(mask, axis=1)
@@ -825,9 +848,9 @@ class RotaryPositionalEncoding(keras.layers.Layer):
 #                 tf.expand_dims(inds, axis=-1),
 #                 (tf.shape(outs)[0], tf.shape(outs)[1], tf.shape(outs)[2])
 #             )
-#             pos_encoding = tf.cast(pos_encoding, tf.float32)
-#             dim = tf.cast(tf.shape(outs)[-1], tf.float32)
-#             ra = tf.range(dim, dtype=tf.float32) / dim
+#             pos_encoding = tf.cast(pos_encoding, GLOBAL_DTYPE)
+#             dim = tf.cast(tf.shape(outs)[-1], GLOBAL_DTYPE)
+#             ra = tf.range(dim, dtype=GLOBAL_DTYPE) / dim
 #             pos_encoding = tf.sin(pos_encoding / tf.pow(40., ra))
 #             outs += pos_encoding
 #
@@ -957,7 +980,7 @@ class AnchorPositionExtractor(keras.layers.Layer):
 
     def call(self, input, mask):  # (B,N,E) this is peptide embedding and (B,N) for mask
 
-        mask = tf.cast(mask, tf.float32)  # (B, N)
+        mask = tf.cast(mask, GLOBAL_DTYPE)  # (B, N)
         mask = tf.where(mask == self.pad_token, 0., 1.)
 
         barcode = self.barcode
@@ -965,7 +988,7 @@ class AnchorPositionExtractor(keras.layers.Layer):
         q = tf.matmul(barcode, self.q)  # (B,1,E)*(E,E)->(B,1,E)
         k = tf.matmul(input, self.k)  # (B,N,E)*(E,E)->(B,N,E)
         v = tf.matmul(input, self.v)  # (B,N,E)*(E,E)->(B,N,E)
-        scale = 1 / tf.math.sqrt(tf.cast(tf.shape(input)[-1], tf.float32))
+        scale = 1 / tf.math.sqrt(tf.cast(tf.shape(input)[-1], GLOBAL_DTYPE))
         barcode_att = tf.matmul(q, k, transpose_b=True) * scale  # (B,1,E)*(B,E,N)->(B,1,N)
         # mask: (B,N) => (B,1,N)
         mask_exp = tf.expand_dims(mask, axis=1)
@@ -984,9 +1007,9 @@ class AnchorPositionExtractor(keras.layers.Layer):
                 tf.expand_dims(inds, axis=-1),
                 (tf.shape(outs)[0], tf.shape(outs)[1], tf.shape(outs)[2])
             )
-            pos_encoding = tf.cast(pos_encoding, tf.float32)
-            dim = tf.cast(tf.shape(outs)[-1], tf.float32)
-            ra = tf.range(dim, dtype=tf.float32) / dim
+            pos_encoding = tf.cast(pos_encoding, GLOBAL_DTYPE)
+            dim = tf.cast(tf.shape(outs)[-1], GLOBAL_DTYPE)
+            ra = tf.range(dim, dtype=GLOBAL_DTYPE) / dim
             pos_encoding = tf.sin(pos_encoding / tf.pow(40., ra))
             outs += pos_encoding
 
@@ -1035,8 +1058,8 @@ class ConcatMask(keras.layers.Layer):
         Returns:
             Concatenated mask tensor of shape (B, N1 + N2)
         """
-        mask1 = tf.cast(mask1, tf.float32)
-        mask2 = tf.cast(mask2, tf.float32)
+        mask1 = tf.cast(mask1, GLOBAL_DTYPE)
+        mask2 = tf.cast(mask2, GLOBAL_DTYPE)
         return tf.concat([mask1, mask2], axis=1)
 
 
@@ -1055,9 +1078,8 @@ class ConcatBarcode(keras.layers.Layer):
         tf.debugging.assert_rank(x, 3, message="Input tensor x must be 3D (B, N, D)")
         barcode = tf.broadcast_to(barcode, shape=(tf.shape(x)[0], tf.shape(barcode)[1], tf.shape(x)[-1]))
         # concat barcode to the input
-        x = tf.concat([barcode, x], axis=1) #(B,N2+N,D)
+        x = tf.concat([barcode, x], axis=1)  # (B,N2+N,D)
         return x
-
 
 
 class SplitLayer(keras.layers.Layer):
@@ -1102,6 +1124,7 @@ def determine_conv_params(input_dim, output_dim, max_kernel_size=5, max_strides=
         return candidates[0]
     return None
 
+
 def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_strides=20):
     """
     Determine kernel sizes and strides for four sequential Conv1D layers.
@@ -1134,6 +1157,7 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
 
     return ks_dict
 
+
 # # Example usage
 # if __name__ == "__main__":
 #     initial_input = 180
@@ -1159,7 +1183,7 @@ def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sampl
     y_pred = tf.clip_by_value(y_pred, 1e-9, 1.0)
 
     # Build a 0/1 mask for non-pad tokens
-    mask = tf.cast(tf.not_equal(mask, pad_token), tf.float32)
+    mask = tf.cast(tf.not_equal(mask, pad_token), GLOBAL_DTYPE)
 
     # If mask has an extra trailing dim of 1, squeeze it (static check only)
     if mask.shape.rank is not None and mask.shape.rank > 2 and mask.shape[-1] == 1:
@@ -1172,15 +1196,15 @@ def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sampl
         raise ValueError(f"Unsupported loss type: {type}")
 
     # Ensure shape compatibility with loss
-    mask = tf.cast(tf.broadcast_to(mask, tf.shape(loss)), tf.float32)
+    mask = tf.cast(tf.broadcast_to(mask, tf.shape(loss)), GLOBAL_DTYPE)
 
     masked_loss = loss * mask
 
     # Apply sample weights if provided
     if sample_weight is not None:
-        sample_weight = tf.cast(sample_weight, tf.float32)
+        sample_weight = tf.cast(sample_weight, GLOBAL_DTYPE)
         if sample_weight.shape.rank == 2 and sample_weight.shape[1] == 1:
-            sample_weight = tf.squeeze(sample_weight, axis=-1) # (B,)
+            sample_weight = tf.squeeze(sample_weight, axis=-1)  # (B,)
         # Broadcast sample_weight from (B,) to (B, N) to match masked_loss
         masked_loss *= sample_weight[:, tf.newaxis]
         mask *= sample_weight[:, tf.newaxis]
@@ -1215,12 +1239,14 @@ class MaskedCategoricalCrossentropy(tf.keras.losses.Loss):
     sample_weight : (B, N) – 1 for real token, 0 for pad (passed by Keras)
     """
 
-    def __init__(self, *, pad_token=-2., masktoken=-.1, from_logits: bool = True, name: str = "masked_categorical_crossentropy"):
+    def __init__(self, *, pad_token=-2., masktoken=-.1, from_logits: bool = True,
+                 name: str = "masked_categorical_crossentropy"):
         # We let Keras do the masking & **reduction**; so we pick SUM_OVER_BATCH_SIZE.
         super().__init__(name=name, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
         self._from_logits = from_logits
         self.pad_token = pad_token
         self.mask_token = masktoken
+
 
 def call(self, y_true, y_pred):
     # Compute per-token cross-entropy
@@ -1240,6 +1266,7 @@ class CustomDense(keras.layers.Layer):
     """
     Custom dense layer that applies a linear transformation to the input.
     """
+
     def __init__(self, units, activation=None, name='custom_dense', mask_token=-1.0, pad_token=-2.0):
         super().__init__(name=name)
         self.units = units
@@ -1255,21 +1282,23 @@ class CustomDense(keras.layers.Layer):
                                  initializer='zeros',
                                  trainable=True, name=f'b_{self.name}')
 
-    def call(self, inputs, mask = None): # inputs: (B, N, D) mask: (B, N)
+    def call(self, inputs, mask=None):  # inputs: (B, N, D) mask: (B, N)
         output = tf.matmul(inputs, self.w) + self.b
         if self.activation is not None:
             output = self.activation(output)
         if mask is not None:
-            mask = tf.cast(mask, tf.float32)
+            mask = tf.cast(mask, GLOBAL_DTYPE)
             mask = tf.where(mask == self.pad_token, 0.0, 1.0)
             mask = tf.expand_dims(mask, axis=-1)  # (B, N, 1)
             output *= mask
         return output
 
+
 class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     Custom self-attention layer that supports 2D masks.
     """
+
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
                  return_att_weights=False, name='SelfAttentionWith2DMask',
                  epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True):
@@ -1284,7 +1313,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self.pad_token = pad_token
         self.att_dim = output_dim // heads  # Attention dimension per head
         self.self_attn_mhc = self_attn_mhc
-        self.apply_rope = apply_rope # flag for rotary positional embedding
+        self.apply_rope = apply_rope  # flag for rotary positional embedding
 
     def build(self, x):
         # Projection weights
@@ -1299,12 +1328,11 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
                                       initializer='random_uniform', trainable=True, name=f'g_proj_{self.name}')
         self.norm2 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln2_{self.name}')
 
-
         self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
                                      initializer='random_normal', trainable=True, name=f'outw_{self.name}')
         self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
                                      trainable=True, name=f'outb_{self.name}')
-        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.float32))
+        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, GLOBAL_DTYPE))
 
         if self.apply_rope:
             if (self.att_dim % 2) != 0:
@@ -1322,14 +1350,14 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
             Tensor of shape (B, N+M, output_dim)
         """
         x_pmhc = self.norm1(x_pmhc)  # Normalize input
-        p_mask = tf.cast(p_mask, tf.float32)
-        m_mask = tf.cast(m_mask, tf.float32)
-        p_mask = tf.where(p_mask==self.pad_token, x=0., y=1.)  # (B, N)
-        m_mask = tf.where(m_mask==self.pad_token, x=0., y=1.)  # (B, M)
+        p_mask = tf.cast(p_mask, GLOBAL_DTYPE)
+        m_mask = tf.cast(m_mask, GLOBAL_DTYPE)
+        p_mask = tf.where(p_mask == self.pad_token, x=0., y=1.)  # (B, N)
+        m_mask = tf.where(m_mask == self.pad_token, x=0., y=1.)  # (B, M)
 
-        q = tf.einsum('bxd,hde->bhxe', x_pmhc , self.q_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj) # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        q = tf.einsum('bxd,hde->bhxe', x_pmhc, self.q_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', x_pmhc, self.k_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', x_pmhc, self.v_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
         g = tf.einsum('bxd,hde->bhxe', x_pmhc, self.g_proj)  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
 
         if self.apply_rope:
@@ -1339,10 +1367,11 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         att = tf.matmul(q, k, transpose_b=True) * self.scale  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
         # Create 2D mask
         mask_2d = self.mask_2d(p_mask, m_mask)
-        mask_2d = tf.cast(mask_2d, tf.float32)  # (B, N+M, N+M)
+        mask_2d = tf.cast(mask_2d, GLOBAL_DTYPE)  # (B, N+M, N+M)
         mask_2d_neg = (1.0 - mask_2d) * -1e9  # Apply mask to attention scores
         att = tf.nn.softmax(att + tf.expand_dims(mask_2d_neg, axis=1), axis=-1)  # Apply softmax to attention scores
-        att *= tf.expand_dims(mask_2d, axis=1) # remove the impact of row wise attention of padded tokens. since all are 1e-9
+        att *= tf.expand_dims(mask_2d,
+                              axis=1)  # remove the impact of row wise attention of padded tokens. since all are 1e-9
         out = tf.matmul(att, v)  # (B, H, N+M, N+M) * (B, H, N+M, D) -> (B, H, N+M, D)
         out *= tf.nn.sigmoid(g)  # Apply gating mechanism
         out = tf.transpose(out, [0, 2, 1, 3])
@@ -1355,30 +1384,34 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
             return out
 
     def mask_2d(self, p_mask, m_mask):
-        p_mask = tf.cast(p_mask, tf.float32)
-        m_mask = tf.cast(m_mask, tf.float32)
+        p_mask = tf.cast(p_mask, GLOBAL_DTYPE)
+        m_mask = tf.cast(m_mask, GLOBAL_DTYPE)
         p_mask = tf.expand_dims(p_mask, axis=-1)
-        m_mask = tf.expand_dims(m_mask, axis=-1) # (B, N, 1), (B, M, 1)
+        m_mask = tf.expand_dims(m_mask, axis=-1)  # (B, N, 1), (B, M, 1)
         # zero square masks
-        self_peptide_mask = tf.zeros_like(p_mask, dtype=tf.float32) # (B, N, 1)
+        self_peptide_mask = tf.zeros_like(p_mask, dtype=GLOBAL_DTYPE)  # (B, N, 1)
         self_peptide_mask_2d = tf.broadcast_to(self_peptide_mask, (
-            tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(p_mask)[1])) #(B, N, N)
+            tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(p_mask)[1]))  # (B, N, N)
         if self.self_attn_mhc:
             self_mhc_mask = m_mask
         else:
-            self_mhc_mask = tf.zeros_like(m_mask, dtype=tf.float32)
+            self_mhc_mask = tf.zeros_like(m_mask, dtype=GLOBAL_DTYPE)
         self_mhc_mask_2d = tf.broadcast_to(self_mhc_mask, (
-            tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(m_mask)[1])) # (B, M, M)
+            tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(m_mask)[1]))  # (B, M, M)
         # one and zero masks
-        pep_mhc_mask_secondpart = tf.broadcast_to(p_mask, (tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(m_mask)[-1])) # (B, N, M)
-        pep_mhc_mask_secondpart = pep_mhc_mask_secondpart * tf.transpose(m_mask, perm=[0, 2, 1]) # (B,N,M)*(B,1,M)=(B, N, M)
-        mhc_pep_mask_secondpart = tf.broadcast_to(m_mask, (tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(p_mask)[-1])) # (B, M, N)
-        mhc_pep_mask_secondpart = mhc_pep_mask_secondpart * tf.transpose(p_mask, perm=[0, 2, 1]) # (B,M,N)*(B,1,N)=(B, M, N)
+        pep_mhc_mask_secondpart = tf.broadcast_to(p_mask, (tf.shape(p_mask)[0], tf.shape(p_mask)[1],
+                                                           tf.shape(m_mask)[-1]))  # (B, N, M)
+        pep_mhc_mask_secondpart = pep_mhc_mask_secondpart * tf.transpose(m_mask,
+                                                                         perm=[0, 2, 1])  # (B,N,M)*(B,1,M)=(B, N, M)
+        mhc_pep_mask_secondpart = tf.broadcast_to(m_mask, (tf.shape(m_mask)[0], tf.shape(m_mask)[1],
+                                                           tf.shape(p_mask)[-1]))  # (B, M, N)
+        mhc_pep_mask_secondpart = mhc_pep_mask_secondpart * tf.transpose(p_mask,
+                                                                         perm=[0, 2, 1])  # (B,M,N)*(B,1,N)=(B, M, N)
         # combined masks (B,N+M,N+M)
-        combined_mask_1 = tf.concat([self_peptide_mask_2d, pep_mhc_mask_secondpart], axis=2) # (B, N, N+M)
-        combined_mask_2 = tf.concat([mhc_pep_mask_secondpart, self_mhc_mask_2d], axis=2) # (B, M, N+M)
-        final_mask = tf.concat([combined_mask_1, combined_mask_2], axis=1) # (B, N+M, N+M)
-        final_mask_t = tf.transpose(final_mask, perm=[0,2,1]) # (B,... same)
+        combined_mask_1 = tf.concat([self_peptide_mask_2d, pep_mhc_mask_secondpart], axis=2)  # (B, N, N+M)
+        combined_mask_2 = tf.concat([mhc_pep_mask_secondpart, self_mhc_mask_2d], axis=2)  # (B, M, N+M)
+        final_mask = tf.concat([combined_mask_1, combined_mask_2], axis=1)  # (B, N+M, N+M)
+        final_mask_t = tf.transpose(final_mask, perm=[0, 2, 1])  # (B,... same)
         final_mask = tf.multiply(final_mask, final_mask_t)
         return final_mask
 
@@ -1389,6 +1422,7 @@ class MaskedCategoricalCrossentropyLoss(layers.Layer):
     # 2. reconstruction loss of masked peptide and MHC positions
     # 3. (optional) reward function for attention weights with respect to anchor rules (eg. attention hotspots must be at least 2 positions apart)
     """
+
     def __init__(self, name=None, **kwargs):
         super(MaskedCategoricalCrossentropyLoss, self).__init__(name=name, **kwargs)
 
@@ -1425,10 +1459,11 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
         8: {"L": 0.3, "V": 0.2, "I": 0.2},  # Position 9 prefers hydrophobic
     }
     # Default distribution for other positions
-    default_aa_freq = {aa: 1/len(AA) for aa in AA}
+    default_aa_freq = {aa: 1 / len(AA) for aa in AA}
 
     # Generate peptides with position-specific preferences
-    pep_lengths = np.random.choice([8, 9, 10, 11, 12], size=batch_size, p=[0.1, 0.5, 0.2, 0.1, 0.1])  # More realistic length distribution
+    pep_lengths = np.random.choice([8, 9, 10, 11, 12], size=batch_size,
+                                   p=[0.1, 0.5, 0.2, 0.1, 0.1])  # More realistic length distribution
     pep_seqs = []
     for length in pep_lengths:
         seq = []
@@ -1485,7 +1520,7 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     }
 
     # Generate MHC sequences with more realistic properties
-    mhc_lengths = np.random.randint(max_mhc_len-5,max_mhc_len, size=batch_size)  # Less variation in length
+    mhc_lengths = np.random.randint(max_mhc_len - 5, max_mhc_len, size=batch_size)  # Less variation in length
     mhc_seqs = []
     for length in mhc_lengths:
         seq = []
@@ -1519,24 +1554,27 @@ def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10)
     mask_mhc[(mask_mhc != PAD_TOKEN) & (np.random.rand(batch_size, max_mhc_len) < 0.15)] = MASK_TOKEN
 
     # convert all inputs tensors
-    # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=tf.float32)
-    # mask_pep = tf.convert_to_tensor(mask_pep, dtype=tf.float32)
-    # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=tf.float32)
-    # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=tf.float32)
-    # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=tf.float32)
+    # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=GLOBAL_DTYPE)
+    # mask_pep = tf.convert_to_tensor(mask_pep, dtype=GLOBAL_DTYPE)
+    # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=GLOBAL_DTYPE)
+    # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=GLOBAL_DTYPE)
+    # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=GLOBAL_DTYPE)
 
     # Cov layers
-    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20, max_kernel_size=60)
+    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20,
+                                max_kernel_size=60)
     if ks_dict is None:
         raise ValueError("Could not determine valid kernel sizes and strides for MHC Conv layers.")
 
     return pep_OHE, mask_pep, mhc_EMB, mask_mhc, mhc_OHE, mhc_ids, ks_dict
+
 
 class MaskedCategoricalCELossLayer(keras.layers.Layer):
     def __init__(self, pad_token=-2, mask_token=-1, name="masked_ce_loss", **kwargs):
         super().__init__(name=name, **kwargs)
         self.pad_token = pad_token
         self.mask_token = mask_token
+
     def call(self, inputs):
         """
         inputs: list or tuple of (y_true, y_pred, mask)
@@ -1557,7 +1595,7 @@ class MaskedCategoricalCELossLayer(keras.layers.Layer):
         )
         masked_loss = loss_per_position * mask
         total_loss = tf.reduce_sum(masked_loss) / tf.reduce_sum(mask + 1e-8)  # avoid /0
-        y_out = tf.expand_dims(tf.cast(mask, tf.float32), -1) * y_pred  # apply mask to predictions
+        y_out = tf.expand_dims(tf.cast(mask, GLOBAL_DTYPE), -1) * y_pred  # apply mask to predictions
         self.add_loss(total_loss)
         return y_out  # passthrough for prediction
 
@@ -1596,6 +1634,7 @@ class SamplingMuMean(keras.layers.Layer):
     '''
     Reparameterization Trick
     '''
+
     def __init__(self, latent_dim, **kwargs):
         super(SamplingMuMean, self).__init__(**kwargs)
         self.latent_dim = latent_dim
@@ -1620,6 +1659,7 @@ class SubtractLayer(keras.layers.Layer):
     Tensor2: (B, M, D) -> (B, M, P*D)
     Output: = Tensor2 - Tensor1
     """
+
     def __init__(self, mask_token=-1., pad_token=-2., **kwargs):
         """Initialize the layer."""
         super(SubtractLayer, self).__init__(**kwargs)
@@ -1633,8 +1673,8 @@ class SubtractLayer(keras.layers.Layer):
         M = tf.shape(mhc)[1]
         P_D = P * D
 
-        pep_mask = tf.cast(pep_mask, tf.float32)
-        mhc_mask = tf.cast(mhc_mask, tf.float32)
+        pep_mask = tf.cast(pep_mask, GLOBAL_DTYPE)
+        mhc_mask = tf.cast(mhc_mask, GLOBAL_DTYPE)
 
         pep_mask = tf.where(pep_mask == self.pad_token, x=0., y=1.)  # (B,P)
         mhc_mask = tf.where(mhc_mask == self.pad_token, x=0., y=1.)
@@ -1656,7 +1696,7 @@ class SubtractLayer(keras.layers.Layer):
         return masked_result
 
 
-def get_embed_key(key: str, emb_dict: Dict[str, str]) -> str: # why ndarray?
+def get_embed_key(key: str, emb_dict: Dict[str, str]) -> str:  # why ndarray?
     """
     Get the embedding key for a given allele key.
     If the key is not found in the embedding dictionary, return None.
@@ -1665,6 +1705,14 @@ def get_embed_key(key: str, emb_dict: Dict[str, str]) -> str: # why ndarray?
     """
     # Use a generator expression for efficient lookup
     return next((emb_key for emb_key in emb_dict if emb_key.upper().startswith(key.upper())), None)
+
+
+def get_seq(key: str, seq_dict: Dict[str, str]) -> str:
+    """
+    Get the sequence for a given allele key.
+    If the key is not found in the sequence dictionary, return None.
+    """
+    return next((seq for seq_key, seq in seq_dict.items() if seq_key.upper().startswith(key.upper())), None)
 
 
 def clean_key(allele_key: str) -> str:
@@ -1676,6 +1724,40 @@ def clean_key(allele_key: str) -> str:
         return "None"
     mapping = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})
     return allele_key.translate(mapping).upper()
+
+
+def get_mhc_seq_class2(key, embed_map, seq_map):
+    # print(f"Processing key: {key}")  # Debugging line
+    if key is None: return ''
+    key_parts = key.split('_')
+    # print(f"Key parts: {key_parts}")  # Debugging line
+    if len(key_parts) >= 2:
+        key1 = get_embed_key(key_parts[0], embed_map)
+        key2 = get_embed_key(key_parts[1], embed_map)
+        if embed_map.get(key1, None) is None or embed_map.get(key2, None) is None:
+            print(
+                f"Warning: Embedding not found for embd_key 1: '{key1}' 2: '{key2}' in input:'{key_parts[0]}', '{key_parts[1]}'")
+        # print(f"Key1: {key1}, Key2: {key2}")  # Debugging line
+        seq1 = get_seq(key_parts[0], seq_map) if key1 else ''
+        seq2 = get_seq(key_parts[1], seq_map) if key2 else ''
+        # print(f"Seq1: {seq1}, Seq2: {seq2}")  # Debugging line
+        return seq1 + seq2
+    else:
+        raise ValueError(f"Unexpected MHC class II key format: '{key}'")
+
+
+def get_embed_key_class2(key, embed_map):
+    if key is None: return None
+    key_parts = key.split('_')
+    if len(key_parts) >= 2:
+        key1 = get_embed_key(key_parts[0], embed_map)
+        key2 = get_embed_key(key_parts[1], embed_map)
+        if embed_map.get(key1, None) is None or embed_map.get(key2, None) is None:
+            print(
+                f"Warning: Embedding not found for embd_key 1: '{key1}' 2: '{key2}' in input:'{key_parts[0]}', '{key_parts[1]}'")
+        return "_".join(filter(None, [key1, key2]))
+    else:
+        raise ValueError(f"Unexpected MHC class II key format: '{key}'")
 
 
 def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
@@ -1695,14 +1777,15 @@ def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbo
     coords = np.array(coords)
     # Compute distance matrix
     dist_matrix = squareform(pdist(coords, metric='euclidean'))
-    #mask = np.where(dist_matrix < threshold, 0., 1)
-    mask = np.eye(dist_matrix.shape[0], dtype=np.float32) # all masks are==1
-    mask = np.where(mask==1, 0, 1) # all masks are==0 now
+    # mask = np.where(dist_matrix < threshold, 0., 1)
+    mask = np.eye(dist_matrix.shape[0], dtype=np.float32)  # all masks are==1
+    mask = np.where(mask == 1, 0, 1)  # all masks are==0 now
     dist_matrix = 1 / (dist_matrix + 1e-9)
     result = dist_matrix * mask
-    #result = result[len(result)-len(peptide):, :len(result)-len(peptide)]
+    # result = result[len(result)-len(peptide):, :len(result)-len(peptide)]
     result = (result - np.min(result)) / (np.max(result) - np.min(result))
     return result
+
 
 # res = process_pdb_distance_matrix('../pdbs/MHCI_ref_4U6Y.pdb', 9, "FLNKDLEVDGHFVTM", 'C', 1.5)
 
@@ -1725,16 +1808,16 @@ def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbo
 
 
 def cluster_aa_sequences(
-    csv_path: str,
-    *,
-    id_col: str = "allele",
-    seq_col: str = "sequence",
-    linkage_method: str = "average",
-    gap_mode: Literal["count_gaps", "ignore_gaps"] = "ignore_gaps",
-    k: int | None = None,
-    distance_threshold: float | None = None,
-    plot: bool = True,
-    mafft_extra: str | None = None,
+        csv_path: str,
+        *,
+        id_col: str = "allele",
+        seq_col: str = "sequence",
+        linkage_method: str = "average",
+        gap_mode: Literal["count_gaps", "ignore_gaps"] = "ignore_gaps",
+        k: int | None = None,
+        distance_threshold: float | None = None,
+        plot: bool = True,
+        mafft_extra: str | None = None,
 ) -> Tuple[pd.DataFrame, np.ndarray]:
     """
     Cluster amino-acid sequences contained in `csv_path`.
@@ -1769,7 +1852,7 @@ def cluster_aa_sequences(
     if id_col not in df.columns or seq_col not in df.columns:
         raise ValueError(f"CSV must contain columns '{id_col}' and '{seq_col}'")
 
-    ids  = df[id_col].astype(str).tolist()
+    ids = df[id_col].astype(str).tolist()
     seqs = df[seq_col].astype(str).tolist()
 
     # 2. Write sequences to a temporary FASTA file
@@ -1785,9 +1868,9 @@ def cluster_aa_sequences(
         mafft_cline.cline += f" {extra}"
     print("Running MAFFT …")
     mafft_stdout, _ = mafft_cline()
-    os.unlink(fasta_path)                      # clean up temp file
+    os.unlink(fasta_path)  # clean up temp file
     aln = AlignIO.read(StringIO(mafft_stdout), "fasta")
-    aligned_ids  = [rec.id  for rec in aln]
+    aligned_ids = [rec.id for rec in aln]
     aligned_seqs = [str(rec.seq) for rec in aln]
     print(f"Alignment length = {aln.get_alignment_length()} aa")
 
@@ -1807,7 +1890,7 @@ def cluster_aa_sequences(
 
     seq_dist = dist_count_gaps if gap_mode == "count_gaps" else dist_ignore_gaps
 
-    X = np.array(aligned_seqs, dtype=object)[:, None]            # shape (N,1)
+    X = np.array(aligned_seqs, dtype=object)[:, None]  # shape (N,1)
     dist_vector = pdist(X, lambda u, v: seq_dist(u[0], v[0]))
 
     # 5. Hierarchical clustering
@@ -1837,7 +1920,6 @@ def cluster_aa_sequences(
         plt.tight_layout()
         plt.show()
 
-
     df_out = df.copy()
     df_out["cluster"] = clusters
     return df_out, Z
@@ -1858,16 +1940,16 @@ def cluster_aa_sequences(
 
 
 def create_k_fold_leave_one_cluster_out_stratified_cv(
-    df: pd.DataFrame,
-    k: int = 5,
-    target_col: str = "label",
-    cluster_col: str = "cluster",
-    id_col: str = "allele",
-    subset_prop: float = 1.0,
-    train_size: float = 0.8,
-    random_state: int = 42,
-    augmentation: str = "down_sampling",  # {"down_sampling", "GNUSS", None}
-    keep_val_only_cluster: bool = True,   # set False if you do NOT want to have a cluster that is only in validation
+        df: pd.DataFrame,
+        k: int = 5,
+        target_col: str = "label",
+        cluster_col: str = "cluster",
+        id_col: str = "allele",
+        subset_prop: float = 1.0,
+        train_size: float = 0.8,
+        random_state: int = 42,
+        augmentation: str = "down_sampling",  # {"down_sampling", "GNUSS", None}
+        keep_val_only_cluster: bool = True,  # set False if you do NOT want to have a cluster that is only in validation
 ) -> List[Tuple[pd.DataFrame, pd.DataFrame, Hashable]]:
     """
     Build *k* folds where ***one whole sequence cluster is left out*** of
@@ -1993,7 +2075,7 @@ def create_k_fold_leave_one_cluster_out_stratified_cv(
             sss.split(df_eligible, df_eligible[target_col])
         )
         df_train = df_eligible.iloc[train_idx]
-        df_val   = pd.concat(
+        df_val = pd.concat(
             [df_val_only, df_eligible.iloc[extra_val_idx]],
             ignore_index=True,
         )
@@ -2003,13 +2085,13 @@ def create_k_fold_leave_one_cluster_out_stratified_cv(
         # ---------------------------------------------------- #
         if augmentation == "GNUSS":
             df_train_bal = _balance_GNUSS(df_train, fold_seed)
-            df_val_bal   = _balance_GNUSS(df_val, fold_seed)
+            df_val_bal = _balance_GNUSS(df_val, fold_seed)
         elif augmentation == "down_sampling":
             df_train_bal = _balance_down_sampling(df_train, fold_seed)
-            df_val_bal   = _balance_down_sampling(df_val, fold_seed)
+            df_val_bal = _balance_down_sampling(df_val, fold_seed)
         elif augmentation is None or augmentation.lower() == "none":
             df_train_bal = df_train.copy()
-            df_val_bal   = df_val.copy()
+            df_val_bal = df_val.copy()
         else:
             raise ValueError(f"Unknown augmentation: {augmentation}")
 
@@ -2036,7 +2118,8 @@ class GlobalMeanPooling1D(layers.Layer):
     Global mean pooling layer.
     Computes the mean across the last axis (features).
     """
-    def __init__(self,axis=-1, name="global_mean_pooling_"):
+
+    def __init__(self, axis=-1, name="global_mean_pooling_"):
         super(GlobalMeanPooling1D, self).__init__(name=name)
         self.name = name
         self.axis = axis
@@ -2053,6 +2136,7 @@ class GlobalMeanPooling1D(layers.Layer):
         )
         return mean  # (B, D)
 
+
 class GlobalSTDPooling1D(layers.Layer):
     """
     Global Standard Deviation Pooling layer that computes the standard deviation
@@ -2060,6 +2144,7 @@ class GlobalSTDPooling1D(layers.Layer):
     Args:
         name (str): Layer name.
     """
+
     def __init__(self, axis=1, name='global_std_pooling'):
         super(GlobalSTDPooling1D, self).__init__(name=name)
         self.axis = axis
@@ -2073,7 +2158,7 @@ class GlobalSTDPooling1D(layers.Layer):
         """
         pooled_std = tf.math.reduce_std(
             input_tensor, axis=self.axis, keepdims=False, name=None
-            )
+        )
         return pooled_std
 
 
@@ -2084,6 +2169,7 @@ class GumbelSoftmax(keras.layers.Layer):
     Args:
         temperature (float): Temperature parameter for Gumbel-Softmax.
     """
+
     def __init__(self, temperature=0.2, name="gumble_softmax_layer"):
         super(GumbelSoftmax, self).__init__(name=name)
         self.temperature = temperature
@@ -2102,11 +2188,12 @@ class GumbelSoftmax(keras.layers.Layer):
         # Sample Gumbel noise
         # Use tf.random.uniform for TensorFlow compatibility
         U = tf.random.uniform(tf.shape(logits), minval=0, maxval=1)
-        gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20) # Add small epsilon for numerical stability
+        gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20)  # Add small epsilon for numerical stability
 
         # Apply Gumbel-Softmax formula
         y = tf.exp((logits + gumbel_noise) / self.temperature)
         return y / tf.reduce_sum(y, axis=-1, keepdims=True)
+
 
 # Reduced alphabet mapping based on MMseqs2
 mmseqs2_reduced_alphabet = {
@@ -2147,6 +2234,7 @@ mmseqs2_reduced_alphabet_rev = {
     "Y": "F",
 }
 
+
 def reduced_anchor_pair(peptide_seq: str) -> str:
     """ Gets the second and last amino acid, maps them to the MMseqs2 reduced alphabet, and returns them as a pair string. """
     # remove gaps
@@ -2154,8 +2242,8 @@ def reduced_anchor_pair(peptide_seq: str) -> str:
     # print(peptide_seq)
     if len(peptide_seq) < 2:
         return "Short"
-    p2 = peptide_seq[1].upper() # second amino acid
-    p_omega = peptide_seq[-1].upper() # last amino acid
+    p2 = peptide_seq[1].upper()  # second amino acid
+    p_omega = peptide_seq[-1].upper()  # last amino acid
 
     # Map to reduced alphabet, handle missing keys gracefully
     p2_reduced = mmseqs2_reduced_alphabet_rev.get(p2, 'X')
@@ -2163,9 +2251,10 @@ def reduced_anchor_pair(peptide_seq: str) -> str:
     p_omega_reduced = mmseqs2_reduced_alphabet_rev.get(p_omega, 'X')
     # print(f"p_omega: {p_omega}, reduced: {p_omega_reduced}")
 
-    return f"{p2_reduced}-{p_omega_reduced}" # e.g. "A-S" should return 144 combinations
+    return f"{p2_reduced}-{p_omega_reduced}"  # e.g. "A-S" should return 144 combinations
 
- # --- Helper function and data for physiochemical properties ---
+
+# --- Helper function and data for physiochemical properties ---
 from collections import Counter
 from typing import Dict
 
@@ -2175,6 +2264,7 @@ VALID_AA = set("ACDEFGHIKLMNPQRSTVWY")
 POLAR_UNCHARGED = set("STNQCY")
 CHARGED = set("KRHDE")
 POLAR_SET = POLAR_UNCHARGED | CHARGED
+
 
 def peptide_properties_biopython(seq: str, pH: float = 7.4) -> Dict[str, float]:
     """
@@ -2340,6 +2430,7 @@ def cn_terminal_amino_acids(peptide: str, n_term_len: int = 3, c_term_len: int =
 
 class Sampling(layers.Layer):
     """Uses (z_mean, z_log_var) to sample z, the latent vector."""
+
     def call(self, inputs):
         z_mean, z_log_var = inputs
         batch = tf.shape(z_mean)[0]
@@ -2353,6 +2444,7 @@ class Sampling(layers.Layer):
 
 
 import tensorflow as tf
+
 
 def binary_focal_loss(y_true,
                       y_pred,
