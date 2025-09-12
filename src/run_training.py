@@ -59,6 +59,7 @@ def load_embedding_table(lookup_path):
     global MHC_EMBEDDING_TABLE
     with np.load(lookup_path) as data:
         num_embeddings = len(data.files)
+        # store as float16 to save memory/bandwidth; compute will cast as needed
         table = np.zeros((num_embeddings, MAX_MHC_LEN, ESM_DIM), dtype=np.float16)
         for i in range(num_embeddings):
             table[i] = data[str(i)]
@@ -89,16 +90,23 @@ def _parse_tf_example(example_proto):
     # ... (MHC embedding lookup remains the same) ...
     embedding_id = tf.cast(parsed['embedding_id'], tf.int32)
     mhc_emb = tf.gather(MHC_EMBEDDING_TABLE, embedding_id)
-    mhc_emb = tf.cast(mhc_emb, tf.float32)
+    # cast to compute dtype for faster kernels
+    compute_dtype = tf.keras.mixed_precision.global_policy().compute_dtype
+    mhc_emb = tf.cast(mhc_emb, compute_dtype)
     # Create BLOSUM62 input features for the peptide
     pep_blossom62_input = tf.gather(BLOSUM62_TABLE, tf.cast(pep_indices, tf.int32))
+    pep_blossom62_input = tf.cast(pep_blossom62_input, compute_dtype)
+
     vocab_size_ohe = len(AA)  # This will be 21
     # Use the ohe_indices to create 21-dimensional one-hot vectors for both targets
+    # keep targets in float32 for numerically stable CE
     pep_ohe_target = tf.one_hot(pep_ohe_indices, depth=vocab_size_ohe, dtype=tf.float32)
     mhc_ohe_target = tf.one_hot(mhc_ohe_indices, depth=vocab_size_ohe, dtype=tf.float32)
+
     # Masks are based on the original indices which correctly identify padding
     pep_mask = tf.where(pep_indices == PAD_INDEX, PAD_TOKEN, NORM_TOKEN)
-    mhc_mask = tf.where(tf.reduce_all(mhc_emb == PAD_VALUE, axis=-1), PAD_TOKEN, NORM_TOKEN)
+    mhc_mask = tf.where(tf.reduce_all(tf.cast(mhc_emb, tf.float32) == PAD_VALUE, axis=-1), PAD_TOKEN, NORM_TOKEN)
+
     labels = tf.cast(parsed['label'], tf.int32)
     labels = tf.expand_dims(labels, axis=-1)
     return {
@@ -131,7 +139,8 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
         features["pep_mask"] = tf.tensor_scatter_nd_update(features["pep_mask"], shuffled_pep_indices,
                                                            tf.repeat(MASK_TOKEN, num_to_mask_pep))
         # Zero out the feature values for the masked positions
-        mask_updates_pep = tf.zeros([num_to_mask_pep, tf.shape(features["pep_blossom62"])[-1]]) + MASK_VALUE
+        feat_dtype = features["pep_blossom62"].dtype
+        mask_updates_pep = tf.fill([num_to_mask_pep, tf.shape(features["pep_blossom62"])[-1]], tf.cast(MASK_VALUE, feat_dtype))
         features["pep_blossom62"] = tf.tensor_scatter_nd_update(features["pep_blossom62"], shuffled_pep_indices,
                                                                 mask_updates_pep)
 
@@ -149,7 +158,8 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
         features["mhc_mask"] = tf.tensor_scatter_nd_update(features["mhc_mask"], shuffled_mhc_indices,
                                                            tf.repeat(MASK_TOKEN, num_to_mask_mhc))
         # Zero out the feature values for the masked positions
-        mask_updates_mhc = tf.zeros([num_to_mask_mhc, tf.shape(features["mhc_emb"])[-1]]) + MASK_VALUE
+        mhc_dtype = features["mhc_emb"].dtype
+        mask_updates_mhc = tf.fill([num_to_mask_mhc, tf.shape(features["mhc_emb"])[-1]], tf.cast(MASK_VALUE, mhc_dtype))
         features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], shuffled_mhc_indices, mask_updates_mhc)
 
     # --- OPTIONAL: IMPLEMENTATION OF FEATURE-DIMENSION MASKING ---
@@ -164,11 +174,10 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
             valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
 
             # Create a random mask for the feature dimensions
-            # Shape will be (num_valid_tokens, embedding_dim)
-            dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings)) < 0.15  # 15% chance to mask a feature
+            dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(0.15, features["mhc_emb"].dtype)
 
             # Apply the mask (multiply by 0 where True, 1 where False)
-            masked_embeddings = valid_embeddings * tf.cast(~dim_mask, tf.float32)
+            masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
 
             # Scatter the modified embeddings back into the original tensor
             features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], remaining_valid_mhc,
@@ -197,11 +206,10 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
 
     if is_training and apply_masking:
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
-    # Add num_parallel_calls to batch
+    # Correct: `batch` has no num_parallel_calls
     dataset = dataset.batch(
         batch_size,
-        drop_remainder=is_training,
-        num_parallel_calls=tf.data.AUTOTUNE
+        drop_remainder=is_training
     )
     dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
     return dataset
@@ -210,19 +218,34 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
 # ──────────────────────────────────────────────────────────────────────
 # Training & Evaluation Steps
 # ----------------------------------------------------------------------
-@tf.function(jit_compile=True)  # Enable XLA compilation for faster execution
+@tf.function()
 def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     """Compiled training step with proper metric updates."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
+        
+        # Check for NaN in model outputs
         raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
-        total_loss_weighted = (3 * raw_cls_loss) + (1.2 * raw_recon_loss_pep) + raw_recon_loss_mhc
+        
+        # Check for NaN/Inf in individual losses
+        raw_cls_loss = tf.where(tf.math.is_finite(raw_cls_loss), raw_cls_loss, 0.0)
+        raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
+        raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
+        
+        # Reduce loss weights to prevent instability
+        total_loss_weighted = raw_cls_loss + (0.5 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
 
     grads = tape.gradient(total_loss_weighted, model.trainable_variables)
+    
+    # Clip gradients to prevent explosion
+    grads, _ = tf.clip_by_global_norm(grads, clip_norm=1.0)
+    
+    # Handle mixed precision gradient scaling
     if mixed_precision:
         grads = optimizer.get_unscaled_gradients(grads)
+    
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
@@ -236,7 +259,7 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     metrics['cls_loss'].update_state(raw_cls_loss)
 
 
-@tf.function(jit_compile=True)  # Enable XLA compilation for faster execution
+@tf.function()
 def eval_step(model, batch_data, metrics):
     """Compiled evaluation step."""
     outputs = model(batch_data, training=False)
@@ -385,7 +408,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-4,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
         "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }
@@ -400,7 +423,7 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
 
-    tfrecord_dir = f"../data/tfrecords/fold_{fold_to_run:02d}/"
+    tfrecord_dir = f"../data/cross_validation_dataset/mhc{MHC_CLASS}/tfrecords/fold_{fold_to_run:02d}/"
 
     if not os.path.exists(tfrecord_dir) or not os.path.exists(os.path.join(tfrecord_dir, 'metadata.json')):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
