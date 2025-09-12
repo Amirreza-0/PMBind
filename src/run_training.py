@@ -220,11 +220,11 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
 # ----------------------------------------------------------------------
 @tf.function()
 def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
-    """Compiled training step with proper metric updates."""
+    """Compiled training step with proper mixed precision handling."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
         
-        # Check for NaN in model outputs
+        # Compute individual losses
         raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
@@ -234,19 +234,35 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         
-        # Reduce loss weights to prevent instability
-        total_loss_weighted = raw_cls_loss + (0.5 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
+        # Balanced loss weighting for stability
+        total_loss_weighted = (2.0 * raw_cls_loss) + (1.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
+        
+        # CRITICAL: Scale loss for mixed precision BEFORE gradient computation
+        if mixed_precision:
+            scaled_loss = optimizer.get_scaled_loss(total_loss_weighted)
+        else:
+            scaled_loss = total_loss_weighted
 
-    grads = tape.gradient(total_loss_weighted, model.trainable_variables)
+    # Compute gradients with respect to scaled loss
+    grads = tape.gradient(scaled_loss, model.trainable_variables)
     
-    # Clip gradients to prevent explosion
-    grads, _ = tf.clip_by_global_norm(grads, clip_norm=1.0)
+    # CRITICAL: Check for finite gradients BEFORE any processing
+    finite_grads = tf.reduce_all([tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None])
     
-    # Handle mixed precision gradient scaling
-    if mixed_precision:
-        grads = optimizer.get_unscaled_gradients(grads)
-    
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    if finite_grads:
+        if mixed_precision:
+            # Get unscaled gradients for clipping
+            grads = optimizer.get_unscaled_gradients(grads)
+        
+        # Clip gradients AFTER unscaling for mixed precision
+        grads, grad_norm = tf.clip_by_global_norm(grads, clip_norm=1.0)
+        
+        # Apply gradients
+        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    else:
+        # Skip this update due to non-finite gradients (loss scale overflow)
+        tf.print("⚠️  Non-finite gradients detected - skipping update")
+
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
