@@ -234,34 +234,35 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         
-        # Balanced loss weighting for stability
-        total_loss_weighted = (2.0 * raw_cls_loss) + (1.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
+        # Conservative loss weighting to prevent gradient explosion
+        total_loss_weighted = (1.0 * raw_cls_loss) + (0.3 * raw_recon_loss_pep) + (0.2 * raw_recon_loss_mhc)
         
-        # CRITICAL: Scale loss for mixed precision BEFORE gradient computation
-        if mixed_precision:
-            scaled_loss = optimizer.get_scaled_loss(total_loss_weighted)
-        else:
-            scaled_loss = total_loss_weighted
+        # Additional safety: cap extremely large loss values
+        total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
 
-    # Compute gradients with respect to scaled loss
-    grads = tape.gradient(scaled_loss, model.trainable_variables)
-    
-    # CRITICAL: Check for finite gradients BEFORE any processing
-    finite_grads = tf.reduce_all([tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None])
-    
-    if finite_grads:
-        if mixed_precision:
-            # Get unscaled gradients for clipping
-            grads = optimizer.get_unscaled_gradients(grads)
-        
-        # Clip gradients AFTER unscaling for mixed precision
-        grads, grad_norm = tf.clip_by_global_norm(grads, clip_norm=1.0)
-        
-        # Apply gradients
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
-    else:
-        # Skip this update due to non-finite gradients (loss scale overflow)
-        tf.print("⚠️  Non-finite gradients detected - skipping update")
+        # Compute gradients with respect to scaled loss
+        grads = tape.gradient(total_loss_weighted, model.trainable_variables)
+
+        # CRITICAL: Check for finite gradients BEFORE any processing
+        finite_grads = tf.reduce_all([tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None])
+
+        if finite_grads:
+            if mixed_precision:
+                # Get unscaled gradients for clipping
+                grads = optimizer.get_unscaled_gradients(grads)
+
+            # Clip gradients AFTER unscaling for mixed precision - more aggressive clipping
+            grads, grad_norm = tf.clip_by_global_norm(grads, clip_norm=0.5)
+
+            # Apply gradients
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+            # Monitor gradient norm for debugging
+            if tf.math.greater(grad_norm, 0.1):  # Only print if gradient norm is concerning
+                tf.print("🔍 Gradient norm:", grad_norm)
+        else:
+            # Skip this update due to non-finite gradients (loss scale overflow)
+            tf.print("⚠️  Non-finite gradients detected - skipping update")
 
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
@@ -424,9 +425,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-4,
-        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
-        "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 100, "LEARNING_RATE": 1e-3,
+        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.02,
+        "description": "Stable mixed precision training with conservative hyperparameters."
     }
 
     base_output_folder = "../results/PMBind_runs_optimized/"
