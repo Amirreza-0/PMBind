@@ -13,17 +13,10 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-import matplotlib.pyplot as plt
-import seaborn as sns
-from keras.layers import Conv1D
 
-from utils import (seq_to_onehot, AttentionLayer, PositionalEncoding, MaskedEmbedding,
-                       ConcatMask, ConcatBarcode, SplitLayer, OHE_to_seq, determine_ks_dict,
-                       SelfAttentionWith2DMask, AddGaussianNoise, RotaryPositionalEncoding,
-                       SubtractLayer, SubtractAttentionLayer, MaskedCategoricalCrossentropy,
-                       masked_categorical_crossentropy, RotaryPositionalEncoding,
-                        GlobalSTDPooling1D,GlobalMeanPooling1D, GlobalSTDPooling1D, GumbelSoftmax,
-                   AnchorPositionExtractor, OHEKmerWindows, Sampling)
+from utils import (AttentionLayer, PositionalEncoding, MaskedEmbedding,
+                       SelfAttentionWith2DMask, AddGaussianNoise,
+                       SubtractLayer,GlobalMeanPooling1D, GlobalSTDPooling1D)
 
 
 MASK_TOKEN = -1.0
@@ -221,8 +214,6 @@ def pmbind_multitask_subtract(max_pep_len: int,
     pmhc_subtracted = keras.layers.Permute((2, 1, 3), name="pmhc_subtracted_permute")(pmhc_subtracted) # (B, P, M, D)
 
     # join back to 2d (B, P+M, D)
-    # Reduce interaction tensor to per-position embeddings before concatenation.
-    # (B, P, M, D) -> (B, P, D) and (B, M, D), then concat -> (B, P+M, D)
     pep_from_interactions = layers.Lambda(lambda x: tf.reduce_mean(x, axis=2),
                                           name="pep_from_interactions")(pmhc_subtracted)  # (B, P, D)
     mhc_from_interactions = layers.Lambda(lambda x: tf.reduce_mean(x, axis=1),
@@ -234,9 +225,10 @@ def pmbind_multitask_subtract(max_pep_len: int,
     pooled_latent = GlobalMeanPooling1D(name="latent_sequence_pooling", axis=-1)(pmhc_subtracted) # (B, P+M)
 
     # pooled latent vector for classification
-    binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1")(pooled_latent) # (B, D)
+    binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1", kernel_regularizer=keras.regularizers.l2(0.01))(pooled_latent)
     binding_head = layers.GaussianDropout(0.2, name="binding_gaussian_dropout")(binding_head)
-    binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred")(binding_head) # (B, 1)
+    # Force numerically sensitive head to float32 under mixed precision
+    binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred", dtype="float32")(binding_head) # (B, 1)
 
     # -------------------------------------------------------------------
     # TASK 2: RECONSTRUCTION HEAD
@@ -351,7 +343,7 @@ def pmbind_multitask(max_pep_len: int,
 
     binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1", kernel_regularizer=keras.regularizers.l2(0.01))(pooled_latent)
     binding_head = layers.GaussianDropout((drop_out_rate*1.5), name="binding_gaussian_dropout")(binding_head)
-    binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred")(binding_head) # (B, 1)
+    binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred", dtype="float32")(binding_head) # (B, 1)
 
     # -------------------------------------------------------------------
     # TASK 2: RECONSTRUCTION HEAD
@@ -466,7 +458,7 @@ def pmbind_multitask(max_pep_len: int,
 #
 #     binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1")(pooled_latent)
 #     binding_head = layers.GaussianDropout(drop_out_rate, name="binding_gaussian_dropout")(binding_head)
-#     binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred")(binding_head) # (B, 1)
+#     binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred", dtype="float32")(binding_head) # (B, 1)
 #
 #     # -------------------------------------------------------------------
 #     # TASK 2: RECONSTRUCTION HEAD

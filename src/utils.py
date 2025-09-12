@@ -1,4 +1,6 @@
 import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 from keras.src.api_export import keras_export
 from keras.src.losses import LossFunctionWrapper
 from sklearn.model_selection import GroupShuffleSplit, StratifiedShuffleSplit
@@ -1193,13 +1195,16 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
 #         self.add_loss(total_loss)
 #         return y_pred
 
+# python
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='AddGaussianNoise')
 class AddGaussianNoise(layers.Layer):
     def __init__(self, std=0.1, **kw): super().__init__(**kw); self.std = std
 
     @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
     def call(self, x, training=None):
-        if training: return x + tf.random.normal(tf.shape(x), stddev=self.std)
+        if training:
+            noise = tf.random.normal(tf.shape(x), stddev=tf.cast(self.std, x.dtype), dtype=x.dtype)
+            return x + noise
         return x
 
 
@@ -1892,7 +1897,7 @@ class GlobalMeanPooling1D(layers.Layer):
         self.axis = axis
 
     @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
-    def call(self, input_tensor, ):
+    def call(self, input_tensor):
         """
         Computes the global mean pooling over the input tensor.
         :param input_tensor:
@@ -1918,7 +1923,7 @@ class GlobalSTDPooling1D(layers.Layer):
         self.axis = axis
 
     @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
-    def call(self, input_tensor, ):
+    def call(self, input_tensor):
         """
         Args:
             inputs: Input tensor of shape (B, N, D).
@@ -1928,40 +1933,40 @@ class GlobalSTDPooling1D(layers.Layer):
         pooled_std = tf.math.reduce_std(
             input_tensor, axis=self.axis, keepdims=False, name=None
         )
-        return pooled_std
+        return pooled_std + 1e-9  # avoid 0.0
 
 
-class GumbelSoftmax(keras.layers.Layer):
-    """
-    Gumbel-Softmax activation layer.
-
-    Args:
-        temperature (float): Temperature parameter for Gumbel-Softmax.
-    """
-
-    def __init__(self, temperature=0.2, name="gumble_softmax_layer"):
-        super(GumbelSoftmax, self).__init__(name=name)
-        self.temperature = temperature
-
-    def call(self, logits, training=None):
-        """
-        Applies Gumbel-Softmax.
-
-        Args:
-            logits: Input tensor of shape (B, N).
-            training: Whether the layer is in training mode (not used here but required by Layer API).
-
-        Returns:
-            Tensor of shape (B, N) with Gumbel-Softmax applied.
-        """
-        # Sample Gumbel noise
-        # Use tf.random.uniform for TensorFlow compatibility
-        U = tf.random.uniform(tf.shape(logits), minval=0, maxval=1)
-        gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20)  # Add small epsilon for numerical stability
-
-        # Apply Gumbel-Softmax formula
-        y = tf.exp((logits + gumbel_noise) / self.temperature)
-        return y / tf.reduce_sum(y, axis=-1, keepdims=True)
+# class GumbelSoftmax(keras.layers.Layer):
+#     """
+#     Gumbel-Softmax activation layer.
+#
+#     Args:
+#         temperature (float): Temperature parameter for Gumbel-Softmax.
+#     """
+#
+#     def __init__(self, temperature=0.2, name="gumble_softmax_layer"):
+#         super(GumbelSoftmax, self).__init__(name=name)
+#         self.temperature = temperature
+#
+#     def call(self, logits, training=None):
+#         """
+#         Applies Gumbel-Softmax.
+#
+#         Args:
+#             logits: Input tensor of shape (B, N).
+#             training: Whether the layer is in training mode (not used here but required by Layer API).
+#
+#         Returns:
+#             Tensor of shape (B, N) with Gumbel-Softmax applied.
+#         """
+#         # Sample Gumbel noise
+#         # Use tf.random.uniform for TensorFlow compatibility
+#         U = tf.random.uniform(tf.shape(logits), minval=0, maxval=1)
+#         gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20)  # Add small epsilon for numerical stability
+#
+#         # Apply Gumbel-Softmax formula
+#         y = tf.exp((logits + gumbel_noise) / self.temperature)
+#         return y / tf.reduce_sum(y, axis=-1, keepdims=True)
 
 
 # Reduced alphabet mapping based on MMseqs2
