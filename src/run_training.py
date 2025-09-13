@@ -110,12 +110,12 @@ def _parse_tf_example(example_proto):
     labels = tf.cast(parsed['label'], tf.int32)
     labels = tf.expand_dims(labels, axis=-1)
     return {
-        "pep_blossom62": pep_blossom62_input, # Shape: (..., 23)
+        "pep_blossom62": pep_blossom62_input,  # Shape: (..., 23)
         "pep_mask": pep_mask,
         "mhc_emb": mhc_emb,
         "mhc_mask": mhc_mask,
         "pep_ohe_target": pep_ohe_target,  # Shape: (..., 21)
-        "mhc_ohe_target": mhc_ohe_target, # Shape: (..., 21)
+        "mhc_ohe_target": mhc_ohe_target,  # Shape: (..., 21)
         "labels": labels
     }
 
@@ -140,7 +140,8 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
                                                            tf.repeat(MASK_TOKEN, num_to_mask_pep))
         # Zero out the feature values for the masked positions
         feat_dtype = features["pep_blossom62"].dtype
-        mask_updates_pep = tf.fill([num_to_mask_pep, tf.shape(features["pep_blossom62"])[-1]], tf.cast(MASK_VALUE, feat_dtype))
+        mask_updates_pep = tf.fill([num_to_mask_pep, tf.shape(features["pep_blossom62"])[-1]],
+                                   tf.cast(MASK_VALUE, feat_dtype))
         features["pep_blossom62"] = tf.tensor_scatter_nd_update(features["pep_blossom62"], shuffled_pep_indices,
                                                                 mask_updates_pep)
 
@@ -174,7 +175,8 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
             valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
 
             # Create a random mask for the feature dimensions
-            dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(0.15, features["mhc_emb"].dtype)
+            dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
+                0.15, features["mhc_emb"].dtype)
 
             # Apply the mask (multiply by 0 where True, 1 where False)
             masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
@@ -223,47 +225,38 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     """Compiled training step with proper mixed precision handling."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
-        
         # Compute individual losses
         raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
-        
         # Check for NaN/Inf in individual losses
         raw_cls_loss = tf.where(tf.math.is_finite(raw_cls_loss), raw_cls_loss, 0.0)
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
-        
-        # Conservative loss weighting to prevent gradient explosion
-        total_loss_weighted = (1.0 * raw_cls_loss) + (0.3 * raw_recon_loss_pep) + (0.2 * raw_recon_loss_mhc)
-        
-        # Additional safety: cap extremely large loss values
+        # Balanced loss weighting for stability
+        total_loss_weighted = (3.0 * raw_cls_loss) + (2.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
-
-        # Compute gradients with respect to scaled loss
-        grads = tape.gradient(total_loss_weighted, model.trainable_variables)
-
-        # CRITICAL: Check for finite gradients BEFORE any processing
-        finite_grads = tf.reduce_all([tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None])
-
-        if finite_grads:
-            if mixed_precision:
-                # Get unscaled gradients for clipping
-                grads = optimizer.get_unscaled_gradients(grads)
-
-            # Clip gradients AFTER unscaling for mixed precision - more aggressive clipping
-            grads, grad_norm = tf.clip_by_global_norm(grads, clip_norm=0.5)
-
-            # Apply gradients
+        if mixed_precision:
+            loss_scale = 100.0
+            grads = tape.gradient(total_loss_weighted * loss_scale, model.trainable_variables)
+            grads = [g / loss_scale if g is not None else 1e-9 for g in grads]
+            grads, _ = tf.clip_by_global_norm(grads, 10.0)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        else:
+            grads = tape.gradient(total_loss_weighted, model.trainable_variables)
+            grads, _ = tf.clip_by_global_norm(grads, 10.0)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-            # Monitor gradient norm for debugging
-            if tf.math.greater(grad_norm, 0.1):  # Only print if gradient norm is concerning
-                tf.print("🔍 Gradient norm:", grad_norm)
-        else:
-            # Skip this update due to non-finite gradients (loss scale overflow)
-            tf.print("⚠️  Non-finite gradients detected - skipping update")
-
+        # # CRITICAL: Check for finite gradients BEFORE any processing
+        # finite_grads = tf.reduce_all([tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None])
+        # if finite_grads:
+        #     # Clip gradients AFTER unscaling for mixed precision
+        #     grads, grad_norm = tf.clip_by_global_norm(grads * 100 , clip_norm=0.5)
+        #     # Apply gradients
+        #     optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        # else:
+        #     # Skip this update due to non-finite gradients (loss scale overflow)
+        #     tf.print("⚠️  Non-finite gradients detected - skipping update")
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
@@ -290,7 +283,7 @@ def eval_step(model, batch_data, metrics):
 # Main Training Function
 # ----------------------------------------------------------------------
 def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std,
-          resume_from_weights=None, enable_masking=True):
+          resume_from_weights=None, enable_masking=True, subset=1.0):
     """Fully optimized training function using the new data pipeline."""
 
     global MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS
@@ -301,6 +294,15 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS, train_samples, val_samples = metadata['MAX_PEP_LEN'], metadata[
         'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples', None), metadata.get(
         'val_samples', None)
+
+    # Apply subset to training samples
+    if train_samples:
+        original_train_samples = train_samples
+        train_samples = int(train_samples * subset)
+        val_samples = int(val_samples * subset) if val_samples else None
+        if subset < 1.0:
+            print(
+                f"Using {subset * 100:.1f}% subset of training data: {train_samples:,} / {original_train_samples:,} samples")
 
     if train_samples and val_samples:
         train_steps = train_samples // batch_size
@@ -319,8 +321,14 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     train_pattern = os.path.join(tfrecord_dir, "train_shard_*.tfrecord")
     val_pattern = os.path.join(tfrecord_dir, "validation_shard_*.tfrecord")
+
+    # Create dataset with subset applied via take() if needed
     train_ds = create_dataset(train_pattern, batch_size, is_training=True, apply_masking=enable_masking)
     val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False)
+
+    if subset < 1.0 and train_steps:
+        train_ds = train_ds.take(train_steps)
+        val_ds = val_ds.take(val_steps)
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
@@ -338,8 +346,11 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     model.summary()
 
     # save model config
+    config_data = model.get_config()
+    config_data['training_subset'] = subset  # Add subset info to config
+    config_data['validation_subset'] = subset
     with open(os.path.join(out_dir, "model_config.json"), "w") as f:
-        json.dump(model.get_config(), f, indent=4)
+        json.dump(config_data, f, indent=4)
 
     optimizer = keras.optimizers.Lion(learning_rate=lr)
     if mixed_precision:
@@ -350,7 +361,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         label_smoothing=0.15,
         gamma=3.0,
         apply_class_balancing=True,
-        alpha=0.95)
+        alpha=0.99)
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
         'train_auc': tf.keras.metrics.AUC(name='train_auc'),
@@ -364,6 +375,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     history = {k: [] for k in ["train_loss", "train_auc", "train_acc", "val_auc", "val_acc",
                                "cls_loss", "pep_loss", "mhc_loss"]}
+    history['subset'] = subset  # Store subset info in history
     best_val_auc = 0.0
 
     for epoch in range(epochs):
@@ -425,15 +437,15 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 100, "LEARNING_RATE": 1e-3,
-        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.02,
-        "description": "Stable mixed precision training with conservative hyperparameters."
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-5,
+        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
+        "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }
 
     base_output_folder = "../results/PMBind_runs_optimized/"
     run_id_base = 0
 
-    fold_to_run = args.fold # Get fold from args
+    fold_to_run = args.fold  # Get fold from args
     run_id = run_id_base + fold_to_run
     run_name = f"run_{run_id}_mhc{config['MHC_CLASS']}_dim{config['EMBED_DIM']}_h{config['HEADS']}_fold{fold_to_run}"
     out_dir = os.path.join(base_output_folder, run_name)
@@ -461,8 +473,9 @@ def main(args):
         heads=config["HEADS"],
         noise_std=config["NOISE_STD"],
         resume_from_weights=args.resume_from,
-        enable_masking=True
-   )
+        enable_masking=True,
+        subset=args.subset
+    )
 
 
 if __name__ == "__main__":
@@ -482,6 +495,8 @@ if __name__ == "__main__":
         pass
     parser = argparse.ArgumentParser(description="Run training for specified folds.")
     parser.add_argument("--fold", type=int, required=True, help="Fold number to run (e.g., 0-4).")
-    parser.add_argument("--resume_from", type=str, default=None, help="Path to model weights (.h5 file) to resume training from.")
+    parser.add_argument("--resume_from", type=str, default=None,
+                        help="Path to model weights (.h5 file) to resume training from.")
+    parser.add_argument("--subset", type=float, default=1.0, help="Subset percentage of training data to use.")
     args = parser.parse_args()
     main(args)
