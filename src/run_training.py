@@ -236,27 +236,22 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         # Balanced loss weighting for stability
         total_loss_weighted = (3.0 * raw_cls_loss) + (2.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
+        
+        # Use proper LossScaleOptimizer methods for mixed precision
         if mixed_precision:
-            loss_scale = 100.0
-            grads = tape.gradient(total_loss_weighted * loss_scale, model.trainable_variables)
-            grads = [g / loss_scale if g is not None else 1e-9 for g in grads]
-            grads, _ = tf.clip_by_global_norm(grads, 10.0)
+            # Get scaled loss using LossScaleOptimizer method
+            scaled_loss = optimizer.get_scaled_loss(total_loss_weighted)
+            grads = tape.gradient(scaled_loss, model.trainable_variables)
+            # Unscale gradients using LossScaleOptimizer method
+            grads = optimizer.get_unscaled_gradients(grads)
+            # Clip gradients after unscaling
+            grads, _ = tf.clip_by_global_norm(grads, 1.0)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
         else:
             grads = tape.gradient(total_loss_weighted, model.trainable_variables)
-            grads, _ = tf.clip_by_global_norm(grads, 10.0)
+            grads, _ = tf.clip_by_global_norm(grads, 1.0)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
-        # # CRITICAL: Check for finite gradients BEFORE any processing
-        # finite_grads = tf.reduce_all([tf.reduce_all(tf.math.is_finite(g)) for g in grads if g is not None])
-        # if finite_grads:
-        #     # Clip gradients AFTER unscaling for mixed precision
-        #     grads, grad_norm = tf.clip_by_global_norm(grads * 100 , clip_norm=0.5)
-        #     # Apply gradients
-        #     optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        # else:
-        #     # Skip this update due to non-finite gradients (loss scale overflow)
-        #     tf.print("⚠️  Non-finite gradients detected - skipping update")
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
@@ -352,9 +347,17 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     with open(os.path.join(out_dir, "model_config.json"), "w") as f:
         json.dump(config_data, f, indent=4)
 
-    optimizer = keras.optimizers.Lion(learning_rate=lr)
+    # Create Lion optimizer with proper mixed precision support
+    base_optimizer = keras.optimizers.Lion(learning_rate=lr)
     if mixed_precision:
-        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
+        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
+            base_optimizer,
+            initial_loss_scale=32768.0,  # Higher initial scale
+            dynamic_growth_steps=2000    # Adapt every 2000 steps
+        )
+        print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
+    else:
+        optimizer = base_optimizer
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
         from_logits=False,
         reduction="sum_over_batch_size",
