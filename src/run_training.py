@@ -239,12 +239,10 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         
         # Use proper LossScaleOptimizer methods for mixed precision
         if mixed_precision:
-            # Get scaled loss using LossScaleOptimizer method
-            scaled_loss = optimizer.get_scaled_loss(total_loss_weighted)
+            # Scale loss using the correct TensorFlow 2.16+ API
+            scaled_loss = optimizer.scale_loss(total_loss_weighted)
             grads = tape.gradient(scaled_loss, model.trainable_variables)
-            # Unscale gradients using LossScaleOptimizer method
-            grads = optimizer.get_unscaled_gradients(grads)
-            # Clip gradients after unscaling
+            # Gradient unscaling is handled automatically by apply_gradients
             grads, _ = tf.clip_by_global_norm(grads, 1.0)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
         else:
