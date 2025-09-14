@@ -170,6 +170,13 @@ def create_artifacts(df_path, output_dir, name, args):
 
     df_full['embedding_id'] = df_full['_emb_key'].map(key_to_id_map)
 
+    # Count labels directly from the DataFrame ---
+    print(f"Counting labels for {name} set...")
+    label_counts = df_full['assigned_label'].value_counts()
+    pos_count = int(label_counts.get(1, 0)) # Use .get() for safety
+    neg_count = int(label_counts.get(0, 0)) # Convert to native int for JSON
+    print(f"✓ Found {pos_count:,} positive and {neg_count:,} negative samples.")
+
     num_workers = max(1, mp.cpu_count() // 2)
     chunk_size = int(np.ceil(len(df_full) / (num_workers * 4)))
     chunks = [df_full.iloc[i:i + chunk_size] for i in range(0, len(df_full), chunk_size)]
@@ -182,6 +189,9 @@ def create_artifacts(df_path, output_dir, name, args):
                   desc=f"Writing {name} TFRecords"))
 
     print(f"✓ All TFRecord shards for {name} created successfully in {output_dir}")
+
+    # Return the calculated counts ---
+    return pos_count, neg_count
 
 
 def main(args):
@@ -207,10 +217,28 @@ def main(args):
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    metadata = {'MAX_PEP_LEN': MAX_PEP_LEN, 'MAX_MHC_LEN': MAX_MHC_LEN, 'ESM_DIM': ESM_DIM, 'MHC_CLASS': MHC_CLASS,
-                'train_samples': len(df_train), 'val_samples': len(df_val)}
-    with open(os.path.join(args.output_dir, 'metadata.json'), 'w') as f:
-        json.dump(metadata, f, indent=4)
+    # Capture the returned counts from the function calls
+    train_pos, train_neg = create_artifacts(args.train_path, args.output_dir, "train", args)
+    val_pos, val_neg = create_artifacts(args.val_path, args.output_dir, "validation", args)
+
+    print("\nWriting final metadata file...")
+    metadata = {
+        'MAX_PEP_LEN': MAX_PEP_LEN,
+        'MAX_MHC_LEN': MAX_MHC_LEN,
+        'ESM_DIM': ESM_DIM,
+        'MHC_CLASS': MHC_CLASS,
+        'train_samples_raw_parquet': len(df_train),
+        'val_samples_raw_parquet': len(df_val),
+        'train_samples_final': train_pos + train_neg,
+        'val_samples_final': val_pos + val_neg,
+        'train_pos': train_pos,
+        'train_neg': train_neg,
+        'val_pos': val_pos,
+        'val_neg': val_neg
+    }
+    metadata_path = os.path.join(args.output_dir, 'metadata.json')
+    with open(metadata_path, 'w') as f:
+       json.dump(metadata, f, indent=4)
 
     create_artifacts(args.train_path, args.output_dir, "train", args)
     create_artifacts(args.val_path, args.output_dir, "validation", args)
