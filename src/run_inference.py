@@ -1,230 +1,179 @@
-import csv
-import sys
-import re
-import numpy as np
-import pandas as pd
-import tensorflow as tf
-import json
+#!/usr/bin/env python
+"""
+run_all_folds_inference.py: Orchestrates inference runs for ALL folds.
+- NO command-line arguments are needed.
+- Edit the CONFIG dictionary below to set your paths.
+- The script automatically finds the model directory for each fold.
+"""
 import os
-from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
+import sys
+import json
+import pandas as pd
+import subprocess
+import re
 
-# --- Import necessary utilities and model definitions ---
-from utils import (NORM_TOKEN, PAD_TOKEN, PAD_VALUE, BLOSUM62,
-                   AMINO_ACID_VOCAB, PAD_INDEX, AA)
-from models import pmbind_multitask as pmbind
-from visualizations import visualize_inference_results
-
-# --- Globals for the high-performance tf.data pipeline ---
-MHC_EMBEDDING_TABLE = None
-BLOSUM62_TABLE = None
-MAX_PEP_LEN = 0
-MAX_MHC_LEN = 0
-ESM_DIM = 0
-
-
-# --- On-the-fly TFRecord Parsing Function (identical to training) ---
-def _parse_tf_example(example_proto):
-    feature_description = {
-        'pep_indices': tf.io.FixedLenFeature([], tf.string),
-        'mhc_indices': tf.io.FixedLenFeature([], tf.string),
-        'embedding_id': tf.io.FixedLenFeature([], tf.int64),
-        'label': tf.io.FixedLenFeature([], tf.int64),
-    }
-    parsed = tf.io.parse_single_example(example_proto, feature_description)
-
-    pep_indices = tf.io.parse_tensor(parsed['pep_indices'], out_type=tf.int8)
-    mhc_indices = tf.io.parse_tensor(parsed['mhc_indices'], out_type=tf.int8)
-
-    embedding_id = tf.cast(parsed['embedding_id'], tf.int32)
-    mhc_emb = tf.gather(MHC_EMBEDDING_TABLE, embedding_id)
-    mhc_emb = tf.cast(mhc_emb, tf.float32)
-
-    pep_blossom62_input = tf.gather(BLOSUM62_TABLE, tf.cast(pep_indices, tf.int32))
-
-    vocab_size_ohe = len(AA)
-    # Create dummy pep_ohe_target and mhc_ohe_target as zeros for inference
-    pep_ohe_target = tf.zeros((tf.shape(pep_indices)[0], vocab_size_ohe), dtype=tf.float32)
-    mhc_ohe_target = tf.zeros((tf.shape(mhc_indices)[0], vocab_size_ohe), dtype=tf.float32)
-
-    pep_mask = tf.where(pep_indices == PAD_INDEX, PAD_TOKEN, NORM_TOKEN)
-    mhc_mask = tf.where(tf.reduce_all(mhc_emb == PAD_VALUE, axis=-1), PAD_TOKEN, NORM_TOKEN)
-
-    labels = tf.cast(parsed['label'], tf.int32)
-    labels = tf.expand_dims(labels, axis=-1)
-
-    return {
-        "pep_blossom62": pep_blossom62_input, "pep_mask": pep_mask,
-        "mhc_emb": mhc_emb, "mhc_mask": mhc_mask,
-        "pep_ohe_target": pep_ohe_target, "mhc_ohe_target": mhc_ohe_target,
-        "labels": labels
-    }
+# ==============================================================================
+# --- CONFIGURATION: EDIT THESE PATHS ---
+# ==============================================================================
+CONFIG = {
+    # Directory containing all your trained model folders (e.g., run_..._fold0, run_..._fold1)
+    "BASE_MODEL_DIR": "../results/PMBind_best/",
+    # Base directory where all inference output will be saved.
+    "BASE_OUTPUT_FOLDER": "../results/PMBind_results",
+    # Root directory of the cross-validation dataset.
+    "DATA_ROOT": "../data/cross_validation_dataset",
+    # Directory containing the ESM embedding files (.npz and .csv).
+    "EMBEDDING_DIR": "../results/ESM/esm3-open/PMGen_whole_seq_/",
+    # Full path to the aligned allele sequence CSV file.
+    "ALLELE_SEQ_PATH": "../data/alleles/aligned_PMGen_class_1.csv",
+    # List of folds to run inference on. range(5) means folds 1, 2, 3, 4, 5
+    "FOLDS_TO_RUN": range(1, 2),
+    # MHC Class (1 or 2)
+    "MHC_CLASS": 1
+}
 
 
-def create_inference_dataset_from_tfrecords(tfrecord_pattern, batch_size):
-    """Creates a high-performance tf.data.Dataset for inference from TFRecords."""
-    file_list = tf.io.gfile.glob(tfrecord_pattern)
-    if not file_list:
-        raise FileNotFoundError(f"No TFRecord files found for pattern: {tfrecord_pattern}")
+# ==============================================================================
 
-    dataset = tf.data.TFRecordDataset(file_list, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
-    dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-    return dataset
+class Tee:
+    """Helper class to redirect stdout to both console and file."""
 
+    def __init__(self, *files):
+        self.files = files
 
-def infer_on_dataset(model, tfrecord_dir, original_parquet_path, dataset_name, out_dir, batch_size):
-    """Runs the full inference pipeline using the FAST TFRecord method."""
-    global MHC_EMBEDDING_TABLE, BLOSUM62_TABLE
+    def write(self, obj):
+        for f in self.files:
+            try:
+                f.write(obj)
+                f.flush()
+            except Exception:
+                pass
 
-    print(f"\n--- Starting FAST inference on: {dataset_name} ---")
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Note: The lookup table and TFRecords must correspond to the original_parquet_path
-    # This assumes create_tfrecords.py was run on that parquet file.
-    lookup_name = "validation_mhc_embedding_lookup.npz" if "validation" in dataset_name else "train_mhc_embedding_lookup.npz"
-    lookup_path = os.path.join(tfrecord_dir, lookup_name)
-    if not os.path.exists(lookup_path):
-        raise FileNotFoundError(f"Required embedding lookup file not found: {lookup_path}")
-
-    with np.load(lookup_path) as data:
-        num_embeddings = len(data.files)
-        table = np.zeros((num_embeddings, MAX_MHC_LEN, ESM_DIM), dtype=np.float16)
-        for i in range(num_embeddings):
-            table[i] = data[str(i)]
-    MHC_EMBEDDING_TABLE = tf.constant(table)
-
-    # Create the high-performance dataset
-    shard_name = "validation_shard_*.tfrecord" if "validation" in dataset_name else "train_shard_*.tfrecord"
-    tfrecord_pattern = os.path.join(tfrecord_dir, shard_name)
-    dataset = create_inference_dataset_from_tfrecords(tfrecord_pattern, batch_size)
-
-    # Run batched inference
-    all_predictions, all_labels = [], []
-    for batch in tqdm(dataset, desc=f"Predicting on {dataset_name}", file=sys.stdout):
-        outputs = model(batch, training=False)
-        all_predictions.append(outputs["cls_ypred"].numpy())
-        all_labels.append(batch["labels"].numpy())
-
-    all_predictions = np.concatenate(all_predictions, axis=0).squeeze()
-    all_labels = np.concatenate(all_labels, axis=0).squeeze()
-
-    # Load original data to merge predictions with metadata
-    df_original = pd.read_parquet(original_parquet_path)
-    # The TFRecord creation process filters out bad data, so the result might be shorter.
-    df_results = df_original.iloc[:len(all_predictions)].copy()
-    df_results["prediction_score"] = all_predictions
-    df_results["prediction_label"] = (all_predictions >= 0.5).astype(int)
-
-    output_path = os.path.join(out_dir, f"inference_results_{dataset_name}.csv")
-    df_results.to_csv(output_path, index=False)
-    print(f"✓ Inference results saved to {output_path}")
-
-    # Visualization and summary
-    if 'assigned_label' in df_results.columns:
-        visualize_inference_results(df_results, all_labels, all_predictions, out_dir, dataset_name)
-
-        auc = roc_auc_score(all_labels, all_predictions)
-        ap = average_precision_score(all_labels, all_predictions)
-        cm = confusion_matrix(all_labels, df_results["prediction_label"])
-        tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-        summary_path = os.path.join(os.path.dirname(out_dir.rstrip('/')), "inference_summary.csv")
-        is_new_file = not os.path.exists(summary_path)
-        with open(summary_path, 'a', newline='') as f:
-            writer = csv.writer(f)
-            if is_new_file:
-                writer.writerow(['dataset', 'num_samples', 'AUC', 'AP', 'TP', 'TN', 'FP', 'FN'])
-            writer.writerow([dataset_name, len(df_results), f"{auc:.4f}", f"{ap:.4f}", tp, tn, fp, fn])
-        print(f"✓ Summary for {dataset_name} appended to {summary_path}")
+    def flush(self):
+        for f in self.files:
+            try:
+                f.flush()
+            except Exception:
+                pass
 
 
-def run_all_inferences(run_dir, config, fold):
-    """Orchestrates high-performance inference on all datasets for a given model run."""
-    global MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, BLOSUM62_TABLE
+def find_model_dir_for_fold(base_dir, fold_num):
+    """Finds the model directory corresponding to a specific fold."""
+    for dirname in os.listdir(base_dir):
+        path = os.path.join(base_dir, dirname)
+        if os.path.isdir(path) and f"_fold{fold_num}" in dirname:
+            return path
+    return None
 
-    print(f"\n{'=' * 80}\nStarting High-Performance Inference for Fold {fold}\n{'=' * 80}")
 
-    # Load metadata from the TRAINING TFRecord directory, as this defines the model shape
-    train_tfrecord_dir = f"../data/tfrecords/fold_{fold:02d}"
-    with open(os.path.join(train_tfrecord_dir, 'metadata.json'), 'r') as f:
-        metadata = json.load(f)
-    MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM = metadata['MAX_PEP_LEN'], metadata['MAX_MHC_LEN'], metadata['ESM_DIM']
+def run_inference_for_fold(model_dir, base_output_folder, fold):
+    """Sets up paths and orchestrates calls to simple_infer.py for a single fold."""
 
-    # Initialize the BLOSUM62 lookup table once
-    _blosum_vectors = [BLOSUM62[aa] for aa in AMINO_ACID_VOCAB]
-    _blosum_vectors.append([PAD_VALUE] * len(_blosum_vectors[0]))
-    BLOSUM62_TABLE = tf.constant(np.array(_blosum_vectors), dtype=tf.float32)
+    mhc_class_str = f"mhc{CONFIG['MHC_CLASS']}"
+    config_path = os.path.join(model_dir, "config.json")
+    model_weights_path = os.path.join(model_dir, "best_model.weights.h5")
 
-    # Load and build the trained model
-    model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=config['EMBED_DIM'],
-                   heads=config['HEADS'], noise_std=0.0, latent_dim=config['EMBED_DIM'] * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=0.0)
-
-    blosum_dim = len(next(iter(BLOSUM62.values())))
-    dummy_input = {
-        "pep_blossom62": tf.zeros((1, MAX_PEP_LEN, blosum_dim), dtype=tf.float32),
-        "pep_mask": tf.zeros((1, MAX_PEP_LEN), dtype=tf.float32),
-        "mhc_emb": tf.zeros((1, MAX_MHC_LEN, ESM_DIM), dtype=tf.float32),
-        "mhc_mask": tf.zeros((1, MAX_MHC_LEN), dtype=tf.float32),
-    }
-    model(dummy_input)
-
-    model_weights_path = os.path.join(run_dir, "best_model.weights.h5")
     if not os.path.exists(model_weights_path):
-        raise FileNotFoundError(f"Model weights not found at {model_weights_path}.")
-    model.load_weights(model_weights_path)
-    print("✓ Trained model loaded successfully.")
+        print(f"ERROR: Model weights not found at {model_weights_path}. Skipping.")
+        return
 
-    # --- Define all datasets to be processed ---
-    # This dictionary maps a dataset name to its TFRecord directory and original Parquet path
-    mhc_class = config['MHC_CLASS']
-    parquet_base_dir = f"../data/cross_validation_dataset/mhc{mhc_class}"
-    tfrecord_base_dir = f"../data/tfrecords"
+    fold_dir_base = os.path.join(CONFIG['DATA_ROOT'], mhc_class_str, "cv_folds")
 
-    datasets = {
-        "validation": {
-            "tfrecord_dir": f"{tfrecord_base_dir}/fold_{fold:02d}",
-            "parquet_path": f"{parquet_base_dir}/cv_folds/fold_{fold:02d}_val.parquet"
-        },
-        "test": {
-            "tfrecord_dir": f"{tfrecord_base_dir}/test_set",  # Assumes you created this
-            "parquet_path": f"{parquet_base_dir}/test_set_rarest_alleles.parquet"
-        },
+    paths = {
+        "train": os.path.join(fold_dir_base, f"fold_{fold:02d}_train.parquet"),
+        "val": os.path.join(fold_dir_base, f"fold_{fold:02d}_val.parquet"),
+        "test": os.path.join(os.path.dirname(fold_dir_base), "test_set_rarest_alleles.parquet"),
+        "tval": os.path.join(os.path.dirname(fold_dir_base), "tval_set_rarest_alleles.parquet"),
+        "embed_npz": os.path.join(CONFIG['EMBEDDING_DIR'], f"{mhc_class_str}_encodings.npz"),
+        "embed_key": os.path.join(CONFIG['EMBEDDING_DIR'], f"{mhc_class_str}_encodings.csv"),
     }
 
-    # --- Loop and run inference on each dataset ---
-    for name, paths in datasets.items():
-        if os.path.exists(paths["tfrecord_dir"]) and os.path.exists(paths["parquet_path"]):
-            infer_out_dir = os.path.join(run_dir, f"inference_{name}")
-            infer_on_dataset(model, paths["tfrecord_dir"], paths["parquet_path"], name, infer_out_dir,
-                             config['BATCH_SIZE'])
-        else:
-            print(f"Warning: Artifacts for '{name}' not found, skipping.")
-            print(f"  - Searched for TFRecords in: {paths['tfrecord_dir']}")
-            print(f"  - Searched for Parquet file: {paths['parquet_path']}")
-            print(f"  - Please run create_tfrecords.py on this dataset first.")
+    # --- Run Inference on Standard Datasets ---
+    for dset_name in ["test", "tval", "val", "train"]:
+        print(f"\n--- Starting Inference on {dset_name.upper()} Set ---")
+        data_path = paths[dset_name]
+
+        # Create subset for large files
+        if dset_name in ["train", "val"]:
+            df_full = pd.read_parquet(data_path)
+            if len(df_full) > 100000:
+                print(f"Creating a stratified subset of 100k samples for {dset_name}...")
+                df_subset = df_full.groupby('assigned_label', group_keys=False).apply(
+                    lambda x: x.sample(n=50000, random_state=42) if len(x) > 50000 else x
+                ).reset_index(drop=True)
+                subset_path = os.path.join(base_output_folder, f"{dset_name}_subset.parquet")
+                df_subset.to_parquet(subset_path)
+                data_path = subset_path
+
+        infer_out_dir = os.path.join(base_output_folder, f"inference_{dset_name}")
+
+        cmd = [
+            "python", "infer.py",
+            "--model_weights_path", model_weights_path, "--config_path", config_path,
+            "--df_path", data_path, "--out_dir", infer_out_dir, "--name", dset_name,
+            "--allele_seq_path", CONFIG['ALLELE_SEQ_PATH'],
+            "--embedding_key_path", paths["embed_key"], "--embedding_npz_path", paths["embed_npz"],
+        ]
+        subprocess.run(cmd, check=True)
+
+    # --- Run Joint Inference on Train + Test ---
+    print(f"\n--- Starting Joint Inference on TRAIN+TEST ---")
+    df_train = pd.read_parquet(paths["train"])
+    df_train['source'] = 'train'
+    df_test = pd.read_parquet(paths["test"])
+    df_test['source'] = 'test'
+    df_joint = pd.concat([df_train, df_test], ignore_index=True)
+    joint_data_path = os.path.join(base_output_folder, "joint_train_test_data.parquet")
+    df_joint.to_parquet(joint_data_path)
+
+    joint_infer_out_dir = os.path.join(base_output_folder, "inference_train_test_joint")
+    cmd = [
+        "python", "infer.py",
+        "--model_weights_path", model_weights_path, "--config_path", config_path,
+        "--df_path", joint_data_path, "--out_dir", joint_infer_out_dir, "--name", "train_test_joint",
+        "--allele_seq_path", CONFIG['ALLELE_SEQ_PATH'],
+        "--embedding_key_path", paths["embed_key"], "--embedding_npz_path", paths["embed_npz"],
+    ]
+    subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python inference.py <path_to_run_directory>")
-        sys.exit(1)
+    os.makedirs(CONFIG["BASE_OUTPUT_FOLDER"], exist_ok=True)
 
-    run_dir = sys.argv[1]
+    for fold_number in CONFIG["FOLDS_TO_RUN"]:
+        print(f"\n{'=' * 80}")
+        print(f"STARTING INFERENCE FOR FOLD {fold_number}")
+        print(f"{'=' * 80}")
 
-    fold_match = re.search(r'fold(\d+)', run_dir)
-    if not fold_match:
-        print(f"Error: Could not automatically determine fold number from run directory path: {run_dir}")
-        sys.exit(1)
+        # Find the model directory for the current fold
+        model_directory = find_model_dir_for_fold(CONFIG["BASE_MODEL_DIR"], fold_number)
 
-    fold = int(fold_match.group(1))
+        if not model_directory:
+            print(
+                f"WARNING: Could not find a trained model directory for fold {fold_number} in '{CONFIG['BASE_MODEL_DIR']}'. Skipping.")
+            continue
 
-    config_path = os.path.join(run_dir, 'config.json')
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found at {config_path}")
+        print(f"Found model for fold {fold_number} at: {model_directory}")
 
-    with open(config_path, 'r') as f:
-        config = json.load(f)
+        # Setup a specific output directory and log file for this fold
+        fold_output_folder = os.path.join(CONFIG["BASE_OUTPUT_FOLDER"], f"inference_run_fold_{fold_number}")
+        os.makedirs(fold_output_folder, exist_ok=True)
 
-    run_all_inferences(run_dir, config, fold)
+        log_file_path = os.path.join(fold_output_folder, "orchestrator.log")
+        original_stdout = sys.stdout
+
+        try:
+            with open(log_file_path, 'w') as log_file:
+                sys.stdout = Tee(original_stdout, log_file)
+                run_inference_for_fold(
+                    model_dir=model_directory,
+                    base_output_folder=fold_output_folder,
+                    fold=fold_number
+                )
+        finally:
+            sys.stdout = original_stdout
+            print(f"Completed inference for fold {fold_number}. Log saved to {log_file_path}")
+
+    print(f"\n{'=' * 80}")
+    print("ALL FOLDS PROCESSED.")
+    print(f"{'=' * 80}")
