@@ -226,7 +226,7 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
         # Compute individual losses
-        raw_cls_loss = focal_loss_fn(batch_data["labels"], outputs["cls_ypred"])
+        raw_cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
         # Check for NaN/Inf in individual losses
@@ -234,7 +234,7 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         # Balanced loss weighting for stability
-        total_loss_weighted = (3.0 * raw_cls_loss) + (2.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
+        total_loss_weighted = (0.5 * raw_cls_loss) + (1.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
         
         # Use proper LossScaleOptimizer methods for mixed precision
@@ -254,8 +254,8 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
 
-    metrics['train_acc'].update_state(labels_flat, preds_flat)
-    metrics['train_auc'].update_state(labels_flat, preds_flat)
+    metrics['train_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['train_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(raw_recon_loss_pep)
     metrics['mhc_loss'].update_state(raw_recon_loss_mhc)
@@ -268,8 +268,8 @@ def eval_step(model, batch_data, metrics):
     outputs = model(batch_data, training=False)
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
-    metrics['val_acc'].update_state(labels_flat, preds_flat)
-    metrics['val_auc'].update_state(labels_flat, preds_flat)
+    metrics['val_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['val_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -285,8 +285,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     with open(os.path.join(tfrecord_dir, 'metadata.json'), 'r') as f:
         metadata = json.load(f)
     MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS, train_samples, val_samples = metadata['MAX_PEP_LEN'], metadata[
-        'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples', None), metadata.get(
-        'val_samples', None)
+        'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples_final', None), metadata.get(
+        'val_samples_final', None)
 
     # Apply subset to training samples
     if train_samples:
@@ -350,7 +350,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     if mixed_precision:
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
             base_optimizer,
-            initial_loss_scale=32768.0,  # Higher initial scale
+            initial_scale=32768.0,  # Higher initial scale
             dynamic_growth_steps=2000    # Adapt every 2000 steps
         )
         print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
@@ -359,10 +359,10 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
         from_logits=False,
         reduction="sum_over_batch_size",
-        label_smoothing=0.15,
+        label_smoothing=0.05,
         gamma=3.0,
         apply_class_balancing=True,
-        alpha=0.99)
+        alpha=0.98)
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
         'train_auc': tf.keras.metrics.AUC(name='train_auc'),
@@ -438,7 +438,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-5,
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-4,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
         "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }

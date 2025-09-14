@@ -566,7 +566,7 @@ class MaskedEmbedding(keras.layers.Layer):
         self.mask_token = mask_token
         self.pad_token = pad_token
 
-    @tf.function(reduce_retracing=True, experimental_relax_shapes=True)
+    @tf.function(reduce_retracing=True)
     def call(self, x, mask):
         """
         Args:
@@ -624,7 +624,7 @@ class PositionalEncoding(keras.layers.Layer):
         # store in compute dtype to reduce casts
         self.pos_encoding = tf.cast(pos_encoding, dtype=self.compute_dtype)
 
-    @tf.function(reduce_retracing=True, experimental_relax_shapes=True)
+    @tf.function(reduce_retracing=True)
     def call(self, x, mask):
         """
         Args:
@@ -806,7 +806,7 @@ class ConcatMask(keras.layers.Layer):
     def __init__(self, name='concat_mask'):
         super().__init__(name=name)
 
-    @tf.function(reduce_retracing=True, experimental_relax_shapes=True)
+    @tf.function(reduce_retracing=True)
     def call(self, mask1, mask2):
         """
         Args:
@@ -1100,7 +1100,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
             # q/k have shape (B, H, S, D): sequence_axis=2, feature_axis=-1
             self.rope = RotaryEmbedding(sequence_axis=2, feature_axis=-1, name=f'rope_{self.name}')
 
-    @tf.function(experimental_relax_shapes=True)
+    @tf.function(reduce_retracing=True)
     def call(self, x_pmhc, p_mask, m_mask):
         """
         Args:
@@ -1200,7 +1200,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
 class AddGaussianNoise(layers.Layer):
     def __init__(self, std=0.1, **kw): super().__init__(**kw); self.std = std
 
-    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
+    @tf.function(reduce_retracing=True)
     def call(self, x, training=None):
         if training:
             noise = tf.random.normal(tf.shape(x), stddev=tf.cast(self.std, x.dtype), dtype=x.dtype)
@@ -1431,7 +1431,7 @@ class SubtractLayer(keras.layers.Layer):
         self.mask_token = mask_token
         self.pad_token = pad_token
 
-    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
+    @tf.function(reduce_retracing=True)
     def call(self, peptide, pep_mask, mhc, mhc_mask):
         B = tf.shape(peptide)[0]
         P = tf.shape(peptide)[1]
@@ -1896,7 +1896,7 @@ class GlobalMeanPooling1D(layers.Layer):
         self.name = name
         self.axis = axis
 
-    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
+    @tf.function(reduce_retracing=True)
     def call(self, input_tensor):
         """
         Computes the global mean pooling over the input tensor.
@@ -1922,7 +1922,7 @@ class GlobalSTDPooling1D(layers.Layer):
         super(GlobalSTDPooling1D, self).__init__(name=name)
         self.axis = axis
 
-    @tf.function(experimental_relax_shapes=True, reduce_retracing=True)
+    @tf.function(reduce_retracing=True)
     def call(self, input_tensor):
         """
         Args:
