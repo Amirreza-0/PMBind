@@ -354,8 +354,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     if mixed_precision:
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
             base_optimizer,
-            initial_scale=32768.0,  # Higher initial scale
-            dynamic_growth_steps=2000  # Adapt every 2000 steps
+            #initial_scale=32768.0,  # Higher initial scale
+            #dynamic_growth_steps=2000  # Adapt every 2000 steps
         )
         print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
     else:
