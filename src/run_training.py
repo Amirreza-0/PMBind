@@ -284,9 +284,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     with open(os.path.join(tfrecord_dir, 'metadata.json'), 'r') as f:
         metadata = json.load(f)
     MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS, train_samples, val_samples = metadata['MAX_PEP_LEN'], metadata[
-        'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples_final',
+        'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples',
                                                                                  None), metadata.get(
-        'val_samples_final', None)
+        'val_samples', None)
 
     # Apply subset to training samples
     if train_samples:
