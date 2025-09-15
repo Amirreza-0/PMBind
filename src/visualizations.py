@@ -3,7 +3,7 @@
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 import os
-from utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask, ConcatBarcode, \
+from .utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask, \
     MaskedEmbedding
 import uuid
 import matplotlib.pyplot as plt
@@ -14,7 +14,7 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 from kneed import KneeLocator
 import matplotlib.colors as mcolors
-from utils import reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython
+from .utils import reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython
 import os
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, confusion_matrix
 import matplotlib.pyplot as plt
@@ -275,8 +275,19 @@ def _plot_umap(
                 tick_positions = [0, n_labels - 1]
                 tick_labels = [unique_labels[0], unique_labels[-1]]
 
+            # Format numeric tick labels to show fewer decimal places
+            formatted_tick_labels = []
+            for label in tick_labels:
+                try:
+                    # Try to format as a number with 2 decimal places
+                    formatted_label = f"{float(label):.2f}"
+                    formatted_tick_labels.append(formatted_label)
+                except (ValueError, TypeError):
+                    # If it's not a number, use the original label
+                    formatted_tick_labels.append(str(label))
+
             cbar.set_ticks(tick_positions)
-            cbar.set_ticklabels(tick_labels, fontsize=cbar_font_size)
+            cbar.set_ticklabels(formatted_tick_labels, fontsize=cbar_font_size)
 
             # remove colour-bar borders that create a grey stripe
             if hasattr(cbar, "solids"):
@@ -331,8 +342,19 @@ def _plot_umap(
                     tick_positions = np.arange(0, len(regular_labels), step)
                     tick_labels = [regular_labels[i] for i in tick_positions]
 
+                # Format numeric tick labels to show fewer decimal places
+                formatted_tick_labels = []
+                for label in tick_labels:
+                    try:
+                        # Try to format as a number with 2 decimal places
+                        formatted_label = f"{float(label):.2f}"
+                        formatted_tick_labels.append(formatted_label)
+                    except (ValueError, TypeError):
+                        # If it's not a number, use the original label
+                        formatted_tick_labels.append(str(label))
+
                 cbar.set_ticks(tick_positions)
-                cbar.ax.set_yticklabels(tick_labels, fontsize=cbar_font_size)
+                cbar.ax.set_yticklabels(formatted_tick_labels, fontsize=cbar_font_size)
                 cbar.set_label(legend_name, fontsize=20)
 
                 if hasattr(cbar, "solids"):
@@ -527,7 +549,7 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         alleles_to_highlight=random_alleles_to_highlight,
     )
 
-    # Plot by Reduced Anchor Pair
+    # Plot by Reduced Anchor Pair (old method for comparison)
     anchor_pair_labels = df['long_mer'].apply(reduced_anchor_pair).astype('category')
     unique_anchor_pairs = sorted(anchor_pair_labels.unique())
     colors = sns.color_palette("hls", n_colors=len(unique_anchor_pairs))
@@ -538,9 +560,19 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
     _plot_umap(
         embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
         title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
-        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair.png"),
+        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_reduced.png"),
         legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
         legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
+    )
+
+    # Plot by Anchor Pair with Amino Acid Colors (new enhanced method)
+    plot_anchor_pairs_with_amino_acid_colors(
+        embedding=embedding,
+        peptide_sequences=df['long_mer'],
+        title=f'UMAP of {latent_type.capitalize()} Latents by Anchor Pairs\nColored by 1st Anchor AA (face) and 2nd Anchor AA (outline)',
+        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors.png"),
+        figsize=figsize,
+        point_size=point_size
     )
 
     # Plot by C/N-terminal Amino Acid Type
@@ -652,6 +684,172 @@ def visualize_training_history(history, out_path='h5'):
     plt.savefig(os.path.join(out_path, 'training_history.png'), dpi=300, bbox_inches='tight')
     plt.close()
     print(f"✓ Training history plot saved to {os.path.join(out_path, 'training_history.png')}")
+
+
+# Define 21 distinct colors for amino acids (20 standard + 1 for unknown/special)
+AMINO_ACID_COLORS = {
+    'A': '#FF6B6B',  # Alanine - Red
+    'C': '#4ECDC4',  # Cysteine - Teal
+    'D': '#45B7D1',  # Aspartic acid - Blue
+    'E': '#96CEB4',  # Glutamic acid - Green
+    'F': '#FFEAA7',  # Phenylalanine - Yellow
+    'G': '#DDA0DD',  # Glycine - Plum
+    'H': '#98D8C8',  # Histidine - Mint
+    'I': '#F7DC6F',  # Isoleucine - Light yellow
+    'K': '#BB8FCE',  # Lysine - Light purple
+    'L': '#85C1E9',  # Leucine - Light blue
+    'M': '#F8C471',  # Methionine - Peach
+    'N': '#82E0AA',  # Asparagine - Light green
+    'P': '#F1948A',  # Proline - Light red
+    'Q': '#85C1E9',  # Glutamine - Sky blue
+    'R': '#D7BDE2',  # Arginine - Lavender
+    'S': '#A9DFBF',  # Serine - Pale green
+    'T': '#FAD7A0',  # Threonine - Beige
+    'V': '#AED6F1',  # Valine - Pale blue
+    'W': '#D5A6BD',  # Tryptophan - Pink
+    'Y': '#F9E79F',  # Tyrosine - Pale yellow
+    'X': '#808080',  # Unknown/Other - Gray
+}
+
+
+def get_anchor_pair_amino_acids(peptide_seq: str) -> tuple:
+    """
+    Gets the second and last amino acid from peptide sequence.
+
+    Args:
+        peptide_seq: Peptide sequence string
+
+    Returns:
+        tuple: (second_aa, last_aa) or ('X', 'X') for short sequences
+    """
+    # Clean sequence
+    peptide_seq = peptide_seq.replace("-", "").replace("*", "").replace(" ", "").upper()
+
+    if len(peptide_seq) < 2:
+        return ('X', 'X')
+
+    p2 = peptide_seq[1].upper()  # second amino acid
+    p_omega = peptide_seq[-1].upper()  # last amino acid
+
+    return (p2, p_omega)
+
+
+def plot_anchor_pairs_with_amino_acid_colors(
+    embedding: np.ndarray,
+    peptide_sequences: pd.Series,
+    title: str,
+    filename: str,
+    figsize: tuple = (15, 12),
+    point_size: int = 20,
+    edge_width: float = 1.5,
+    alpha: float = 0.8
+):
+    """
+    Plot UMAP embedding with points colored by first anchor amino acid
+    and outlined by second anchor amino acid color.
+
+    Args:
+        embedding: 2D UMAP embedding coordinates
+        peptide_sequences: Series of peptide sequences
+        title: Plot title
+        filename: Output filename
+        figsize: Figure size
+        point_size: Size of scatter points
+        edge_width: Width of outline
+        alpha: Point transparency
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Get anchor pairs for all peptides
+    anchor_pairs = peptide_sequences.apply(get_anchor_pair_amino_acids)
+    first_anchors = anchor_pairs.apply(lambda x: x[0])
+    second_anchors = anchor_pairs.apply(lambda x: x[1])
+
+    # Get unique amino acids for legend
+    unique_first = sorted(set(first_anchors.values))
+    unique_second = sorted(set(second_anchors.values))
+
+    # Plot points grouped by first anchor amino acid (face color)
+    for aa1 in unique_first:
+        mask1 = (first_anchors == aa1)
+        if not np.any(mask1):
+            continue
+
+        # For this first anchor AA, plot points with different edge colors for second anchor
+        for aa2 in unique_second:
+            mask2 = (second_anchors == aa2)
+            combined_mask = mask1 & mask2
+
+            if not np.any(combined_mask):
+                continue
+
+            face_color = AMINO_ACID_COLORS.get(aa1, AMINO_ACID_COLORS['X'])
+            edge_color = AMINO_ACID_COLORS.get(aa2, AMINO_ACID_COLORS['X'])
+
+            ax.scatter(
+                embedding[combined_mask, 0],
+                embedding[combined_mask, 1],
+                c=[face_color],
+                edgecolors=[edge_color],
+                s=point_size,
+                alpha=alpha,
+                linewidth=edge_width,
+                rasterized=True
+            )
+
+    # Create legends
+    # Legend for face colors (first anchor)
+    first_legend_elements = []
+    for aa in unique_first:
+        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
+        first_legend_elements.append(
+            plt.scatter([], [], c=[color], s=point_size, alpha=alpha,
+                       label=f'{aa} (1st anchor)')
+        )
+
+    first_legend = ax.legend(
+        handles=first_legend_elements,
+        title='First Anchor (Face Color)',
+        bbox_to_anchor=(1.02, 1),
+        loc='upper left',
+        fontsize=10,
+        title_fontsize=12
+    )
+    ax.add_artist(first_legend)
+
+    # Legend for edge colors (second anchor)
+    second_legend_elements = []
+    for aa in unique_second:
+        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
+        second_legend_elements.append(
+            plt.scatter([], [], c='white', edgecolors=[color], s=point_size,
+                       linewidth=edge_width, label=f'{aa} (2nd anchor)')
+        )
+
+    # Calculate position for second legend to avoid overlap
+    # Position it lower based on the number of items in the first legend
+    second_legend_y_position = max(0.1, 0.95 - len(unique_first) * 0.04)
+
+    second_legend = ax.legend(
+        handles=second_legend_elements,
+        title='Second Anchor (Edge Color)',
+        bbox_to_anchor=(1.02, second_legend_y_position),
+        loc='upper left',
+        fontsize=10,
+        title_fontsize=12
+    )
+
+    # Set labels and title
+    ax.set_xlabel('UMAP Dimension 1', fontsize=14)
+    ax.set_ylabel('UMAP Dimension 2', fontsize=14)
+    ax.set_title(title, fontsize=16, fontweight='bold')
+
+    # Save plot
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✓ Anchor pair plot saved to {filename}")
 
 
 def visualize_inference_results(df_processed, true_labels, predictions, out_dir, dataset_name):
