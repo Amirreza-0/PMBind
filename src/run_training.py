@@ -442,7 +442,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 4096, "LEARNING_RATE": 5e-6,
+        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 4096, "LEARNING_RATE": 5e-6,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
         "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }
@@ -457,7 +457,7 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
 
-    tfrecord_dir = f"../data/cross_validation_dataset3/mhc{MHC_CLASS}/tfrecords3/fold_{fold_to_run:02d}/"
+    tfrecord_dir = f"../data/cross_validation_dataset/mhc{MHC_CLASS}/tfrecords/fold_{fold_to_run:02d}/"
 
     if not os.path.exists(tfrecord_dir) or not os.path.exists(os.path.join(tfrecord_dir, 'metadata.json')):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
