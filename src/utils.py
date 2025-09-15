@@ -612,7 +612,7 @@ class PositionalEncoding(keras.layers.Layer):
         pos = tf.range(self.pos_range, dtype=tf.float32)[:, tf.newaxis]  # (pos_range, 1)
         i = tf.range(self.embed_dim, dtype=tf.float32)[tf.newaxis, :]  # (1, embed_dim)
         # angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, GLOBAL_DTYPE))
-        angle_rates = tf.pow(300.0, -(2 * tf.floor(i / 2)) / tf.cast(self.embed_dim, tf.float32))
+        angle_rates = tf.pow(300.0, -(2.0 * tf.floor(i // 2)) / tf.cast(self.embed_dim, tf.float32))
         angle_rads = pos * angle_rates  # (pos_range, embed_dim)
 
         # Apply sin to even indices, cos to odd indices
@@ -941,10 +941,8 @@ def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sampl
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     y_pred = tf.clip_by_value(y_pred, 1e-9, 1.0)
-
     # Build a 0/1 mask for non-pad tokens
     mask = tf.cast(tf.not_equal(mask, pad_token), tf.float32)
-
     # If mask has an extra trailing dim of 1, squeeze it (static check only)
     if mask.shape.rank is not None and mask.shape.rank > 2 and mask.shape[-1] == 1:
         mask = tf.squeeze(mask, axis=-1)
@@ -954,12 +952,9 @@ def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sampl
         loss = tf.reduce_sum(tf.square(y_true - y_pred), axis=-1)
     else:
         raise ValueError(f"Unsupported loss type: {type}")
-
     # Ensure shape compatibility with loss
     mask = tf.cast(tf.broadcast_to(mask, tf.shape(loss)), tf.float32)
-
     masked_loss = loss * mask
-
     # Apply sample weights if provided
     if sample_weight is not None:
         sample_weight = tf.cast(sample_weight, tf.float32)
@@ -968,10 +963,10 @@ def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sampl
         # Broadcast sample_weight from (B,) to (B, N) to match masked_loss
         masked_loss *= sample_weight[:, tf.newaxis]
         mask *= sample_weight[:, tf.newaxis]
-
     total_loss = tf.reduce_sum(masked_loss)
     total_weight = tf.reduce_sum(mask)
-    return tf.math.divide_no_nan(total_loss, total_weight)
+    ce_loss = tf.math.divide_no_nan(total_loss, total_weight)
+    return tf.cast(ce_loss, tf.float32)
 
 @tf.function
 def split_y_true_y_pred(y_true_y_pred):
