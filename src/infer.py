@@ -50,17 +50,17 @@ class OptimizedDataGenerator(keras.utils.Sequence):
 
     def __init__(self, df, seq_map, embed_map, max_pep_len, max_mhc_len, batch_size):
         super().__init__()
-        self.df = df;
-        self.seq_map = seq_map;
+        self.df = df
+        self.seq_map = seq_map
         self.embed_map = embed_map
-        self.max_pep_len = max_pep_len;
-        self.max_mhc_len = max_mhc_len;
+        self.max_pep_len = max_pep_len
+        self.max_mhc_len = max_mhc_len
         self.batch_size = batch_size
-        self.long_mer_arr = df['long_mer'].to_numpy();
+        self.long_mer_arr = df['long_mer'].to_numpy()
         self.emb_key_arr = df['_emb_key'].to_numpy()
-        self.cleaned_key_arr = df['_cleaned_key'].to_numpy();
+        self.cleaned_key_arr = df['_cleaned_key'].to_numpy()
         self.mhc_seq_arr = df['_mhc_seq'].to_numpy()
-        self.label_arr = df['assigned_label'].to_numpy();
+        self.label_arr = df['assigned_label'].to_numpy()
         self.indices = np.arange(len(df))
 
     def __len__(self):
@@ -92,15 +92,15 @@ class OptimizedDataGenerator(keras.utils.Sequence):
             pep_seq, emb_key, cleaned_key, mhc_seq = self.long_mer_arr[master_idx].upper(), self.emb_key_arr[
                 master_idx], self.cleaned_key_arr[master_idx], self.mhc_seq_arr[master_idx]
             pep_len = len(pep_seq)
-            data["pep_blossom62"][i] = seq_to_blossom62(pep_seq, max_seq_len=self.max_pep_len);
-            data["pep_ohe_target"][i] = seq_to_onehot(pep_seq, max_seq_len=self.max_pep_len);
+            data["pep_blossom62"][i] = seq_to_blossom62(pep_seq, max_seq_len=self.max_pep_len)
+            data["pep_ohe_target"][i] = seq_to_onehot(pep_seq, max_seq_len=self.max_pep_len)
             data["pep_mask"][i, :pep_len] = NORM_TOKEN
-            emb = self._get_embedding(emb_key, cleaned_key);
+            emb = self._get_embedding(emb_key, cleaned_key)
             L = emb.shape[0]
-            data["mhc_emb"][i, :L] = emb;
-            data["mhc_emb"][i, L:, :] = PAD_VALUE;
+            data["mhc_emb"][i, :L] = emb
+            data["mhc_emb"][i, L:, :] = PAD_VALUE
             data["mhc_mask"][i, ~np.all(data["mhc_emb"][i] == PAD_VALUE, axis=-1)] = NORM_TOKEN
-            data["mhc_ohe_target"][i] = seq_to_onehot(mhc_seq, max_seq_len=self.max_mhc_len);
+            data["mhc_ohe_target"][i] = seq_to_onehot(mhc_seq, max_seq_len=self.max_mhc_len)
             data["labels"][i, 0] = int(self.label_arr[master_idx])
         return {k: tf.convert_to_tensor(v) for k, v in data.items()}
 
@@ -111,7 +111,7 @@ def preprocess_df(df, seq_map, embed_map):
     df['_emb_key'] = df['_cleaned_key'].apply(lambda k: get_embed_key(clean_key(k), embed_map))
     if MHC_CLASS == 2:
         def get_mhc_seq_class2(key):
-            parts = key.split('_');
+            parts = key.split('_')
             return seq_map.get(get_embed_key(clean_key(parts[0]), seq_map), '') + seq_map.get(
                 get_embed_key(clean_key(parts[1]), seq_map), '') if len(parts) >= 2 else ''
 
@@ -128,26 +128,26 @@ def visualize_inference_results(df, true_labels, scores, out_dir, name):
     print(f"Generating visualizations for {name} set...")
 
     # Confusion Matrix
-    plt.figure();
-    cm = confusion_matrix(true_labels, df["prediction_label"]);
-    disp = ConfusionMatrixDisplay(cm, display_labels=[0, 1]);
-    disp.plot(cmap="Blues", values_format='d');
-    plt.title(f"Confusion Matrix on {name} Set");
-    plt.savefig(os.path.join(out_dir, f"cm_{name}.png"));
+    plt.figure()
+    cm = confusion_matrix(true_labels, df["prediction_label"])
+    disp = ConfusionMatrixDisplay(cm, display_labels=[0, 1])
+    disp.plot(cmap="Blues", values_format='d')
+    plt.title(f"Confusion Matrix on {name} Set")
+    plt.savefig(os.path.join(out_dir, f"cm_{name}.png"))
     plt.close()
 
     # ROC Curve
-    plt.figure(figsize=(8, 6));
-    fpr, tpr, _ = roc_curve(true_labels, scores);
-    auc = roc_auc_score(true_labels, scores);
-    plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}");
-    plt.plot([0, 1], [0, 1], 'k--', alpha=0.6);
-    plt.xlabel('False Positive Rate');
-    plt.ylabel('True Positive Rate');
-    plt.title(f'ROC Curve on {name} Set');
-    plt.legend(loc='lower right');
-    plt.grid(True, alpha=0.5);
-    plt.savefig(os.path.join(out_dir, f"roc_{name}.png"));
+    plt.figure(figsize=(8, 6))
+    fpr, tpr, _ = roc_curve(true_labels, scores)
+    auc = roc_auc_score(true_labels, scores)
+    plt.plot(fpr, tpr, label=f"AUC = {auc:.4f}")
+    plt.plot([0, 1], [0, 1], 'k--', alpha=0.6)
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve on {name} Set')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.5)
+    plt.savefig(os.path.join(out_dir, f"roc_{name}.png"))
     plt.close()
 
     # Prediction Score Distribution
@@ -162,21 +162,21 @@ def visualize_inference_results(df, true_labels, scores, out_dir, name):
 
 
 def generate_sample_data_for_viz(df, idx, max_pep_len, max_mhc_len, seq_map, embed_map):
-    sample_row = df.iloc[idx];
+    sample_row = df.iloc[idx]
     pep_seq, emb_key, cleaned_key, mhc_seq = sample_row['long_mer'].upper(), sample_row['_emb_key'], sample_row[
         '_cleaned_key'], sample_row['_mhc_seq']
     data = {"pep_blossom62": np.zeros((1, max_pep_len, 23), np.float32),
             "pep_mask": np.full((1, max_pep_len), PAD_TOKEN, dtype=np.float32),
             "mhc_emb": np.zeros((1, max_mhc_len, ESM_DIM), np.float32),
             "mhc_mask": np.full((1, max_mhc_len), PAD_TOKEN, dtype=np.float32)}
-    pep_len = len(pep_seq);
-    data["pep_blossom62"][0] = seq_to_blossom62(pep_seq, max_seq_len=max_pep_len);
+    pep_len = len(pep_seq)
+    data["pep_blossom62"][0] = seq_to_blossom62(pep_seq, max_seq_len=max_pep_len)
     data["pep_mask"][0, :pep_len] = NORM_TOKEN
-    gen = OptimizedDataGenerator(df, seq_map, embed_map, max_pep_len, max_mhc_len, 1);
+    gen = OptimizedDataGenerator(df, seq_map, embed_map, max_pep_len, max_mhc_len, 1)
     emb = gen._get_embedding(emb_key, cleaned_key)
-    L = emb.shape[0];
-    data["mhc_emb"][0, :L] = emb;
-    data["mhc_emb"][0, L:, :] = PAD_VALUE;
+    L = emb.shape[0]
+    data["mhc_emb"][0, :L] = emb
+    data["mhc_emb"][0, L:, :] = PAD_VALUE
     data["mhc_mask"][0, ~np.all(data["mhc_emb"][0] == PAD_VALUE, axis=-1)] = NORM_TOKEN
     return data, pep_seq, mhc_seq
 
@@ -184,12 +184,12 @@ def generate_sample_data_for_viz(df, idx, max_pep_len, max_mhc_len, seq_map, emb
 def run_visualizations(df, latents_pooled, latents_seq, out_dir, name, max_pep_len, max_mhc_len, seq_map, embed_map,
                        source_col=None):
     print("\nGenerating latent space visualizations...")
-    os.makedirs(out_dir, exist_ok=True);
-    alleles = df['allele'].apply(clean_key).astype('category');
+    os.makedirs(out_dir, exist_ok=True)
+    alleles = df['allele'].apply(clean_key).astype('category')
     unique_alleles = alleles.cat.categories
     highlight_mask = (df[source_col] == 'test').values if source_col and source_col in df.columns else None
-    num_to_highlight = min(5, len(unique_alleles));
-    np.random.seed(999);
+    num_to_highlight = min(5, len(unique_alleles))
+    np.random.seed(999)
     random_alleles_to_highlight = np.random.choice(unique_alleles, num_to_highlight, replace=False).tolist()
     colors = plt.cm.tab20(np.linspace(0, 1, len(unique_alleles))) if len(unique_alleles) <= 20 else plt.cm.viridis(
         np.linspace(0, 1, len(unique_alleles)))
@@ -201,18 +201,18 @@ def run_visualizations(df, latents_pooled, latents_seq, out_dir, name, max_pep_l
 
     print("\n--- Generating supplementary plots (inputs, masks) ---")
     sample_data, pep_seq, _ = generate_sample_data_for_viz(df, 0, max_pep_len, max_mhc_len, seq_map, embed_map)
-    fig, axes = plt.subplots(2, 2, figsize=(15, 8));
+    fig, axes = plt.subplots(2, 2, figsize=(15, 8))
     fig.suptitle(f'Input Data Sample (Peptide: {pep_seq}, Allele: {df.iloc[0]["allele"]})', fontsize=16)
-    sns.heatmap(sample_data['pep_blossom62'][0].T, ax=axes[0, 0], cmap='gray_r');
+    sns.heatmap(sample_data['pep_blossom62'][0].T, ax=axes[0, 0], cmap='gray_r')
     axes[0, 0].set_title('Peptide Input (BLOSUM62)')
-    sns.heatmap(sample_data['pep_mask'][0][np.newaxis, :], ax=axes[0, 1], cmap='viridis', cbar=False);
+    sns.heatmap(sample_data['pep_mask'][0][np.newaxis, :], ax=axes[0, 1], cmap='viridis', cbar=False)
     axes[0, 1].set_title('Peptide Mask')
-    sns.heatmap(sample_data['mhc_emb'][0].T, ax=axes[1, 0], cmap='viridis');
+    sns.heatmap(sample_data['mhc_emb'][0].T, ax=axes[1, 0], cmap='viridis')
     axes[1, 0].set_title('MHC Input (Embedding)')
-    sns.heatmap(sample_data['mhc_mask'][0][np.newaxis, :], ax=axes[1, 1], cmap='viridis', cbar=False);
+    sns.heatmap(sample_data['mhc_mask'][0][np.newaxis, :], ax=axes[1, 1], cmap='viridis', cbar=False)
     axes[1, 1].set_title('MHC Mask')
-    plt.tight_layout(rect=[0, 0, 1, 0.96]);
-    plt.savefig(os.path.join(out_dir, "input_mask_sample.png"));
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(os.path.join(out_dir, "input_mask_sample.png"))
     plt.close()
     print("✓ Input and mask plots saved.")
 
@@ -223,30 +223,30 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
           allele_seq_path, embedding_key_path, embedding_npz_path,
           batch_size=256, source_col=None, allow_cache=False):
     global EMB_DB, MHC_CLASS, ESM_DIM
-    os.makedirs(out_dir, exist_ok=True);
+    os.makedirs(out_dir, exist_ok=True)
     with open(config_path, 'r') as f:
         config = json.load(f)
     MHC_CLASS, max_pep_len, max_mhc_len, embed_dim, heads = config["MHC_CLASS"], config["MAX_PEP_LEN"], config[
         "MAX_MHC_LEN"], config["EMBED_DIM"], config["HEADS"]
-    EMB_DB = load_embedding_db(embedding_npz_path);
+    EMB_DB = load_embedding_db(embedding_npz_path)
     ESM_DIM = int(next(iter(EMB_DB.values())).shape[1])
     seq_map = {clean_key(k): v for k, v in
                pd.read_csv(allele_seq_path, index_col="allele")["mhc_sequence"].to_dict().items()}
     embed_map = pd.read_csv(embedding_key_path, index_col="key")["mhc_sequence"].to_dict()
-    df = pq.ParquetFile(df_path).read().to_pandas();
-    print("Preprocessing dataset...");
+    df = pq.ParquetFile(df_path).read().to_pandas()
+    print("Preprocessing dataset...")
     df_infer = preprocess_df(df, seq_map, embed_map)
     model = pmbind(max_pep_len=max_pep_len, max_mhc_len=max_mhc_len, emb_dim=embed_dim, heads=heads, noise_std=0,
                    drop_out_rate=0.0, latent_dim=embed_dim * 2, ESM_dim=ESM_DIM)
     dummy_gen = OptimizedDataGenerator(df_infer.head(1), seq_map, embed_map, max_pep_len, max_mhc_len, 1)
-    model(dummy_gen[0], training=False);
-    model.load_weights(model_weights_path);
+    model(dummy_gen[0], training=False)
+    model.load_weights(model_weights_path)
     print("Model loaded successfully.")
 
     latents_seq_path, latents_pooled_path = os.path.join(out_dir, f"latents_seq_{name}.h5"), os.path.join(out_dir,
                                                                                                           f"latents_pooled_{name}.h5")
     if not (os.path.exists(latents_pooled_path) and allow_cache):
-        print("Generating predictions and latents...");
+        print("Generating predictions and latents...")
         infer_gen = OptimizedDataGenerator(df_infer, seq_map, embed_map, max_pep_len, max_mhc_len, batch_size)
         all_predictions, all_labels = [], []
         with h5py.File(latents_seq_path, 'w') as f_seq, h5py.File(latents_pooled_path, 'w') as f_pooled:
@@ -255,19 +255,19 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
             d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len + embed_dim),
                                                dtype='float32')
             for i, batch in enumerate(tqdm(infer_gen, desc=f"Inference on {name}", file=sys.stdout)):
-                outputs = model(batch, training=False);
-                all_predictions.append(outputs["cls_ypred"].numpy());
+                outputs = model(batch, training=False)
+                all_predictions.append(outputs["cls_ypred"].numpy())
                 all_labels.append(batch["labels"].numpy())
-                start, end = i * batch_size, i * batch_size + len(batch["labels"]);
-                d_seq[start:end] = outputs["latent_seq"].numpy();
+                start, end = i * batch_size, i * batch_size + len(batch["labels"])
+                d_seq[start:end] = outputs["latent_seq"].numpy()
                 d_pooled[start:end] = outputs["latent_vector"].numpy()
         all_predictions, all_labels = np.concatenate(all_predictions).squeeze(), np.concatenate(all_labels).squeeze()
-        df_infer["prediction_score"] = all_predictions;
+        df_infer["prediction_score"] = all_predictions
         df_infer["prediction_label"] = (all_predictions >= 0.5).astype(int)
-        df_infer.to_csv(os.path.join(out_dir, f"inference_results_{name}.csv"), index=False);
+        df_infer.to_csv(os.path.join(out_dir, f"inference_results_{name}.csv"), index=False)
         print(f"✓ Inference results saved.")
     else:
-        print("Loading cached predictions and latents...");
+        print("Loading cached predictions and latents...")
         df_infer = pd.read_csv(os.path.join(out_dir, f"inference_results_{name}.csv"))
         all_labels, all_predictions = df_infer["assigned_label"].values, df_infer["prediction_score"].values
 
@@ -278,14 +278,14 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
 
     if "assigned_label" in df_infer.columns:
         visualize_inference_results(df_infer, all_labels, all_predictions, out_dir, name)
-        auc = roc_auc_score(all_labels, all_predictions) if len(np.unique(all_labels)) > 1 else -1;
+        auc = roc_auc_score(all_labels, all_predictions) if len(np.unique(all_labels)) > 1 else -1
         ap = average_precision_score(all_labels, all_predictions)
-        cm = confusion_matrix(all_labels, df_infer["prediction_label"]);
+        cm = confusion_matrix(all_labels, df_infer["prediction_label"])
         tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
-        summary_path = os.path.join(os.path.dirname(out_dir), "inference_summary.csv");
+        summary_path = os.path.join(os.path.dirname(out_dir), "inference_summary.csv")
         file_exists = os.path.isfile(summary_path)
         with open(summary_path, 'a', newline='') as f:
-            writer = csv.writer(f);
+            writer = csv.writer(f)
             if not file_exists: writer.writerow(['dataset', 'num_samples', 'AUC', 'AP', 'TP', 'TN', 'FP', 'FN'])
             writer.writerow([name, len(df_infer), f"{auc:.4f}", f"{ap:.4f}", tp, tn, fp, fn])
         print(f"✓ Summary updated.")
@@ -295,21 +295,22 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PMBind Simple Inference Script");
-    parser.add_argument("--model_weights_path", required=True);
-    parser.add_argument("--config_path", required=True);
-    parser.add_argument("--df_path", required=True);
-    parser.add_argument("--out_dir", required=True);
-    parser.add_argument("--name", required=True);
-    parser.add_argument("--allele_seq_path", required=True);
-    parser.add_argument("--embedding_key_path", required=True);
-    parser.add_argument("--embedding_npz_path", required=True);
-    parser.add_argument("--batch_size", type=int, default=256);
-    parser.add_argument("--source_col");
+    parser = argparse.ArgumentParser(description="PMBind Simple Inference Script")
+    parser.add_argument("--model_weights_path", required=True)
+    parser.add_argument("--config_path", required=True)
+    parser.add_argument("--df_path", required=True)
+    parser.add_argument("--out_dir", required=True)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--allele_seq_path", required=True)
+    parser.add_argument("--embedding_key_path", required=True)
+    parser.add_argument("--embedding_npz_path", required=True)
+    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--source_col")
     args = parser.parse_args()
     if gpus := tf.config.list_physical_devices('GPU'):
         try:
-            [tf.config.experimental.set_memory_growth(gpu, True) for gpu in gpus]; print(
+            [tf.config.experimental.set_memory_growth(gpu, True) for gpu in gpus]
+            print(
                 f"✓ Memory growth enabled for {len(gpus)} GPU(s)")
         except RuntimeError as e:
             print(f"GPU error: {e}")

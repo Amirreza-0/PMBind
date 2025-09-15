@@ -17,17 +17,17 @@ import re
 # ==============================================================================
 CONFIG = {
     # Directory containing all your trained model folders (e.g., run_..._fold0, run_..._fold1)
-    "BASE_MODEL_DIR": "../results/PMBind_best/",
+    "BASE_MODEL_DIR": "/home/amirreza/Desktop/PMBind/results/PMBind_runs_optimized_bak",
     # Base directory where all inference output will be saved.
-    "BASE_OUTPUT_FOLDER": "../results/PMBind_results",
+    "BASE_OUTPUT_FOLDER": "/media/amirreza/Crucial-500/PMBind_results",
     # Root directory of the cross-validation dataset.
     "DATA_ROOT": "../data/cross_validation_dataset",
     # Directory containing the ESM embedding files (.npz and .csv).
-    "EMBEDDING_DIR": "../results/ESM/esm3-open/PMGen_whole_seq_/",
+    "EMBEDDING_DIR": "/media/amirreza/Crucial-500/ESM/esm3-open/PMGen_whole_seq_/",
     # Full path to the aligned allele sequence CSV file.
     "ALLELE_SEQ_PATH": "../data/alleles/aligned_PMGen_class_1.csv",
     # List of folds to run inference on. range(5) means folds 1, 2, 3, 4, 5
-    "FOLDS_TO_RUN": range(1, 2),
+    "FOLDS_TO_RUN": range(1, 6),
     # MHC Class (1 or 2)
     "MHC_CLASS": 1
 }
