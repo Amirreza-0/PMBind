@@ -236,7 +236,7 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         # Balanced loss weighting for stability
         total_loss_weighted = (0.5 * raw_cls_loss) + (1.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
-        
+
         # Use proper LossScaleOptimizer methods for mixed precision
         if mixed_precision:
             # Scale loss using the correct TensorFlow 2.16+ API
@@ -249,7 +249,6 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
             grads = tape.gradient(total_loss_weighted, model.trainable_variables)
             grads, _ = tf.clip_by_global_norm(grads, 1.0)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
-
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
@@ -285,7 +284,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     with open(os.path.join(tfrecord_dir, 'metadata.json'), 'r') as f:
         metadata = json.load(f)
     MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS, train_samples, val_samples = metadata['MAX_PEP_LEN'], metadata[
-        'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples_final', None), metadata.get(
+        'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples_final',
+                                                                                 None), metadata.get(
         'val_samples_final', None)
 
     # Apply subset to training samples
@@ -342,6 +342,10 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     config_data = model.get_config()
     config_data['training_subset'] = subset  # Add subset info to config
     config_data['validation_subset'] = subset
+    config_data['MAX_PEP_LEN'] = MAX_PEP_LEN  # Add sequence length info
+    config_data['MAX_MHC_LEN'] = MAX_MHC_LEN
+    config_data['ESM_DIM'] = ESM_DIM
+    config_data['MHC_CLASS'] = MHC_CLASS
     with open(os.path.join(out_dir, "model_config.json"), "w") as f:
         json.dump(config_data, f, indent=4)
 
@@ -351,7 +355,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
             base_optimizer,
             initial_scale=32768.0,  # Higher initial scale
-            dynamic_growth_steps=2000    # Adapt every 2000 steps
+            dynamic_growth_steps=2000  # Adapt every 2000 steps
         )
         print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
     else:
@@ -438,7 +442,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-4,
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 4096, "LEARNING_RATE": 5e-6,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
         "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }
@@ -453,7 +457,7 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
 
-    tfrecord_dir = f"../data/cross_validation_dataset/mhc{MHC_CLASS}/tfrecords/fold_{fold_to_run:02d}/"
+    tfrecord_dir = f"../data/cross_validation_dataset3/mhc{MHC_CLASS}/tfrecords3/fold_{fold_to_run:02d}/"
 
     if not os.path.exists(tfrecord_dir) or not os.path.exists(os.path.join(tfrecord_dir, 'metadata.json')):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
