@@ -11,7 +11,7 @@ import json
 
 # Local utilities for sequence and key processing
 from utils import (get_embed_key, get_seq, clean_key, PAD_VALUE,
-                   seq_to_indices, seq_to_ohe_indices)
+                   seq_to_indices, seq_to_ohe_indices, get_mhc_seq_class2, get_embed_key_class2)
 
 # --- Globals for worker processes ---
 EMB_DB = None
@@ -93,23 +93,13 @@ def process_chunk_preprocess(chunk, seq_map, embed_map, mhc_class):
     This is the location of the critical fix.
     """
     chunk['_cleaned_key'] = chunk['allele'].apply(lambda k: clean_key(k))
-    chunk['_emb_key'] = chunk['_cleaned_key'].apply(lambda k: get_embed_key(k, embed_map))
 
     # Safely handle sequence lookup, especially for None keys
     if mhc_class == 2:
-        def get_mhc_seq_class2(key):
-            if key is None: return ''
-            key_parts = key.split('_')
-            if len(key_parts) >= 2:
-                key1 = get_embed_key(key_parts[0], seq_map)
-                key2 = get_embed_key(key_parts[1], seq_map)
-                seq1 = seq_map.get(key1, '') if key1 else ''
-                seq2 = seq_map.get(key2, '') if key2 else ''
-                return seq1 + seq2
-            return ''
-
-        chunk['_mhc_seq'] = chunk['_cleaned_key'].apply(get_mhc_seq_class2)
+        chunk['_emb_key'] = chunk['_cleaned_key'].apply(lambda k: get_embed_key_class2(k, embed_map))
+        chunk['_mhc_seq'] = chunk['_cleaned_key'].apply(lambda k: get_mhc_seq_class2(k, embed_map, seq_map))
     else:
+        chunk['_emb_key'] = chunk['_cleaned_key'].apply(lambda k: get_embed_key(k, embed_map))
         chunk['_mhc_seq'] = chunk['_cleaned_key'].apply(lambda k: get_seq(k, seq_map) if k is not None else '')
 
     # Filter out any rows where we failed to find a valid embedding key or sequence.
@@ -120,6 +110,7 @@ def process_chunk_preprocess(chunk, seq_map, embed_map, mhc_class):
     if not dropped_no_emb_key.empty:
         print("Dropped rows with no emb_key unique alleles:")
         print(dropped_no_emb_key['allele'].unique())
+        print(dropped_no_emb_key[['allele', '_cleaned_key', '_emb_key']])
     if not dropped_no_mhc_seq.empty:
         print("Dropped rows with no mhc_seq unique alleles:")
         print(dropped_no_mhc_seq['allele'].unique())
@@ -170,13 +161,6 @@ def create_artifacts(df_path, output_dir, name, args):
 
     df_full['embedding_id'] = df_full['_emb_key'].map(key_to_id_map)
 
-    # Count labels directly from the DataFrame ---
-    print(f"Counting labels for {name} set...")
-    label_counts = df_full['assigned_label'].value_counts()
-    pos_count = int(label_counts.get(1, 0)) # Use .get() for safety
-    neg_count = int(label_counts.get(0, 0)) # Convert to native int for JSON
-    print(f"✓ Found {pos_count:,} positive and {neg_count:,} negative samples.")
-
     num_workers = max(1, mp.cpu_count() // 2)
     chunk_size = int(np.ceil(len(df_full) / (num_workers * 4)))
     chunks = [df_full.iloc[i:i + chunk_size] for i in range(0, len(df_full), chunk_size)]
@@ -189,9 +173,6 @@ def create_artifacts(df_path, output_dir, name, args):
                   desc=f"Writing {name} TFRecords"))
 
     print(f"✓ All TFRecord shards for {name} created successfully in {output_dir}")
-
-    # Return the calculated counts ---
-    return pos_count, neg_count
 
 
 def main(args):
@@ -217,28 +198,10 @@ def main(args):
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Capture the returned counts from the function calls
-    train_pos, train_neg = create_artifacts(args.train_path, args.output_dir, "train", args)
-    val_pos, val_neg = create_artifacts(args.val_path, args.output_dir, "validation", args)
-
-    print("\nWriting final metadata file...")
-    metadata = {
-        'MAX_PEP_LEN': MAX_PEP_LEN,
-        'MAX_MHC_LEN': MAX_MHC_LEN,
-        'ESM_DIM': ESM_DIM,
-        'MHC_CLASS': MHC_CLASS,
-        'train_samples_raw_parquet': len(df_train),
-        'val_samples_raw_parquet': len(df_val),
-        'train_samples_final': train_pos + train_neg,
-        'val_samples_final': val_pos + val_neg,
-        'train_pos': train_pos,
-        'train_neg': train_neg,
-        'val_pos': val_pos,
-        'val_neg': val_neg
-    }
-    metadata_path = os.path.join(args.output_dir, 'metadata.json')
-    with open(metadata_path, 'w') as f:
-       json.dump(metadata, f, indent=4)
+    metadata = {'MAX_PEP_LEN': MAX_PEP_LEN, 'MAX_MHC_LEN': MAX_MHC_LEN, 'ESM_DIM': ESM_DIM, 'MHC_CLASS': MHC_CLASS,
+                'train_samples': len(df_train), 'val_samples': len(df_val)}
+    with open(os.path.join(args.output_dir, 'metadata.json'), 'w') as f:
+        json.dump(metadata, f, indent=4)
 
     create_artifacts(args.train_path, args.output_dir, "train", args)
     create_artifacts(args.val_path, args.output_dir, "validation", args)
