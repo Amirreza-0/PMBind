@@ -1120,7 +1120,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
             q = self.rope(q)
             k = self.rope(k)
 
-        att = tf.cast(self.scale, self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
+        att = tf.einsum('bhxe,bhye->bhxy', q, k) * tf.cast(self.scale, self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
         # Create 2D mask
         mask_2d = self.mask_2d(p_mask, m_mask)
         mask_2d = tf.cast(mask_2d, self.compute_dtype)  # (B, N+M, N+M)
