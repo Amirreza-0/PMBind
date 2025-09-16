@@ -491,7 +491,7 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
 
-    tfrecord_dir = f"../data/cross_validation_dataset3/mhc{MHC_CLASS}/tfrecords3/fold_{fold_to_run:02d}/"
+    tfrecord_dir = f"../data/cross_validation_dataset/mhc{MHC_CLASS}/tfrecords/fold_{fold_to_run:02d}/"
 
     if not os.path.exists(tfrecord_dir) or not os.path.exists(os.path.join(tfrecord_dir, 'metadata.json')):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
