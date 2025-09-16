@@ -418,11 +418,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
         for m in metrics.values(): m.reset_state()
 
-        # Reshuffle training data every epoch for better randomization
-        train_ds_shuffled = train_ds.shuffle(buffer_size=50000, seed=epoch, reshuffle_each_iteration=False)
-
         # Use dataset length divided by batch size for progress bar
-        pbar = tqdm(train_ds_shuffled, desc="Training", unit="batch", total=train_steps)
+        # Note: train_ds already reshuffles automatically with reshuffle_each_iteration=True
+        pbar = tqdm(train_ds, desc="Training", unit="batch", total=train_steps)
         for batch_data in pbar:
             train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights_tensor)
 
