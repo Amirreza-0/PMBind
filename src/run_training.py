@@ -351,13 +351,14 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         json.dump(run_config, f, indent=4)
 
     # Create cosine decay learning rate schedule that resets every epoch
-    cosine_decay_schedule = tf.keras.optimizers.schedules.CosineDecay(
+    cosine_decay_schedule = tf.keras.optimizers.schedules.CosineDecayRestarts(
         initial_learning_rate=lr,
-        decay_steps=train_steps,  # Reset every epoch
+        first_decay_steps=train_steps,  # Reset every epoch
         alpha=0.01,  # Minimum learning rate = 0.01 * initial_lr
-        restarts=True
+        t_mul=1.0,  # Keep same cycle length
+        m_mul=1.0   # Keep same initial learning rate
     )
-    print(f"✓ Using CosineDecay schedule: initial_lr={lr}, decay_steps={train_steps}, restarts=True")
+    print(f"✓ Using CosineDecayRestarts schedule: initial_lr={lr}, first_decay_steps={train_steps}")
 
     # Create Lion optimizer with cosine decay schedule
     base_optimizer = keras.optimizers.Lion(learning_rate=cosine_decay_schedule)
