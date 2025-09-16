@@ -201,20 +201,26 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
 # Training & Evaluation Steps
 # ----------------------------------------------------------------------
 @tf.function()
-def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
+def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights):
     """Compiled training step with proper mixed precision handling."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
         # Compute individual losses
         raw_cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
+
+        # Apply class weights manually
+        labels_flat = tf.reshape(batch_data["labels"], [-1])
+        sample_weights = tf.gather(class_weights, tf.cast(labels_flat, tf.int32))
+        weighted_cls_loss = tf.reduce_mean(raw_cls_loss * sample_weights)
+
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
         # Check for NaN/Inf in individual losses
-        raw_cls_loss = tf.where(tf.math.is_finite(raw_cls_loss), raw_cls_loss, 0.0)
+        weighted_cls_loss = tf.where(tf.math.is_finite(weighted_cls_loss), weighted_cls_loss, 0.0)
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         # Balanced loss weighting for stability
-        total_loss_weighted = (1.0 * raw_cls_loss) + (0.2 * raw_recon_loss_pep) + (0.2 * raw_recon_loss_mhc)
+        total_loss_weighted = (1.0 * weighted_cls_loss) + (0.2 * raw_recon_loss_pep) + (0.2 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
 
         # Use proper LossScaleOptimizer methods for mixed precision
@@ -234,20 +240,34 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
 
     metrics['train_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['train_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(raw_recon_loss_pep)
     metrics['mhc_loss'].update_state(raw_recon_loss_mhc)
-    metrics['cls_loss'].update_state(raw_cls_loss)
+    metrics['cls_loss'].update_state(weighted_cls_loss)
 
 
 @tf.function()
-def eval_step(model, batch_data, metrics):
+def eval_step(model, batch_data, focal_loss_fn, metrics):
     """Compiled evaluation step."""
     outputs = model(batch_data, training=False)
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
+
+    # Simple binary crossentropy for classification (no class weighting for validation)
+    cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
+
+    # Reconstruction losses using masked_categorical_crossentropy
+    recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
+    recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
+
+    # Total validation loss (same weighting as training but no class weights)
+    total_val_loss = (1.0 * cls_loss) + (0.2 * recon_loss_pep) + (0.2 * recon_loss_mhc)
+
     metrics['val_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['val_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['val_loss'].update_state(total_val_loss)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -341,26 +361,43 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
     else:
         optimizer = base_optimizer
+
+    # Best practice for class weights: inverse frequency weighting
+    # pos_ratio = 0.02, neg_ratio = 0.98
+    # n_samples / (n_classes * class_frequency)
+    pos_weight = 1.0 / (2 * 0.02)  # = 25.0
+    neg_weight = 1.0 / (2 * 0.98)  # = 0.51
+
+    # Normalize so negative class weight = 1.0
+    class_weight_dict = {0: 1.0, 1: pos_weight / neg_weight}  # {0: 1.0, 1: 49.0}
+    print(f"✓ Using class weights: {class_weight_dict}")
+
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
         from_logits=False,
-        reduction="sum_over_batch_size",
-        label_smoothing=0.15,
-        gamma=3.0,
-        apply_class_balancing=True,
-        alpha=0.98
+        reduction="none",  # Use 'none' to apply manual weighting
+        label_smoothing=0.1,
+        gamma=2.0,
+        apply_class_balancing=False
         )
+
+    # Convert class weights to tensor for tf.function compatibility
+    class_weights_tensor = tf.constant([class_weight_dict[0], class_weight_dict[1]], dtype=tf.float32)
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
         'train_auc': tf.keras.metrics.AUC(name='train_auc'),
         'train_acc': tf.keras.metrics.BinaryAccuracy(name='train_accuracy'),
+        'train_precision': tf.keras.metrics.Precision(name='train_precision'),
         'val_auc': tf.keras.metrics.AUC(name='val_auc'),
         'val_acc': tf.keras.metrics.BinaryAccuracy(name='val_accuracy'),
+        'val_precision': tf.keras.metrics.Precision(name='val_precision'),
+        'val_loss': tf.keras.metrics.Mean(name='val_loss'),
         'pep_loss': tf.keras.metrics.Mean(name='pep_loss'),
         'mhc_loss': tf.keras.metrics.Mean(name='mhc_loss'),
         'cls_loss': tf.keras.metrics.Mean(name='cls_loss'),
     }
 
-    history = {k: [] for k in ["train_loss", "train_auc", "train_acc", "val_auc", "val_acc",
+    history = {k: [] for k in ["train_loss", "train_auc", "train_acc", "train_precision",
+                               "val_auc", "val_acc", "val_precision", "val_loss",
                                "cls_loss", "pep_loss", "mhc_loss"]}
     history['subset'] = subset  # Store subset info in history
     best_val_auc = 0.0
@@ -372,16 +409,16 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         # Use dataset length divided by batch size for progress bar
         pbar = tqdm(train_ds, desc="Training", unit="batch", total=train_steps)
         for batch_data in pbar:
-            train_step(model, batch_data, focal_loss_fn, optimizer, metrics)
+            train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights_tensor)
 
             # Update progress bar with current metrics
             pbar.set_postfix({
                 'Loss': f"{metrics['train_loss'].result():.4f}",
                 'AUC': f"{metrics['train_auc'].result():.4f}",
                 'Acc': f"{metrics['train_acc'].result():.4f}",
+                'Prec': f"{metrics['train_precision'].result():.4f}",
                 'PepL': f"{metrics['pep_loss'].result():.4f}",
-                'MhcL': f"{metrics['mhc_loss'].result():.4f}",
-                'ClsL': f"{metrics['cls_loss'].result():.4f}"
+                'MhcL': f"{metrics['mhc_loss'].result():.4f}"
             })
 
         # Validation
@@ -391,15 +428,20 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print(f"\n  Epoch Summary -> "
               f"Train Loss: {metrics['train_loss'].result():.4f}, "
               f"Train AUC: {metrics['train_auc'].result():.4f}, "
+              f"Train Prec: {metrics['train_precision'].result():.4f}, "
+              f"Val Loss: {metrics['val_loss'].result():.4f}, "
               f"Val AUC: {metrics['val_auc'].result():.4f}, "
-              f"Val Acc: {metrics['val_acc'].result():.4f}")
+              f"Val Prec: {metrics['val_precision'].result():.4f}")
 
         # Log history
         history['train_loss'].append(float(metrics['train_loss'].result()))
         history['train_auc'].append(float(metrics['train_auc'].result()))
         history['train_acc'].append(float(metrics['train_acc'].result()))
+        history['train_precision'].append(float(metrics['train_precision'].result()))
         history['val_auc'].append(float(metrics['val_auc'].result()))
         history['val_acc'].append(float(metrics['val_acc'].result()))
+        history['val_precision'].append(float(metrics['val_precision'].result()))
+        history['val_loss'].append(float(metrics['val_loss'].result()))
         history['cls_loss'].append(float(metrics['cls_loss'].result()))
         history['pep_loss'].append(float(metrics['pep_loss'].result()))
         history['mhc_loss'].append(float(metrics['mhc_loss'].result()))
