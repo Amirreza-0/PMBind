@@ -476,9 +476,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 4096, "LEARNING_RATE": 5e-6,
+        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-3,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.4,
-        "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
+        "description": "Optimized run with tf.data pipeline and mixed precision"
     }
 
     base_output_folder = "../results/PMBind_runs_optimized/"
