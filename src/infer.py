@@ -27,8 +27,8 @@ from sklearn.metrics import (confusion_matrix, ConfusionMatrixDisplay, roc_auc_s
 
 # Local imports (ensure these utility scripts are in the same directory or Python path)
 from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
-                   clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA,
-                   masked_categorical_crossentropy)
+                   clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA, OHE_to_seq_single,
+                   masked_categorical_crossentropy, split_y_true_y_pred)
 from models import pmbind_multitask as pmbind
 from visualizations import _analyze_latents
 
@@ -292,6 +292,46 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
 
     run_visualizations(df_infer, latents_pooled, latents_seq, os.path.join(out_dir, "visualizations"), name,
                        max_pep_len, max_mhc_len, seq_map, embed_map, source_col)
+
+    # --- save input and predictions of the first 10 samples in a csv file ---
+    pred_samples_df = df_infer.head(10)
+    pred_data_gen = OptimizedDataGenerator(pred_samples_df, seq_map, embed_map, max_pep_len, max_mhc_len, 10)
+    pred_batch = pred_data_gen[0]
+    model_outputs = model(pred_batch, training=False)
+
+    if "pep_ytrue_ypred" in model_outputs and "mhc_ytrue_ypred" in model_outputs:
+        pep_true, pep_pred_ohe = split_y_true_y_pred(model_outputs["pep_ytrue_ypred"].numpy())
+        mhc_true, mhc_pred_ohe = split_y_true_y_pred(model_outputs["mhc_ytrue_ypred"].numpy())
+        pep_masks_np = pred_batch["pep_mask"].numpy()
+        mhc_masks_np = pred_batch["mhc_mask"].numpy()
+
+        pred_list = []
+        for i in range(100):
+            allele = clean_key(pred_samples_df.iloc[i]['allele'])
+            original_peptide_full = OHE_to_seq_single(pep_true[i], gap=True).replace("X", "-")
+            predicted_peptide_full = OHE_to_seq_single(pep_pred_ohe[i], gap=True).replace("X", "-")
+            pep_valid_mask = (pep_masks_np[i] != PAD_TOKEN) & (np.array(list(original_peptide_full)) != '-')
+            original_peptide = "".join(np.array(list(original_peptide_full))[pep_valid_mask])
+            predicted_peptide = "".join(np.array(list(predicted_peptide_full))[pep_valid_mask])
+
+            original_mhc_full = OHE_to_seq_single(mhc_true[i], gap=True).replace("X", "-")
+            predicted_mhc_full = OHE_to_seq_single(mhc_pred_ohe[i], gap=True).replace("X", "-")
+            mhc_valid_mask = (mhc_masks_np[i] != PAD_TOKEN) & (np.array(list(original_mhc_full)) != '-')
+            original_mhc = "".join(np.array(list(original_mhc_full))[mhc_valid_mask])
+            predicted_mhc = "".join(np.array(list(predicted_mhc_full))[mhc_valid_mask])
+
+            pred_list.append({
+                "sample_index": int(pred_samples_df.index[i]), "allele": allele,
+                "original_peptide": original_peptide, "predicted_peptide": predicted_peptide,
+                "original_mhc": original_mhc, "predicted_mhc": predicted_mhc
+            })
+
+        predictions_df = pd.DataFrame(pred_list)
+        predictions_output_path = os.path.join(out_dir, f"sequence_predictions_{name}.csv")
+        predictions_df.to_csv(predictions_output_path, index=False)
+        print(f"✓ Sequence predictions saved to {predictions_output_path}")
+    else:
+        print("Model does not output reconstruction predictions - skipping sequence prediction CSV")
 
 
 def main():
