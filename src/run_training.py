@@ -350,8 +350,17 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     with open(os.path.join(out_dir, "run_config.json"), "a") as f:
         json.dump(run_config, f, indent=4)
 
-    # Create Lion optimizer with proper mixed precision support
-    base_optimizer = keras.optimizers.Lion(learning_rate=lr)
+    # Create cosine decay learning rate schedule that resets every epoch
+    cosine_decay_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=lr,
+        decay_steps=train_steps,  # Reset every epoch
+        alpha=0.01,  # Minimum learning rate = 0.01 * initial_lr
+        restarts=True
+    )
+    print(f"✓ Using CosineDecay schedule: initial_lr={lr}, decay_steps={train_steps}, restarts=True")
+
+    # Create Lion optimizer with cosine decay schedule
+    base_optimizer = keras.optimizers.Lion(learning_rate=cosine_decay_schedule)
     if mixed_precision:
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
             base_optimizer,
