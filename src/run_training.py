@@ -96,17 +96,14 @@ def _parse_tf_example(example_proto):
     # Create BLOSUM62 input features for the peptide
     pep_blossom62_input = tf.gather(BLOSUM62_TABLE, tf.cast(pep_indices, tf.int32))
     pep_blossom62_input = tf.cast(pep_blossom62_input, compute_dtype)
-
     vocab_size_ohe = len(AA)  # This will be 21
     # Use the ohe_indices to create 21-dimensional one-hot vectors for both targets
     # keep targets in float32 for numerically stable CE
     pep_ohe_target = tf.one_hot(pep_ohe_indices, depth=vocab_size_ohe, dtype=tf.float32)
     mhc_ohe_target = tf.one_hot(mhc_ohe_indices, depth=vocab_size_ohe, dtype=tf.float32)
-
     # Masks are based on the original indices which correctly identify padding
     pep_mask = tf.where(pep_indices == PAD_INDEX, PAD_TOKEN, NORM_TOKEN)
     mhc_mask = tf.where(tf.reduce_all(tf.cast(mhc_emb, tf.float32) == PAD_VALUE, axis=-1), PAD_TOKEN, NORM_TOKEN)
-
     labels = tf.cast(parsed['label'], tf.int32)
     labels = tf.expand_dims(labels, axis=-1)
     return {
@@ -128,12 +125,10 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     # Peptide Masking
     valid_pep_positions = tf.where(tf.equal(features["pep_mask"], NORM_TOKEN))
     num_valid_pep = tf.shape(valid_pep_positions)[0]
-
     # --- CORRECTED MASK COUNT ---
     # At least 2 positions, or 15% of the valid sequence length
     num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.15, tf.int32))
     shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
-
     if tf.shape(shuffled_pep_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
         features["pep_mask"] = tf.tensor_scatter_nd_update(features["pep_mask"], shuffled_pep_indices,
@@ -144,16 +139,13 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
                                    tf.cast(MASK_VALUE, feat_dtype))
         features["pep_blossom62"] = tf.tensor_scatter_nd_update(features["pep_blossom62"], shuffled_pep_indices,
                                                                 mask_updates_pep)
-
     # MHC Masking
     valid_mhc_positions = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
     num_valid_mhc = tf.shape(valid_mhc_positions)[0]
-
     # --- CORRECTED MASK COUNT ---
     # At least 5 positions, or 15% of the valid sequence length
-    num_to_mask_mhc = tf.maximum(5, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.15, tf.int32))
+    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.30, tf.int32))
     shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
-
     if tf.shape(shuffled_mhc_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
         features["mhc_mask"] = tf.tensor_scatter_nd_update(features["mhc_mask"], shuffled_mhc_indices,
@@ -162,35 +154,27 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
         mhc_dtype = features["mhc_emb"].dtype
         mask_updates_mhc = tf.fill([num_to_mask_mhc, tf.shape(features["mhc_emb"])[-1]], tf.cast(MASK_VALUE, mhc_dtype))
         features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], shuffled_mhc_indices, mask_updates_mhc)
-
     # --- OPTIONAL: IMPLEMENTATION OF FEATURE-DIMENSION MASKING ---
     # This logic was in the original generator but is a distinct augmentation step.
     # It can be enabled if you find it improves model robustness.
     if emd_mask_d2:
         # Find positions that are STILL valid (not padded and not positionally masked)
         remaining_valid_mhc = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
-
         if tf.shape(remaining_valid_mhc)[0] > 0:
             # Get the embeddings at these remaining valid positions
             valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
-
             # Create a random mask for the feature dimensions
             dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
-                0.15, features["mhc_emb"].dtype)
-
+                0.30, features["mhc_emb"].dtype)
             # Apply the mask (multiply by 0 where True, 1 where False)
             masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
-
             # Scatter the modified embeddings back into the original tensor
             features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], remaining_valid_mhc,
                                                               masked_embeddings)
-
     return features
-
 
 # You would then call this in your create_dataset function:
 # dataset = dataset.map(lambda x: apply_dynamic_masking(x, emd_mask_d2=False), num_parallel_calls=tf.data.AUTOTUNE)
-
 
 def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking=True):
     """Creates a tf.data.Dataset from a set of sharded, compressed TFRecord files."""
@@ -198,14 +182,10 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
     if not file_list:
         raise ValueError(f"No files found for pattern: {filepath_pattern}")
     print(f"Creating dataset from {len(file_list)} TFRecord files for pattern: {filepath_pattern}")
-
     dataset = tf.data.TFRecordDataset(file_list, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
-
     if is_training:
         dataset = dataset.shuffle(buffer_size=50000, reshuffle_each_iteration=True)
-
     dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
-
     if is_training and apply_masking:
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
     # Correct: `batch` has no num_parallel_calls
@@ -234,12 +214,11 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         # Balanced loss weighting for stability
-        total_loss_weighted = (0.5 * raw_cls_loss) + (1.0 * raw_recon_loss_pep) + (0.5 * raw_recon_loss_mhc)
+        total_loss_weighted = (1.0 * raw_cls_loss) + (0.2 * raw_recon_loss_pep) + (0.2 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
 
         # Use proper LossScaleOptimizer methods for mixed precision
         if mixed_precision:
-            # Scale loss using the correct TensorFlow 2.16+ API
             scaled_loss = optimizer.scale_loss(total_loss_weighted)
             grads = tape.gradient(scaled_loss, model.trainable_variables)
             # Gradient unscaling is handled automatically by apply_gradients
@@ -274,7 +253,7 @@ def eval_step(model, batch_data, metrics):
 # ──────────────────────────────────────────────────────────────────────
 # Main Training Function
 # ----------------------------------------------------------------------
-def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std,
+def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std, run_config,
           resume_from_weights=None, enable_masking=True, subset=1.0):
     """Fully optimized training function using the new data pipeline."""
 
@@ -325,7 +304,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=0.2)
+                   ESM_dim=ESM_DIM, drop_out_rate=0.3)
 
     model.build(train_ds.element_spec)
 
@@ -340,14 +319,16 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     # save model config
     config_data = model.get_config()
-    config_data['training_subset'] = subset  # Add subset info to config
-    config_data['validation_subset'] = subset
-    config_data['MAX_PEP_LEN'] = MAX_PEP_LEN  # Add sequence length info
-    config_data['MAX_MHC_LEN'] = MAX_MHC_LEN
-    config_data['ESM_DIM'] = ESM_DIM
-    config_data['MHC_CLASS'] = MHC_CLASS
+    run_config['training_subset'] = subset  # Add subset info to config
+    run_config['validation_subset'] = subset
+    run_config['MAX_PEP_LEN'] = MAX_PEP_LEN  # Add sequence length info
+    run_config['MAX_MHC_LEN'] = MAX_MHC_LEN
+    run_config['ESM_DIM'] = ESM_DIM
+    run_config['MHC_CLASS'] = MHC_CLASS
     with open(os.path.join(out_dir, "model_config.json"), "w") as f:
         json.dump(config_data, f, indent=4)
+    with open(os.path.join(out_dir, "run_config.json"), "a") as f:
+        json.dump(run_config, f, indent=4)
 
     # Create Lion optimizer with proper mixed precision support
     base_optimizer = keras.optimizers.Lion(learning_rate=lr)
@@ -363,10 +344,11 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
         from_logits=False,
         reduction="sum_over_batch_size",
-        label_smoothing=0.05,
+        label_smoothing=0.15,
         gamma=3.0,
         apply_class_balancing=True,
-        alpha=0.98)
+        alpha=0.98
+        )
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
         'train_auc': tf.keras.metrics.AUC(name='train_auc'),
@@ -441,9 +423,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 # ----------------------------------------------------------------------
 def main(args):
     """Main function to run the training pipeline."""
-    config = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 4096, "LEARNING_RATE": 5e-6,
-        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.1,
+    RUN_CONFIG = {
+        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 4096, "LEARNING_RATE": 5e-6,
+        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.4,
         "description": "Fully optimized TFRecord pipeline with BLOSUM62 input and increased batch size."
     }
 
@@ -452,7 +434,7 @@ def main(args):
 
     fold_to_run = args.fold  # Get fold from args
     run_id = run_id_base + fold_to_run
-    run_name = f"run_{run_id}_mhc{config['MHC_CLASS']}_dim{config['EMBED_DIM']}_h{config['HEADS']}_fold{fold_to_run}"
+    run_name = f"run_{run_id}_mhc{RUN_CONFIG['MHC_CLASS']}_dim{RUN_CONFIG['EMBED_DIM']}_h{RUN_CONFIG['HEADS']}_fold{fold_to_run}"
     out_dir = os.path.join(base_output_folder, run_name)
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
@@ -465,21 +447,22 @@ def main(args):
         sys.exit(1)
 
     with open(os.path.join(out_dir, "config.json"), 'w') as f:
-        json.dump(config, f, indent=4)
+        json.dump(RUN_CONFIG, f, indent=4)
 
     train(
         tfrecord_dir=tfrecord_dir,
         out_dir=out_dir,
-        mhc_class=config["MHC_CLASS"],
-        epochs=config["EPOCHS"],
-        batch_size=config["BATCH_SIZE"],
-        lr=config["LEARNING_RATE"],
-        embed_dim=config["EMBED_DIM"],
-        heads=config["HEADS"],
-        noise_std=config["NOISE_STD"],
+        mhc_class=RUN_CONFIG["MHC_CLASS"],
+        epochs=RUN_CONFIG["EPOCHS"],
+        batch_size=RUN_CONFIG["BATCH_SIZE"],
+        lr=RUN_CONFIG["LEARNING_RATE"],
+        embed_dim=RUN_CONFIG["EMBED_DIM"],
+        heads=RUN_CONFIG["HEADS"],
+        noise_std=RUN_CONFIG["NOISE_STD"],
         resume_from_weights=args.resume_from,
         enable_masking=True,
-        subset=args.subset
+        subset=args.subset,
+        run_config=RUN_CONFIG
     )
 
 
