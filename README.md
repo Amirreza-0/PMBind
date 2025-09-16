@@ -1,5 +1,7 @@
 # PMBind
 
+
+
 ### Installation
 
 ```bash
@@ -8,3 +10,9 @@ cd PMBind/
 ```
 
 download the data from the link in the data folder
+
+
+
+
+citation:
+https://orcid.org/0000-0003-2742-7138
