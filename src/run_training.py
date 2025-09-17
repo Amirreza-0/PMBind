@@ -21,6 +21,7 @@ import json
 import os
 from tqdm import tqdm
 import argparse
+import tensorflow_model_analysis as tfma
 
 # Local imports
 from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
@@ -243,6 +244,9 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weigh
     metrics['train_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['train_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['train_f1'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['train_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(raw_recon_loss_pep)
     metrics['mhc_loss'].update_state(raw_recon_loss_mhc)
@@ -269,6 +273,9 @@ def eval_step(model, batch_data, focal_loss_fn, metrics):
     metrics['val_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['val_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['val_f1'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    metrics['val_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_loss'].update_state(total_val_loss)
 
 
@@ -429,20 +436,26 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         'train_auc': tf.keras.metrics.AUC(name='train_auc'),
         'train_acc': tf.keras.metrics.BinaryAccuracy(name='train_accuracy'),
         'train_precision': tf.keras.metrics.Precision(name='train_precision'),
+        'train_recall': tf.keras.metrics.Recall(name='train_recall'),
+        'train_f1': tf.keras.metrics.F1Score(name='train_f1'),
+        'train_mcc': tfma.metrics.MatthewsCorrelationCoefficient(name='train_mcc'),
         'val_auc': tf.keras.metrics.AUC(name='val_auc'),
         'val_acc': tf.keras.metrics.BinaryAccuracy(name='val_accuracy'),
         'val_precision': tf.keras.metrics.Precision(name='val_precision'),
+        'val_recall': tf.keras.metrics.Recall(name='val_recall'),
+        'val_f1': tf.keras.metrics.F1Score(name='val_f1'),
+        'val_mcc': tfma.metrics.MatthewsCorrelationCoefficient(name='val_mcc'),
         'val_loss': tf.keras.metrics.Mean(name='val_loss'),
         'pep_loss': tf.keras.metrics.Mean(name='pep_loss'),
         'mhc_loss': tf.keras.metrics.Mean(name='mhc_loss'),
         'cls_loss': tf.keras.metrics.Mean(name='cls_loss'),
     }
 
-    history = {k: [] for k in ["train_loss", "train_auc", "train_acc", "train_precision",
-                               "val_auc", "val_acc", "val_precision", "val_loss",
+    history = {k: [] for k in ["train_loss", "train_auc", "train_acc", "train_precision", "train_recall", "train_f1", "train_mcc",
+                               "val_auc", "val_acc", "val_precision", "val_recall", "val_f1", "val_mcc", "val_loss",
                                "cls_loss", "pep_loss", "mhc_loss"]}
     history['subset'] = subset  # Store subset info in history
-    best_val_auc = 0.0
+    best_val_mcc = -1.0  # MCC ranges from -1 to 1, start with worst possible
 
     for epoch in range(epochs):
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
@@ -459,11 +472,11 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             # Update progress bar with current metrics
             pbar.set_postfix({
                 'Loss': f"{metrics['train_loss'].result():.4f}",
-                'AUC': f"{metrics['train_auc'].result():.4f}",
-                'Acc': f"{metrics['train_acc'].result():.4f}",
+                'F1': f"{metrics['train_f1'].result():.4f}",
+                'MCC': f"{metrics['train_mcc'].result():.4f}",
+                'Recall': f"{metrics['train_recall'].result():.4f}",
                 'Prec': f"{metrics['train_precision'].result():.4f}",
-                'PepL': f"{metrics['pep_loss'].result():.4f}",
-                'MhcL': f"{metrics['mhc_loss'].result():.4f}"
+                'AUC': f"{metrics['train_auc'].result():.4f}"
             })
 
         # Validation
@@ -474,28 +487,40 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
               f"Train Loss: {metrics['train_loss'].result():.4f}, "
               f"Train AUC: {metrics['train_auc'].result():.4f}, "
               f"Train Prec: {metrics['train_precision'].result():.4f}, "
+              f"Train Recall: {metrics['train_recall'].result():.4f}, "
+              f"Train F1: {metrics['train_f1'].result():.4f}, "
+              f"Train MCC: {metrics['train_mcc'].result():.4f}, "
               f"Val Loss: {metrics['val_loss'].result():.4f}, "
               f"Val AUC: {metrics['val_auc'].result():.4f}, "
-              f"Val Prec: {metrics['val_precision'].result():.4f}")
+              f"Val Prec: {metrics['val_precision'].result():.4f}, "
+              f"Val Recall: {metrics['val_recall'].result():.4f}, "
+              f"Val F1: {metrics['val_f1'].result():.4f}, "
+              f"Val MCC: {metrics['val_mcc'].result():.4f}")
 
         # Log history
         history['train_loss'].append(float(metrics['train_loss'].result()))
         history['train_auc'].append(float(metrics['train_auc'].result()))
         history['train_acc'].append(float(metrics['train_acc'].result()))
         history['train_precision'].append(float(metrics['train_precision'].result()))
+        history['train_recall'].append(float(metrics['train_recall'].result()))
+        history['train_f1'].append(float(metrics['train_f1'].result()))
+        history['train_mcc'].append(float(metrics['train_mcc'].result()))
         history['val_auc'].append(float(metrics['val_auc'].result()))
         history['val_acc'].append(float(metrics['val_acc'].result()))
         history['val_precision'].append(float(metrics['val_precision'].result()))
+        history['val_recall'].append(float(metrics['val_recall'].result()))
+        history['val_f1'].append(float(metrics['val_f1'].result()))
+        history['val_mcc'].append(float(metrics['val_mcc'].result()))
         history['val_loss'].append(float(metrics['val_loss'].result()))
         history['cls_loss'].append(float(metrics['cls_loss'].result()))
         history['pep_loss'].append(float(metrics['pep_loss'].result()))
         history['mhc_loss'].append(float(metrics['mhc_loss'].result()))
 
-        current_val_auc = metrics['val_auc'].result()
-        if current_val_auc > best_val_auc:
-            best_val_auc = current_val_auc
+        current_val_mcc = metrics['val_mcc'].result()
+        if current_val_mcc > best_val_mcc:
+            best_val_mcc = current_val_mcc
             model.save_weights(os.path.join(out_dir, "best_model.weights.h5"))
-            print(f"  -> New best model saved with Val AUC: {best_val_auc:.4f}")
+            print(f"  -> New best model saved with Val MCC: {best_val_mcc:.4f}")
 
     print("\nTraining finished. Saving final model and generating visualizations...")
     model.save_weights(os.path.join(out_dir, "final_model.weights.h5"))
