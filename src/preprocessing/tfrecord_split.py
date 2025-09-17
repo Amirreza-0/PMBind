@@ -21,7 +21,7 @@ from tqdm import tqdm
 BATCH_SIZE = 32768
 
 
-def create_writers(output_dir, num_negative_files=10):
+def create_writers(output_dir, num_negative_files=63):
     """Create and open TFRecordWriter objects for all output files."""
     os.makedirs(output_dir, exist_ok=True)
 
@@ -100,7 +100,7 @@ def split_tfrecords_fastest(file_pattern, output_dir, dataset_name="Dataset", to
                 writers['positive'].write(record)
                 stats['positive'] += 1
             else:
-                writer_idx = negative_file_index % 10
+                writer_idx = negative_file_index % 63
                 writers['negative'][writer_idx].write(record)
                 stats['negative'] += 1
                 negative_file_index += 1
@@ -113,10 +113,10 @@ def split_tfrecords_fastest(file_pattern, output_dir, dataset_name="Dataset", to
     close_writers(writers)
 
     print("\nNegative samples distribution:")
-    neg_counts = [0] * 10
+    neg_counts = [0] * 63
     # Calculate the final distribution accurately
     for i in range(stats['negative']):
-        neg_counts[i % 10] += 1
+        neg_counts[i % 63] += 1
     for i, count in enumerate(neg_counts):
         print(f"  negative_samples_{i:02d}.tfrecord: {count:,} samples")
 
@@ -189,7 +189,7 @@ def main():
         print(f"\n{name.upper()} Set Results:")
         print(f"  Total samples processed: {stats['total']:,}")
         print(f"  Positive samples: {stats['positive']:,} → 1 file")
-        print(f"  Negative samples: {stats['negative']:,} → 10 files")
+        print(f"  Negative samples: {stats['negative']:,} → 63 files")
 
     stats_path = os.path.join(args.output_dir, 'split_statistics.json')
     with open(stats_path, 'w') as f:
