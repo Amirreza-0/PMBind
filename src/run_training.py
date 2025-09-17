@@ -127,7 +127,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     num_valid_pep = tf.shape(valid_pep_positions)[0]
     # --- CORRECTED MASK COUNT ---
     # At least 2 positions, or 15% of the valid sequence length
-    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.15, tf.int32))
+    num_to_mask_pep = tf.maximum(4, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.3, tf.int32))
     shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
     if tf.shape(shuffled_pep_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
@@ -144,7 +144,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     num_valid_mhc = tf.shape(valid_mhc_positions)[0]
     # --- CORRECTED MASK COUNT ---
     # At least 5 positions, or 15% of the valid sequence length
-    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.30, tf.int32))
+    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.80, tf.int32))
     shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
     if tf.shape(shuffled_mhc_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
@@ -184,9 +184,11 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
     print(f"Creating dataset from {len(file_list)} TFRecord files for pattern: {filepath_pattern}")
     dataset = tf.data.TFRecordDataset(file_list, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
     if is_training:
-        dataset = dataset.shuffle(buffer_size=50000, reshuffle_each_iteration=True)
+        print("✓ Shuffling")
+        dataset = dataset.shuffle(buffer_size=1000000, reshuffle_each_iteration=True)
     dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
     if is_training and apply_masking:
+        print("✓ Applying dynamic masking augmentation")
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
     # Correct: `batch` has no num_parallel_calls
     dataset = dataset.batch(
@@ -220,7 +222,7 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weigh
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         # Balanced loss weighting for stability
-        total_loss_weighted = (1.0 * weighted_cls_loss) + (0.2 * raw_recon_loss_pep) + (0.2 * raw_recon_loss_mhc)
+        total_loss_weighted = (1.0 * weighted_cls_loss) + (0.05 * raw_recon_loss_pep) + (0.05 * raw_recon_loss_mhc)
         total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
 
         # Use proper LossScaleOptimizer methods for mixed precision
@@ -514,7 +516,7 @@ def main(args):
         "description": "Optimized run with tf.data pipeline and mixed precision"
     }
 
-    base_output_folder = "../results/PMBind_runs_optimized/"
+    base_output_folder = "../results/PMBind_runs_optimized2/"
     run_id_base = 0
 
     fold_to_run = args.fold  # Get fold from args
