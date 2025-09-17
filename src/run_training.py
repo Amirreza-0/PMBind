@@ -476,11 +476,12 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             # Update progress bar with current metrics
             pbar.set_postfix({
                 'Loss': f"{metrics['train_loss'].result():.4f}",
+                'Acc': f"{metrics['train_acc'].result():.4f}",
                 'F1': f"{f1:.4f}",
                 'MCC': f"{metrics['train_mcc'].result():.4f}",
-                'Recall': f"{recall:.4f}",
-                'Prec': f"{prec:.4f}",
-                'AUC': f"{metrics['train_auc'].result():.4f}"
+                'PepL': f"{metrics['pep_loss'].result():.4f}",
+                'MhcL': f"{metrics['mhc_loss'].result():.4f}",
+                'ClsL': f"{metrics['cls_loss'].result():.4f}"
             })
 
         # Validation
