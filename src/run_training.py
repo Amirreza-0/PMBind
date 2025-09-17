@@ -358,7 +358,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=0.3)
+                   ESM_dim=ESM_DIM, drop_out_rate=0.5)  # Increased from 0.3 to 0.5
 
     model.build(sample_train_ds.element_spec)
 
@@ -396,8 +396,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     )
     print(f"✓ Using CosineDecayRestarts schedule: initial_lr={lr}, first_decay_steps={decay_steps}")
 
-    # Create Lion optimizer with cosine decay schedule
-    base_optimizer = keras.optimizers.Lion(learning_rate=cosine_decay_schedule)
+    # Create Lion optimizer with cosine decay schedule and weight decay for regularization
+    base_optimizer = keras.optimizers.Lion(learning_rate=cosine_decay_schedule, weight_decay=1e-4)
     if mixed_precision:
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
             base_optimizer,
@@ -421,7 +421,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
         from_logits=False,
         reduction="none",  # Use 'none' to apply manual weighting
-        label_smoothing=0.1,
+        label_smoothing=0.15,  # Increased from 0.1 to 0.15 for better regularization
         gamma=2.0,
         apply_class_balancing=False
         )
@@ -451,6 +451,17 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
                                "cls_loss", "pep_loss", "mhc_loss"]}
     history['subset'] = subset  # Store subset info in history
     best_val_mcc = -1.0  # MCC ranges from -1 to 1, start with worst possible
+
+    # Early stopping parameters
+    patience = 5  # Stop if no improvement for 5 epochs
+    patience_counter = 0
+    min_improvement = 0.001  # Minimum improvement to reset patience
+
+    # Learning rate reduction on plateau
+    lr_patience = 3  # Reduce LR if no improvement for 3 epochs
+    lr_patience_counter = 0
+    lr_reduction_factor = 0.5
+    min_lr = 1e-7
 
     for epoch in range(epochs):
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
@@ -539,10 +550,37 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         history['mhc_loss'].append(float(metrics['mhc_loss'].result()))
 
         current_val_mcc = metrics['val_mcc'].result()
-        if current_val_mcc > best_val_mcc:
+        if current_val_mcc > best_val_mcc + min_improvement:
             best_val_mcc = current_val_mcc
+            patience_counter = 0  # Reset patience
+            lr_patience_counter = 0  # Reset LR patience
             model.save_weights(os.path.join(out_dir, "best_model.weights.h5"))
             print(f"  -> New best model saved with Val MCC: {best_val_mcc:.4f}")
+        else:
+            patience_counter += 1
+            lr_patience_counter += 1
+            print(f"  -> No improvement. Patience: {patience_counter}/{patience}, LR Patience: {lr_patience_counter}/{lr_patience}")
+
+        # Learning rate reduction on plateau
+        if lr_patience_counter >= lr_patience:
+            current_lr = optimizer.learning_rate.numpy() if hasattr(optimizer.learning_rate, 'numpy') else optimizer.learning_rate
+            if hasattr(optimizer, 'inner_optimizer'):  # For LossScaleOptimizer
+                current_lr = optimizer.inner_optimizer.learning_rate.numpy()
+
+            if current_lr > min_lr:
+                new_lr = max(current_lr * lr_reduction_factor, min_lr)
+                if hasattr(optimizer, 'inner_optimizer'):
+                    optimizer.inner_optimizer.learning_rate.assign(new_lr)
+                else:
+                    optimizer.learning_rate.assign(new_lr)
+                lr_patience_counter = 0
+                print(f"  -> Learning rate reduced from {current_lr:.2e} to {new_lr:.2e}")
+
+        # Early stopping check
+        if patience_counter >= patience:
+            print(f"\n*** Early stopping triggered after {patience} epochs without improvement ***")
+            print(f"*** Best validation MCC: {best_val_mcc:.4f} ***")
+            break
 
     print("\nTraining finished. Saving final model and generating visualizations...")
     model.save_weights(os.path.join(out_dir, "final_model.weights.h5"))
