@@ -334,20 +334,27 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         if enable_masking:
             dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
         dataset = dataset.batch(batch_size, drop_remainder=True)
+
+        # Apply subset if needed
+        if subset < 1.0 and train_steps:
+            dataset = dataset.take(train_steps)
+
         dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
         return dataset
 
     val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False)
 
-    if subset < 1.0 and train_steps:
-        train_ds = train_ds.take(train_steps)
+    if subset < 1.0 and val_steps:
         val_ds = val_ds.take(val_steps)
+
+    # Create a sample training dataset for model building
+    sample_train_ds = create_train_dataset_for_epoch(0)
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
                    ESM_dim=ESM_DIM, drop_out_rate=0.3)
 
-    model.build(train_ds.element_spec)
+    model.build(sample_train_ds.element_spec)
 
     if resume_from_weights:
         if os.path.exists(resume_from_weights):
@@ -439,10 +446,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
         for m in metrics.values(): m.reset_state()
 
-        # Create freshly shuffled dataset for this epoch
+        # Create freshly shuffled dataset for this epoch (subset already applied)
         train_ds_epoch = create_train_dataset_for_epoch(epoch)
-        if subset < 1.0 and train_steps:
-            train_ds_epoch = train_ds_epoch.take(train_steps)
 
         # Use dataset length divided by batch size for progress bar
         pbar = tqdm(train_ds_epoch, desc="Training", unit="batch", total=train_steps)
