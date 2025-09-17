@@ -244,7 +244,6 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weigh
     metrics['train_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['train_f1'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['train_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(raw_recon_loss_pep)
@@ -273,7 +272,6 @@ def eval_step(model, batch_data, focal_loss_fn, metrics):
     metrics['val_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['val_f1'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_loss'].update_state(total_val_loss)
 
@@ -436,13 +434,11 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         'train_acc': tf.keras.metrics.BinaryAccuracy(name='train_accuracy'),
         'train_precision': tf.keras.metrics.Precision(name='train_precision'),
         'train_recall': tf.keras.metrics.Recall(name='train_recall'),
-        'train_f1': tf.keras.metrics.F1Score(name='train_f1'),
         'train_mcc': BinaryMCC(name='train_mcc'),
         'val_auc': tf.keras.metrics.AUC(name='val_auc'),
         'val_acc': tf.keras.metrics.BinaryAccuracy(name='val_accuracy'),
         'val_precision': tf.keras.metrics.Precision(name='val_precision'),
         'val_recall': tf.keras.metrics.Recall(name='val_recall'),
-        'val_f1': tf.keras.metrics.F1Score(name='val_f1'),
         'val_mcc': BinaryMCC(name='val_mcc'),
         'val_loss': tf.keras.metrics.Mean(name='val_loss'),
         'pep_loss': tf.keras.metrics.Mean(name='pep_loss'),
@@ -468,13 +464,22 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         for batch_data in pbar:
             train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights_tensor)
 
+            # Calculate F1 manually: F1 = (2 * Precision * Recall) / (Precision + Recall)
+            prec = metrics['train_precision'].result()
+            recall = metrics['train_recall'].result()
+            f1 = tf.where(
+                tf.equal(prec + recall, 0.0),
+                0.0,
+                (2.0 * prec * recall) / (prec + recall)
+            )
+
             # Update progress bar with current metrics
             pbar.set_postfix({
                 'Loss': f"{metrics['train_loss'].result():.4f}",
-                'F1': f"{metrics['train_f1'].result():.4f}",
+                'F1': f"{f1:.4f}",
                 'MCC': f"{metrics['train_mcc'].result():.4f}",
-                'Recall': f"{metrics['train_recall'].result():.4f}",
-                'Prec': f"{metrics['train_precision'].result():.4f}",
+                'Recall': f"{recall:.4f}",
+                'Prec': f"{prec:.4f}",
                 'AUC': f"{metrics['train_auc'].result():.4f}"
             })
 
@@ -482,18 +487,35 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         for batch_data in tqdm(val_ds, desc="Validating", unit="batch", total=val_steps):
             eval_step(model, batch_data, focal_loss_fn, metrics)
 
+        # Calculate F1 manually for both train and val
+        train_prec = metrics['train_precision'].result()
+        train_recall = metrics['train_recall'].result()
+        train_f1 = tf.where(
+            tf.equal(train_prec + train_recall, 0.0),
+            0.0,
+            (2.0 * train_prec * train_recall) / (train_prec + train_recall)
+        )
+
+        val_prec = metrics['val_precision'].result()
+        val_recall = metrics['val_recall'].result()
+        val_f1 = tf.where(
+            tf.equal(val_prec + val_recall, 0.0),
+            0.0,
+            (2.0 * val_prec * val_recall) / (val_prec + val_recall)
+        )
+
         print(f"\n  Epoch Summary -> "
               f"Train Loss: {metrics['train_loss'].result():.4f}, "
               f"Train AUC: {metrics['train_auc'].result():.4f}, "
-              f"Train Prec: {metrics['train_precision'].result():.4f}, "
-              f"Train Recall: {metrics['train_recall'].result():.4f}, "
-              f"Train F1: {metrics['train_f1'].result():.4f}, "
+              f"Train Prec: {train_prec:.4f}, "
+              f"Train Recall: {train_recall:.4f}, "
+              f"Train F1: {train_f1:.4f}, "
               f"Train MCC: {metrics['train_mcc'].result():.4f}, "
               f"Val Loss: {metrics['val_loss'].result():.4f}, "
               f"Val AUC: {metrics['val_auc'].result():.4f}, "
-              f"Val Prec: {metrics['val_precision'].result():.4f}, "
-              f"Val Recall: {metrics['val_recall'].result():.4f}, "
-              f"Val F1: {metrics['val_f1'].result():.4f}, "
+              f"Val Prec: {val_prec:.4f}, "
+              f"Val Recall: {val_recall:.4f}, "
+              f"Val F1: {val_f1:.4f}, "
               f"Val MCC: {metrics['val_mcc'].result():.4f}")
 
         # Log history
@@ -502,13 +524,13 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         history['train_acc'].append(float(metrics['train_acc'].result()))
         history['train_precision'].append(float(metrics['train_precision'].result()))
         history['train_recall'].append(float(metrics['train_recall'].result()))
-        history['train_f1'].append(float(metrics['train_f1'].result()))
+        history['train_f1'].append(float(train_f1))
         history['train_mcc'].append(float(metrics['train_mcc'].result()))
         history['val_auc'].append(float(metrics['val_auc'].result()))
         history['val_acc'].append(float(metrics['val_acc'].result()))
         history['val_precision'].append(float(metrics['val_precision'].result()))
         history['val_recall'].append(float(metrics['val_recall'].result()))
-        history['val_f1'].append(float(metrics['val_f1'].result()))
+        history['val_f1'].append(float(val_f1))
         history['val_mcc'].append(float(metrics['val_mcc'].result()))
         history['val_loss'].append(float(metrics['val_loss'].result()))
         history['cls_loss'].append(float(metrics['cls_loss'].result()))
