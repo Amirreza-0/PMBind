@@ -436,7 +436,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
         # Validation
         for batch_data in tqdm(val_ds, desc="Validating", unit="batch", total=val_steps):
-            eval_step(model, batch_data, metrics)
+            eval_step(model, batch_data, focal_loss_fn, metrics)
 
         print(f"\n  Epoch Summary -> "
               f"Train Loss: {metrics['train_loss'].result():.4f}, "
