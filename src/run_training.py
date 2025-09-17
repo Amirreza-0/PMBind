@@ -314,8 +314,29 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     train_pattern = os.path.join(tfrecord_dir, "train_shard_*.tfrecord")
     val_pattern = os.path.join(tfrecord_dir, "validation_shard_*.tfrecord")
 
-    # Create dataset with subset applied via take() if needed
-    train_ds = create_dataset(train_pattern, batch_size, is_training=True, apply_masking=enable_masking)
+    # Create dataset function for epoch-level reshuffling
+    def create_train_dataset_for_epoch(epoch):
+        file_list = tf.io.gfile.glob(train_pattern)
+        import random
+        random.seed(epoch + 42)  # Different seed each epoch
+        random.shuffle(file_list)  # Shuffle file order
+
+        # Interleave files for better class distribution
+        file_dataset = tf.data.Dataset.from_tensor_slices(file_list)
+        dataset = file_dataset.interleave(
+            lambda filename: tf.data.TFRecordDataset(filename, compression_type="GZIP"),
+            cycle_length=min(len(file_list), 8),
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False
+        )
+        dataset = dataset.shuffle(buffer_size=100000)
+        dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
+        if enable_masking:
+            dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.batch(batch_size, drop_remainder=True)
+        dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+        return dataset
+
     val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False)
 
     if subset < 1.0 and train_steps:
@@ -418,9 +439,13 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
         for m in metrics.values(): m.reset_state()
 
+        # Create freshly shuffled dataset for this epoch
+        train_ds_epoch = create_train_dataset_for_epoch(epoch)
+        if subset < 1.0 and train_steps:
+            train_ds_epoch = train_ds_epoch.take(train_steps)
+
         # Use dataset length divided by batch size for progress bar
-        # Note: train_ds already reshuffles automatically with reshuffle_each_iteration=True
-        pbar = tqdm(train_ds, desc="Training", unit="batch", total=train_steps)
+        pbar = tqdm(train_ds_epoch, desc="Training", unit="batch", total=train_steps)
         for batch_data in pbar:
             train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights_tensor)
 
