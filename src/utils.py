@@ -2241,3 +2241,62 @@ def binary_focal_loss(y_true,
     # 6. Final focal loss
     focal_loss = alpha_factor * modulating_factor * bce
     return focal_loss
+
+@tf.keras.utils.register_keras_serializable(package='Custom', name='BinaryMCC')
+class BinaryMCC(tf.keras.metrics.Metric):
+    """
+    Matthews Correlation Coefficient for binary classification.
+
+    Simple implementation using the direct formula:
+    MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
+
+    Range: -1 (worst) to +1 (perfect), 0 = random
+    """
+
+    def __init__(self, name='binary_mcc', threshold=0.5, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.tp = self.add_weight(name='tp', initializer='zeros')
+        self.tn = self.add_weight(name='tn', initializer='zeros')
+        self.fp = self.add_weight(name='fp', initializer='zeros')
+        self.fn = self.add_weight(name='fn', initializer='zeros')
+
+    @tf.function(reduce_retracing=True)
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        # Convert to binary
+        y_pred_binary = tf.cast(y_pred >= self.threshold, tf.float32)
+        y_true_binary = tf.cast(y_true, tf.float32)
+
+        # Calculate TP, TN, FP, FN
+        tp = tf.reduce_sum(y_true_binary * y_pred_binary)
+        tn = tf.reduce_sum((1 - y_true_binary) * (1 - y_pred_binary))
+        fp = tf.reduce_sum((1 - y_true_binary) * y_pred_binary)
+        fn = tf.reduce_sum(y_true_binary * (1 - y_pred_binary))
+
+        # Update running totals
+        self.tp.assign_add(tp)
+        self.tn.assign_add(tn)
+        self.fp.assign_add(fp)
+        self.fn.assign_add(fn)
+
+    @tf.function(reduce_retracing=True)
+    def result(self):
+        # MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
+        numerator = self.tp * self.tn - self.fp * self.fn
+        denominator = tf.sqrt(
+            (self.tp + self.fp) * (self.tp + self.fn) *
+            (self.tn + self.fp) * (self.tn + self.fn)
+        )
+
+        # Handle division by zero
+        return tf.where(
+            tf.equal(denominator, 0.0),
+            tf.constant(0.0, dtype=self.dtype),
+            numerator / denominator
+        )
+
+    def reset_state(self):
+        self.tp.assign(0.0)
+        self.tn.assign(0.0)
+        self.fp.assign(0.0)
+        self.fn.assign(0.0)

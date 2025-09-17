@@ -21,12 +21,11 @@ import json
 import os
 from tqdm import tqdm
 import argparse
-import tensorflow_model_analysis as tfma
 
 # Local imports
 from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
                    clean_key, masked_categorical_crossentropy, seq_to_indices,
-                   AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE)
+                   AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC)
 from models import pmbind_multitask as pmbind
 from visualizations import visualize_training_history
 
@@ -438,13 +437,13 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         'train_precision': tf.keras.metrics.Precision(name='train_precision'),
         'train_recall': tf.keras.metrics.Recall(name='train_recall'),
         'train_f1': tf.keras.metrics.F1Score(name='train_f1'),
-        'train_mcc': tfma.metrics.MatthewsCorrelationCoefficient(name='train_mcc'),
+        'train_mcc': BinaryMCC(name='train_mcc'),
         'val_auc': tf.keras.metrics.AUC(name='val_auc'),
         'val_acc': tf.keras.metrics.BinaryAccuracy(name='val_accuracy'),
         'val_precision': tf.keras.metrics.Precision(name='val_precision'),
         'val_recall': tf.keras.metrics.Recall(name='val_recall'),
         'val_f1': tf.keras.metrics.F1Score(name='val_f1'),
-        'val_mcc': tfma.metrics.MatthewsCorrelationCoefficient(name='val_mcc'),
+        'val_mcc': BinaryMCC(name='val_mcc'),
         'val_loss': tf.keras.metrics.Mean(name='val_loss'),
         'pep_loss': tf.keras.metrics.Mean(name='pep_loss'),
         'mhc_loss': tf.keras.metrics.Mean(name='mhc_loss'),
