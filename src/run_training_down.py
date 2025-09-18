@@ -366,7 +366,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     run_config['ESM_DIM'], run_config['MHC_CLASS'] = ESM_DIM, MHC_CLASS
     with open(os.path.join(out_dir, "model_config.json"), "w") as f:
         json.dump(config_data, f, indent=4)
-    with open(os.path.join(out_dir, "run_config.json"), "a") as f:
+    with open(os.path.join(out_dir, "run_config.json"), "w") as f:
         json.dump(run_config, f, indent=4)
 
     # --- 3. Setup Optimizer, Loss, and Metrics ---
@@ -374,7 +374,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     base_optimizer = keras.optimizers.Lion(learning_rate=initial_lr, weight_decay=1e-4)
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer) if mixed_precision else base_optimizer
 
-    loss_fn = AsymmetricPenaltyBinaryCrossentropy(label_smoothing=0.1, asymmetry_strength=3.0)
+    loss_fn = AsymmetricPenaltyBinaryCrossentropy(label_smoothing=run_config["LABEL_SMOOTHING"], asymmetry_strength=run_config["ASYMMETRIC_LOSS_SCALE"])
 
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
@@ -531,8 +531,9 @@ def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
         "MHC_CLASS": 1, "EPOCHS": 126, "BATCH_SIZE": 256, "LEARNING_RATE": 1e-5,
-        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5,
-        "description": "Optimized run with tf.data pipeline and epoch-based negative downsampling"
+        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_apram,
+        "CLS_LOSS_WEIGHT": 3.0, "PEP_RECON_LOSS_WEIGHT": 0.02, "MHC_RECON_LOSS_WEIGHT": 0.02,
+        "description": "Optimized run with tf.data pipeline and epoch-based negative downsampling and asymmetric loss."
     }
 
     base_output_folder = "../results/PMBind_runs_optimized4/"
@@ -551,9 +552,6 @@ def main(args):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
         print("Please run the data splitting script first.")
         sys.exit(1)
-
-    with open(os.path.join(out_dir, "config.json"), 'w') as f:
-        json.dump(RUN_CONFIG, f, indent=4)
 
     train(
         tfrecord_dir=tfrecord_dir,
@@ -590,5 +588,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to model weights (.h5 file) to resume training from.")
     parser.add_argument("--subset", type=float, default=1.0, help="Subset percentage of training data to use.")
+    parser.add_argument("--ls_param", type=float, default=0.1, help="Label smoothing parameter.")
+    parser.add_argument("--as_param", type=float, default=3.0, help="Asymmetric loss scaling parameter.")
     args = parser.parse_args()
     main(args)
