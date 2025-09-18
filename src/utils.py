@@ -1070,7 +1070,7 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self.self_attn_mhc = self_attn_mhc
         self.apply_rope = apply_rope  # flag for rotary positional embedding
 
-    def build(self, x):
+    def build(self, input_shape):
         # Projection weights
         self.norm1 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln1_{self.name}')
         self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
@@ -1094,6 +1094,8 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
                 raise ValueError(f"RotaryEmbedding requires even att_dim, got {self.att_dim}.")
             # q/k have shape (B, H, S, D): sequence_axis=2, feature_axis=-1
             self.rope = RotaryEmbedding(sequence_axis=2, feature_axis=-1, name=f'rope_{self.name}')
+
+        super().build(input_shape)
 
     @tf.function(reduce_retracing=True)
     def call(self, x_pmhc, p_mask, m_mask):
@@ -2300,3 +2302,69 @@ class BinaryMCC(tf.keras.metrics.Metric):
         self.tn.assign(0.0)
         self.fp.assign(0.0)
         self.fn.assign(0.0)
+
+@tf.keras.utils.register_keras_serializable(package='Custom', name='AsymmetricPenaltyBinaryCrossentropy')
+class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
+    """
+    Asymmetric Penalty Binary Cross-Entropy Loss
+    Features:
+    - Minimum at smoothed label: p = 1-ε (true=1), p = ε (true=0)
+    - Steeper penalty toward opposing class
+    - Gentler penalty toward actual class
+    Args:
+        label_smoothing: Smoothing parameter ε (0.05-0.15 recommended)
+        asymmetry_strength: Controls penalty asymmetry (0.3-0.8 recommended)
+    """
+
+    def __init__(self, label_smoothing=0.1, asymmetry_strength=0.5,
+                 name='asymmetric_penalty_binary_crossentropy', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.label_smoothing = label_smoothing
+        self.asymmetry_strength = asymmetry_strength
+
+    @tf.function(reduce_retracing=True)
+    def call(self, y_true, y_pred):
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
+
+        # Base: Standard label smoothing (ensures minimum at correct location)
+        y_smooth = y_true * (1 - self.label_smoothing) + (1 - y_true) * self.label_smoothing
+        base_loss = -tf.reduce_mean(y_smooth * tf.math.log(y_pred) + (1 - y_smooth) * tf.math.log(1 - y_pred))
+
+        # Calculate optimal prediction points
+        optimal_true1 = 1 - self.label_smoothing  # 0.9 when ε=0.1
+        optimal_true0 = self.label_smoothing      # 0.1 when ε=0.1
+
+        # Distance from optimal points
+        dist_from_optimal_true1 = tf.abs(y_pred - optimal_true1)
+        dist_from_optimal_true0 = tf.abs(y_pred - optimal_true0)
+
+        # Asymmetric penalties
+        # For true=1: Stronger penalty when moving toward 0 (opposing class)
+        penalty_true1 = y_true * tf.where(
+            y_pred < optimal_true1,  # Moving toward opposing class
+            self.asymmetry_strength * dist_from_optimal_true1**2,      # Strong penalty
+            self.asymmetry_strength * 0.3 * dist_from_optimal_true1**2  # Weak penalty
+        )
+
+        # For true=0: Stronger penalty when moving toward 1 (opposing class)
+        penalty_true0 = (1 - y_true) * tf.where(
+            y_pred > optimal_true0,  # Moving toward opposing class
+            self.asymmetry_strength * dist_from_optimal_true0**2,      # Strong penalty
+            self.asymmetry_strength * 0.3 * dist_from_optimal_true0**2  # Weak penalty
+        )
+
+        total_loss = base_loss + tf.reduce_mean(penalty_true1 + penalty_true0)
+        return total_loss
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'label_smoothing': self.label_smoothing,
+            'asymmetry_strength': self.asymmetry_strength
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
