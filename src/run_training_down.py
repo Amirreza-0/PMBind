@@ -530,7 +530,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 126, "BATCH_SIZE": 256, "LEARNING_RATE": 1e-4,
+        "MHC_CLASS": 1, "EPOCHS": 126, "BATCH_SIZE": 256, "LEARNING_RATE": 1e-5,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5,
         "description": "Optimized run with tf.data pipeline and epoch-based negative downsampling"
     }
