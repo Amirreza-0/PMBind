@@ -29,7 +29,7 @@ from sklearn.metrics import (confusion_matrix, ConfusionMatrixDisplay, roc_auc_s
 from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
                    clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA, OHE_to_seq_single,
                    masked_categorical_crossentropy, split_y_true_y_pred)
-from models import pmbind_multitask as pmbind
+from models import pmbind_multitask_modified as pmbind
 from visualizations import _analyze_latents
 
 # --- Globals & Configuration ---
@@ -306,7 +306,7 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
         mhc_masks_np = pred_batch["mhc_mask"].numpy()
 
         pred_list = []
-        for i in range(100):
+        for i in range(10):
             allele = clean_key(pred_samples_df.iloc[i]['allele'])
             original_peptide_full = OHE_to_seq_single(pep_true[i], gap=True).replace("X", "-")
             predicted_peptide_full = OHE_to_seq_single(pep_pred_ohe[i], gap=True).replace("X", "-")

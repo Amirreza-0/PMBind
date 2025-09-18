@@ -382,16 +382,17 @@ def pmbind_multitask(max_pep_len: int,
 
 
 def pmbind_multitask_modified(max_pep_len: int,
-                             max_mhc_len: int,
-                             emb_dim: int = 64,
-                             heads: int = 4,
-                             transformer_layers: int = 2,
-                             mask_token: float = MASK_TOKEN,
-                             pad_token: float = PAD_TOKEN,
-                             noise_std: float = 0.1,
-                             latent_dim: int = 128,
-                             drop_out_rate: float = 0.2,
-                             ESM_dim: int = 1536):
+                            max_mhc_len: int,
+                            emb_dim: int = 64,
+                            heads: int = 4,
+                            transformer_layers: int = 2,
+                            mask_token: float = MASK_TOKEN,
+                            pad_token: float = PAD_TOKEN,
+                            noise_std: float = 0.1,
+                            latent_dim: int = 128,
+                            drop_out_rate: float = 0.2,
+                            l2_reg: float = 0.01,
+                            ESM_dim: int = 1536):
     """
     A multi-task model for semi-supervised pMHC analysis, updated to use
     the custom SelfAttentionWith2DMask layer.
@@ -414,13 +415,13 @@ def pmbind_multitask_modified(max_pep_len: int,
     pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_blossom62_in, pep_mask_in)
     pep = PositionalEncoding(23, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)
     pep = layers.Dense(emb_dim, name="pep_dense_embed")(pep)
-    pep = layers.Dropout(drop_out_rate, name="pep_dropout")(pep)
+    pep = layers.SpatialDropout1D(drop_out_rate, name="pep_dropout")(pep) # SpatialDropout1D for sequence data to drop entire feature maps
 
     mhc = AddGaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc_emb_in)
     mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc, mhc_mask_in)
     mhc = PositionalEncoding(ESM_dim, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)
     mhc = layers.Dense(emb_dim, name="mhc_dense_embed")(mhc)
-    mhc = layers.Dropout(drop_out_rate, name="mhc_dropout")(mhc)
+    mhc = layers.SpatialDropout1D(drop_out_rate, name="mhc_dropout")(mhc) # SpatialDropout1D for sequence data to drop entire feature maps
     mhc = layers.LayerNormalization(name="mhc_layer_norm")(mhc)
 
     # add Gaussian noise
@@ -456,7 +457,7 @@ def pmbind_multitask_modified(max_pep_len: int,
     # concatenate mean and std pooled vectors
     pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_std2, pooled_mean1]) # (B, 1*(P+M+D))
 
-    binding_head = layers.Dense(emb_dim, activation="relu", name="binding_dense1", kernel_regularizer=keras.regularizers.l2(0.01))(pooled_latent)
+    binding_head = layers.Dense(emb_dim, activation="gelu", name="binding_dense1", kernel_regularizer=keras.regularizers.l2(l2_reg))(pooled_latent)
     binding_head = layers.GaussianDropout((drop_out_rate*1.5), name="binding_gaussian_dropout")(binding_head)
     binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred", dtype="float32")(binding_head) # (B, 1)
 
