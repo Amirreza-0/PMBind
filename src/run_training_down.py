@@ -26,7 +26,9 @@ import random
 # Local imports
 from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
                    clean_key, masked_categorical_crossentropy, seq_to_indices,
-                   AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC)
+                   AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC,
+                   AsymmetricPenaltyBinaryCrossentropy)
+
 from models import pmbind_multitask_modified as pmbind
 from visualizations import visualize_training_history
 
@@ -217,22 +219,22 @@ def create_dataset(file_list, batch_size, is_training=True, apply_masking=True):
 # Training & Evaluation Steps
 # ----------------------------------------------------------------------
 @tf.function()
-def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
+def train_step(model, batch_data, loss_fn, optimizer, metrics):
     """Compiled training step with proper mixed precision handling."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
         # Compute individual losses
-        raw_cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
+        raw_cls_loss = loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
 
         # Apply class weights manually
-        labels_flat = tf.reshape(batch_data["labels"], [-1])
+        # labels_flat = tf.reshape(batch_data["labels"], [-1])
         # sample_weights = tf.gather(class_weights, tf.cast(labels_flat, tf.int32))
-        weighted_cls_loss = tf.reduce_mean(raw_cls_loss)
+        # weighted_cls_loss = tf.reduce_mean(raw_cls_loss)
 
         raw_recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
         raw_recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
         # Check for NaN/Inf in individual losses
-        weighted_cls_loss = tf.where(tf.math.is_finite(weighted_cls_loss), weighted_cls_loss, 0.0)
+        weighted_cls_loss = tf.where(tf.math.is_finite(raw_cls_loss), raw_cls_loss, 0.0)
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         # Balanced loss weighting for stability
@@ -266,14 +268,14 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics):
 
 
 @tf.function()
-def eval_step(model, batch_data, focal_loss_fn, metrics):
+def eval_step(model, batch_data, loss_fn, metrics):
     """Compiled evaluation step."""
     outputs = model(batch_data, training=False)
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
 
     # Simple binary crossentropy for classification (no class weighting for validation)
-    cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
+    cls_loss = loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
 
     # Reconstruction losses using masked_categorical_crossentropy
     recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
@@ -372,9 +374,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     base_optimizer = keras.optimizers.Lion(learning_rate=initial_lr, weight_decay=1e-4)
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer) if mixed_precision else base_optimizer
 
-    focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-        from_logits=False, reduction="sum_over_batch_size", label_smoothing=0.10, gamma=2.0
-    )
+    loss_fn = AsymmetricPenaltyBinaryCrossentropy(label_smoothing=0.1, asymmetry_strength=3.0)
 
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
@@ -428,7 +428,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
         pbar = tqdm(train_ds_epoch, desc="Training", unit="batch")
         for batch_data in pbar:
-            train_step(model, batch_data, focal_loss_fn, optimizer, metrics)
+            train_step(model, batch_data, loss_fn, optimizer, metrics)
             pbar.set_postfix({
                 'Loss': f"{metrics['train_loss'].result():.4f}", 'AUC': f"{metrics['train_auc'].result():.4f}",
                 'Acc': f"{metrics['train_acc'].result():.4f}", 'Precs': f"{metrics['train_precision'].result():.4f}",
@@ -452,7 +452,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             val_ds = val_ds.take(max(1, int((val_samples // batch_size) * subset)))
 
         for batch_data in tqdm(val_ds, desc="Validating", unit="batch"):
-            eval_step(model, batch_data, focal_loss_fn, metrics)
+            eval_step(model, batch_data, loss_fn, metrics)
 
         # --- 5. Logging, Checkpointing, and Early Stopping ---
         train_prec, train_recall = metrics['train_precision'].result(), metrics['train_recall'].result()
@@ -530,7 +530,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 126, "BATCH_SIZE": 256, "LEARNING_RATE": 1e-6,
+        "MHC_CLASS": 1, "EPOCHS": 126, "BATCH_SIZE": 256, "LEARNING_RATE": 1e-4,
         "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5,
         "description": "Optimized run with tf.data pipeline and epoch-based negative downsampling"
     }
