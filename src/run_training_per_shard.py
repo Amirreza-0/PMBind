@@ -115,7 +115,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):
     valid_pep_positions = tf.where(tf.equal(features["pep_mask"], NORM_TOKEN))
     num_valid_pep = tf.shape(valid_pep_positions)[0]
 
-    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.15, tf.int32))
+    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.25, tf.int32))
     shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
 
     if tf.shape(shuffled_pep_indices)[0] > 0:
@@ -130,7 +130,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):
     # MHC Masking
     valid_mhc_positions = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
     num_valid_mhc = tf.shape(valid_mhc_positions)[0]
-    num_to_mask_mhc = tf.maximum(5, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.30, tf.int32))
+    num_to_mask_mhc = tf.maximum(5, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.40, tf.int32))
     shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
 
     if tf.shape(shuffled_mhc_indices)[0] > 0:
@@ -146,7 +146,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):
         if tf.shape(remaining_valid_mhc)[0] > 0:
             valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
             dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
-                0.15, features["mhc_emb"].dtype)
+                0.25, features["mhc_emb"].dtype)
             masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
             features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], remaining_valid_mhc,
                                                               masked_embeddings)
@@ -211,11 +211,13 @@ def train_step(model, batch_data, loss_fn, optimizer, metrics, class_weights, ru
         if mixed_precision:
             scaled_loss = optimizer.scale_loss(total_loss_weighted)
             grads = tape.gradient(scaled_loss, model.trainable_variables)
-            grads, _ = tf.clip_by_global_norm(grads, 1.0)
+            # More aggressive gradient clipping for overfitting
+            grads, _ = tf.clip_by_global_norm(grads, 0.5)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
         else:
             grads = tape.gradient(total_loss_weighted, model.trainable_variables)
-            grads, _ = tf.clip_by_global_norm(grads, 1.0)
+            # More aggressive gradient clipping for overfitting
+            grads, _ = tf.clip_by_global_norm(grads, 0.5)
             optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
     labels_flat = tf.reshape(batch_data["labels"], [-1])
@@ -281,14 +283,14 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
     train_ds = create_dataset(epoch_train_files, batch_size, is_training=True,
                              apply_masking=enable_masking, subset_steps=train_steps)
 
-    # Build model
+    # Build model with stronger regularization
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=0.4, l2_reg=0.03)
+                   ESM_dim=ESM_DIM, drop_out_rate=run_config["DROPOUT_RATE"], l2_reg=run_config["L2_REG"])
     model.build(train_ds.element_spec)
 
-    # Setup optimizer and loss
-    base_optimizer = keras.optimizers.Lion(learning_rate=lr, weight_decay=1e-4)
+    # Setup optimizer and loss with higher weight decay
+    base_optimizer = keras.optimizers.Lion(learning_rate=lr, weight_decay=run_config["WEIGHT_DECAY"])
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer) if mixed_precision else base_optimizer
     loss_fn = AsymmetricPenaltyBinaryCrossentropy(
         label_smoothing=run_config["LABEL_SMOOTHING"],
@@ -328,8 +330,9 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
                 "cls_loss", "pep_loss", "mhc_loss"]}
 
     best_val_mcc = -1.0
-    patience, patience_counter, min_improvement = 5, 0, 0.001
-    lr_patience, lr_patience_counter, lr_reduction_factor, min_lr = 3, 0, 0.5, 1e-7
+    # More aggressive early stopping for overfitting
+    patience, patience_counter, min_improvement = 7, 0, 0.002
+    lr_patience, lr_patience_counter, lr_reduction_factor, min_lr = 4, 0, 0.3, 1e-6
 
     # Training loop
     for epoch in range(epochs):
@@ -382,8 +385,14 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
         history['pep_loss'].append(float(metrics['pep_loss'].result()))
         history['mhc_loss'].append(float(metrics['mhc_loss'].result()))
 
-        # Early stopping and checkpointing
+        # Early stopping and checkpointing with overfitting detection
         current_val_mcc = metrics['val_mcc'].result()
+        current_train_mcc = metrics['train_mcc'].result()
+
+        # Calculate overfitting gap
+        overfitting_gap = current_train_mcc - current_val_mcc
+        print(f"  -> Overfitting gap (Train-Val MCC): {overfitting_gap:.4f}")
+
         if current_val_mcc > best_val_mcc + min_improvement:
             best_val_mcc = current_val_mcc
             patience_counter, lr_patience_counter = 0, 0
@@ -393,6 +402,13 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
             patience_counter += 1
             lr_patience_counter += 1
             print(f"  -> No improvement. Patience: {patience_counter}/{patience}")
+
+        # Additional overfitting check - stop if gap is too large
+        if overfitting_gap > 0.4:
+            print(f"  -> WARNING: Large overfitting gap detected: {overfitting_gap:.4f}")
+            if overfitting_gap > 0.6:
+                print(f"  -> CRITICAL: Stopping due to severe overfitting (gap > 0.6)")
+                break
 
         # Learning rate reduction
         if lr_patience_counter >= lr_patience:
@@ -545,11 +561,12 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
 def main(args):
     """Main function to run the per-shard training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 15, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
+        "MHC_CLASS": 1, "EPOCHS": 25, "BATCH_SIZE": 256, "LEARNING_RATE": 5e-4,
         "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.5,
         "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
         "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2,
-        "description": "Per-shard training with balanced sampling for each individual model"
+        "DROPOUT_RATE": 0.6, "L2_REG": 0.01, "WEIGHT_DECAY": 1e-3,
+        "description": "Per-shard training with stronger regularization to prevent overfitting"
     }
 
     base_output_folder = "../results/PMBind_runs_per_shard/"
