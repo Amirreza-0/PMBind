@@ -295,6 +295,10 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
         asymmetry_strength=run_config["ASYMMETRIC_LOSS_SCALE"]
     )
 
+    # Build the optimizer by calling build method
+    # This ensures all optimizer variables are created before tf.function calls
+    optimizer.build(model.trainable_variables)
+
     # Class weights for balanced training
     class_weight_dict = {0: 1.0, 1: 1.0}  # Since we're using balanced shards
     class_weights_tensor = tf.constant([class_weight_dict[0], class_weight_dict[1]], dtype=tf.float32)
