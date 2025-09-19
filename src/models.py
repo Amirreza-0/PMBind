@@ -560,50 +560,127 @@ def pmbind_multitask_generalized(max_pep_len: int,
     # MULTI-LAYER TRANSFORMER WITH STOCHASTIC DEPTH
     # -------------------------------------------------------------------
     x = pmhc_concat
+    final_attn_weights = None
 
-    for layer_idx in range(transformer_layers):
-        # Stochastic depth - randomly skip layers during training
-        survival_prob = 1.0 - stochastic_depth_rate * (layer_idx / transformer_layers)
-
-        # Self-attention layer
-        attn_output, attn_weights = SelfAttentionWith2DMask(
+    # Create transformer layers without problematic loops
+    if transformer_layers >= 1:
+        # Layer 0
+        attn_output_0 = SelfAttentionWith2DMask(
             query_dim=emb_dim,
             context_dim=emb_dim,
             output_dim=emb_dim,
             heads=heads,
-            return_att_weights=(layer_idx == transformer_layers - 1),  # Only return weights from last layer
+            return_att_weights=False,
             self_attn_mhc=False,
             apply_rope=True,
-            name=f"pmhc_attention_layer_{layer_idx}"
+            name="pmhc_attention_layer_0"
         )(x, pep_mask_in, mhc_mask_in)
 
-        # Stochastic depth implementation
-        if layer_idx > 0:  # Skip first layer for stability
-            attn_output = layers.Lambda(
-                lambda inputs: tf.cond(
-                    tf.random.uniform([]) < survival_prob,
-                    lambda: inputs[0],
-                    lambda: inputs[1]
-                ),
-                name=f"stochastic_depth_{layer_idx}"
-            )([attn_output, x])
+        x = layers.Add(name="residual_add_0")([x, attn_output_0])
+        x = layers.LayerNormalization(name="layer_norm_0")(x)
 
-        # Residual connection and layer norm
-        x = layers.Add(name=f"residual_add_{layer_idx}")([x, attn_output])
-        x = layers.LayerNormalization(name=f"layer_norm_{layer_idx}")(x)
+        # FFN for layer 0
+        ffn_0 = layers.Dense(emb_dim * 2, activation='gelu',
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name="ffn_dense1_0")(x)
+        ffn_0 = layers.Dropout(drop_out_rate, name="ffn_dropout_0")(ffn_0)
+        ffn_0 = layers.Dense(emb_dim,
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name="ffn_dense2_0")(ffn_0)
 
-        # Feed-forward network with residual connection
-        ffn = layers.Dense(emb_dim * 2, activation='gelu',
-                          kernel_regularizer=keras.regularizers.l2(l2_reg),
-                          name=f"ffn_dense1_{layer_idx}")(x)
-        ffn = layers.Dropout(drop_out_rate, name=f"ffn_dropout_{layer_idx}")(ffn)
-        ffn = layers.Dense(emb_dim,
-                          kernel_regularizer=keras.regularizers.l2(l2_reg),
-                          name=f"ffn_dense2_{layer_idx}")(ffn)
+        x = layers.Add(name="ffn_residual_add_0")([x, ffn_0])
+        x = layers.LayerNormalization(name="ffn_layer_norm_0")(x)
 
-        # Residual connection for FFN
-        x = layers.Add(name=f"ffn_residual_add_{layer_idx}")([x, ffn])
-        x = layers.LayerNormalization(name=f"ffn_layer_norm_{layer_idx}")(x)
+    if transformer_layers >= 2:
+        # Layer 1 with stochastic depth
+        attn_output_1 = SelfAttentionWith2DMask(
+            query_dim=emb_dim,
+            context_dim=emb_dim,
+            output_dim=emb_dim,
+            heads=heads,
+            return_att_weights=False,
+            self_attn_mhc=False,
+            apply_rope=True,
+            name="pmhc_attention_layer_1"
+        )(x, pep_mask_in, mhc_mask_in)
+
+        # Stochastic depth for layer 1
+        survival_prob_1 = 1.0 - stochastic_depth_rate * (1.0 / transformer_layers)
+        attn_output_1 = layers.Lambda(
+            lambda inputs: tf.cond(
+                tf.random.uniform([]) < survival_prob_1,
+                lambda: inputs[0],
+                lambda: inputs[1]
+            ),
+            name="stochastic_depth_1"
+        )([attn_output_1, x])
+
+        x = layers.Add(name="residual_add_1")([x, attn_output_1])
+        x = layers.LayerNormalization(name="layer_norm_1")(x)
+
+        # FFN for layer 1
+        ffn_1 = layers.Dense(emb_dim * 2, activation='gelu',
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name="ffn_dense1_1")(x)
+        ffn_1 = layers.Dropout(drop_out_rate, name="ffn_dropout_1")(ffn_1)
+        ffn_1 = layers.Dense(emb_dim,
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name="ffn_dense2_1")(ffn_1)
+
+        x = layers.Add(name="ffn_residual_add_1")([x, ffn_1])
+        x = layers.LayerNormalization(name="ffn_layer_norm_1")(x)
+
+    if transformer_layers >= 3:
+        # Layer 2 (final layer) - return attention weights
+        attn_output_2, final_attn_weights = SelfAttentionWith2DMask(
+            query_dim=emb_dim,
+            context_dim=emb_dim,
+            output_dim=emb_dim,
+            heads=heads,
+            return_att_weights=True,
+            self_attn_mhc=False,
+            apply_rope=True,
+            name="pmhc_attention_layer_2"
+        )(x, pep_mask_in, mhc_mask_in)
+
+        # Stochastic depth for layer 2
+        survival_prob_2 = 1.0 - stochastic_depth_rate * (2.0 / transformer_layers)
+        attn_output_2 = layers.Lambda(
+            lambda inputs: tf.cond(
+                tf.random.uniform([]) < survival_prob_2,
+                lambda: inputs[0],
+                lambda: inputs[1]
+            ),
+            name="stochastic_depth_2"
+        )([attn_output_2, x])
+
+        x = layers.Add(name="residual_add_2")([x, attn_output_2])
+        x = layers.LayerNormalization(name="layer_norm_2")(x)
+
+        # FFN for layer 2
+        ffn_2 = layers.Dense(emb_dim * 2, activation='gelu',
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name="ffn_dense1_2")(x)
+        ffn_2 = layers.Dropout(drop_out_rate, name="ffn_dropout_2")(ffn_2)
+        ffn_2 = layers.Dense(emb_dim,
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name="ffn_dense2_2")(ffn_2)
+
+        x = layers.Add(name="ffn_residual_add_2")([x, ffn_2])
+        x = layers.LayerNormalization(name="ffn_layer_norm_2")(x)
+
+    # If no attention weights were generated (fewer than 3 layers), create a dummy
+    if final_attn_weights is None:
+        _, final_attn_weights = SelfAttentionWith2DMask(
+            query_dim=emb_dim,
+            context_dim=emb_dim,
+            output_dim=emb_dim,
+            heads=heads,
+            return_att_weights=True,
+            self_attn_mhc=False,
+            apply_rope=True,
+            name="pmhc_final_attention_for_weights"
+        )(x, pep_mask_in, mhc_mask_in)
 
     latent_sequence = x  # Final output: (B, P+M, D)
 
@@ -674,7 +751,7 @@ def pmbind_multitask_generalized(max_pep_len: int,
             "pep_ytrue_ypred": pep_out,
             "mhc_ytrue_ypred": mhc_out,
             "cls_ypred": binding_pred,
-            "attn_weights": attn_weights,
+            "attn_weights": final_attn_weights,
             "latent_vector": pooled_combined,
             "latent_seq": latent_sequence
         },
