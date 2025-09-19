@@ -25,7 +25,8 @@ import argparse
 # Local imports
 from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
                    clean_key, masked_categorical_crossentropy, seq_to_indices,
-                   AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC)
+                   AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC,
+                   AsymmetricPenaltyBinaryCrossentropy)
 from models import pmbind_multitask as pmbind
 from visualizations import visualize_training_history
 
@@ -274,6 +275,9 @@ def eval_step(model, batch_data, focal_loss_fn, metrics):
     metrics['val_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_loss'].update_state(total_val_loss)
+    metrics['pep_loss'].update_state(recon_loss_pep)
+    metrics['mhc_loss'].update_state(recon_loss_mhc)
+    metrics['cls_loss'].update_state(cls_loss)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -292,7 +296,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         'MAX_MHC_LEN'], metadata['ESM_DIM'], metadata['MHC_CLASS'], metadata.get('train_samples',
                                                                                  None), metadata.get(
         'val_samples', None)
-
+    pos_count = metadata.get('train_positive_counts', 0)
+    neg_count = metadata.get('train_negative_counts', 0)
+    pos_ratio = pos_count / (pos_count + neg_count) if (pos_count + neg_count) > 0 else 0.0
     # Apply subset to training samples
     if train_samples:
         original_train_samples = train_samples
@@ -358,7 +364,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=0.5)  # Increased from 0.3 to 0.5
+                   ESM_dim=ESM_DIM, drop_out_rate=0.5)
 
     model.build(sample_train_ds.element_spec)
 
@@ -381,7 +387,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     run_config['MHC_CLASS'] = MHC_CLASS
     with open(os.path.join(out_dir, "model_config.json"), "w") as f:
         json.dump(config_data, f, indent=4)
-    with open(os.path.join(out_dir, "run_config.json"), "a") as f:
+    with open(os.path.join(out_dir, "run_config.json"), "w") as f:
         json.dump(run_config, f, indent=4)
 
     # Create cosine decay learning rate schedule that resets every epoch
@@ -411,20 +417,14 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     # Best practice for class weights: inverse frequency weighting
     # pos_ratio = 0.02, neg_ratio = 0.98
     # n_samples / (n_classes * class_frequency)
-    pos_weight = 1.0 / (2 * 0.02)  # = 25.0
-    neg_weight = 1.0 / (2 * 0.98)  # = 0.51
+    pos_weight = 1.0 / (2 * 1-pos_ratio)  # = 25.0
+    neg_weight = 1.0 / (2 * pos_ratio)  # = 0.51
 
     # Normalize so negative class weight = 1.0
     class_weight_dict = {0: 1.0, 1: pos_weight / neg_weight}  # {0: 1.0, 1: 49.0}
     print(f"✓ Using class weights: {class_weight_dict}")
 
-    focal_loss_fn = tf.keras.losses.BinaryFocalCrossentropy(
-        from_logits=False,
-        reduction="none",  # Use 'none' to apply manual weighting
-        label_smoothing=0.15,  # Increased from 0.1 to 0.15 for better regularization
-        gamma=2.0,
-        apply_class_balancing=False
-        )
+    loss_fn = AsymmetricPenaltyBinaryCrossentropy(label_smoothing=run_config["LABEL_SMOOTHING"], asymmetry_strength=run_config["ASYMMETRIC_LOSS_SCALE"])
 
     # Convert class weights to tensor for tf.function compatibility
     class_weights_tensor = tf.constant([class_weight_dict[0], class_weight_dict[1]], dtype=tf.float32)
@@ -451,12 +451,10 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
                                "cls_loss", "pep_loss", "mhc_loss"]}
     history['subset'] = subset  # Store subset info in history
     best_val_mcc = -1.0  # MCC ranges from -1 to 1, start with worst possible
-
     # Early stopping parameters
     patience = 5  # Stop if no improvement for 5 epochs
     patience_counter = 0
     min_improvement = 0.001  # Minimum improvement to reset patience
-
     # Learning rate reduction on plateau
     lr_patience = 3  # Reduce LR if no improvement for 3 epochs
     lr_patience_counter = 0
@@ -473,7 +471,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         # Use dataset length divided by batch size for progress bar
         pbar = tqdm(train_ds_epoch, desc="Training", unit="batch", total=train_steps)
         for batch_data in pbar:
-            train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights_tensor)
+            train_step(model, batch_data, loss_fn, optimizer, metrics, class_weights_tensor)
 
             # Calculate F1 manually: F1 = (2 * Precision * Recall) / (Precision + Recall)
             prec = metrics['train_precision'].result()
@@ -488,6 +486,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             pbar.set_postfix({
                 'Loss': f"{metrics['train_loss'].result():.4f}",
                 'Acc': f"{metrics['train_acc'].result():.4f}",
+                'AUC': f"{metrics['train_auc'].result():.4f}",
+                'Prec': f"{prec:.4f}",
+                'Recall': f"{recall:.4f}",
                 'F1': f"{f1:.4f}",
                 'MCC': f"{metrics['train_mcc'].result():.4f}",
                 'PepL': f"{metrics['pep_loss'].result():.4f}",
@@ -497,7 +498,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
         # Validation
         for batch_data in tqdm(val_ds, desc="Validating", unit="batch", total=val_steps):
-            eval_step(model, batch_data, focal_loss_fn, metrics)
+            eval_step(model, batch_data, loss_fn, metrics)
 
         # Calculate F1 manually for both train and val
         train_prec = metrics['train_precision'].result()
@@ -596,12 +597,13 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 3, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-3,
-        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.4,
-        "description": "Optimized run with tf.data pipeline and mixed precision"
+        "MHC_CLASS": 1, "EPOCHS": 5, "BATCH_SIZE": 256, "LEARNING_RATE": 5e-4,
+        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.1, "MHC_RECON_LOSS_WEIGHT": 0.1,
+        "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights"
     }
 
-    base_output_folder = "../results/PMBind_runs_optimized2/"
+    base_output_folder = "../results/PMBind_runs_optimized5/"
     run_id_base = 0
 
     fold_to_run = args.fold  # Get fold from args
@@ -617,9 +619,6 @@ def main(args):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
         print("Please run the `create_tfrecords.py` script first.")
         sys.exit(1)
-
-    with open(os.path.join(out_dir, "config.json"), 'w') as f:
-        json.dump(RUN_CONFIG, f, indent=4)
 
     train(
         tfrecord_dir=tfrecord_dir,
@@ -658,5 +657,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to model weights (.h5 file) to resume training from.")
     parser.add_argument("--subset", type=float, default=1.0, help="Subset percentage of training data to use.")
+    parser.add_argument("--ls_param", type=float, default=0.1, help="Label smoothing parameter.")
+    parser.add_argument("--as_param", type=float, default=3.0, help="Asymmetric loss scaling parameter.")
     args = parser.parse_args()
     main(args)
