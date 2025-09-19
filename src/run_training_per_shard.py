@@ -26,7 +26,7 @@ from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, 
                    AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC,
                    AsymmetricPenaltyBinaryCrossentropy)
 
-from models import pmbind_multitask_modified as pmbind
+from models import pmbind_multitask_generalized as pmbind
 from visualizations import visualize_training_history
 
 mixed_precision = True  # Enable mixed precision for significant speedup
@@ -257,16 +257,18 @@ def eval_step(model, batch_data, loss_fn, metrics, run_conf):
     metrics['val_loss'].update_state(total_loss_weighted)
 
 
-def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_ds,
+def train_single_shard(shard_idx, positive_train_file, negative_train_file,
+                      positive_val_file, negative_val_file,
                       lookup_path_train, lookup_path_val, out_dir, run_config,
                       epochs, batch_size, lr, embed_dim, heads, noise_std, enable_masking=True,
-                      train_samples=None, num_shards=1):
+                      train_samples=None, val_samples=None, subset=1.0):
     """Train a single model on one balanced shard."""
 
     print(f"\n{'='*80}")
     print(f"TRAINING MODEL FOR SHARD {shard_idx}")
     print(f"{'='*80}")
-    print(f"Negative shard: {os.path.basename(negative_train_file)}")
+    print(f"Training negative shard: {os.path.basename(negative_train_file)}")
+    print(f"Validation negative shard: {os.path.basename(negative_val_file)}")
     print(f"Output directory: {out_dir}")
 
     # Load training embedding table
@@ -283,14 +285,32 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
     train_ds = create_dataset(epoch_train_files, batch_size, is_training=True,
                              apply_masking=enable_masking, subset_steps=train_steps)
 
-    # Build model with stronger regularization
+    # Create validation dataset for this specific shard
+    val_files = [positive_val_file, negative_val_file]
+
+    # Calculate validation steps for subset if applicable
+    val_steps = None
+    if val_samples and subset < 1.0:
+        val_steps = int(val_samples * subset) // batch_size
+        print(f"Applied subset to validation: taking {val_steps} batches")
+
+    val_ds = create_dataset(val_files, batch_size, is_training=False,
+                           apply_masking=False, subset_steps=val_steps)
+
+    # Build model with generalized architecture for better generalization
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=run_config["DROPOUT_RATE"], l2_reg=run_config["L2_REG"])
+                   ESM_dim=ESM_DIM, drop_out_rate=run_config["DROPOUT_RATE"],
+                   l2_reg=run_config["L2_REG"], transformer_layers=run_config["TRANSFORMER_LAYERS"],
+                   stochastic_depth_rate=run_config["STOCHASTIC_DEPTH_RATE"])
     model.build(train_ds.element_spec)
 
     # Setup optimizer and loss with higher weight decay
-    base_optimizer = keras.optimizers.Lion(learning_rate=lr, weight_decay=run_config["WEIGHT_DECAY"])
+    # Adjust learning rate based on model complexity
+    adjusted_lr = lr * np.sqrt(embed_dim / 32.0)  # Scale LR with embedding dimension
+    print(f"Adjusted learning rate for embed_dim={embed_dim}: {adjusted_lr:.2e}")
+
+    base_optimizer = keras.optimizers.Lion(learning_rate=adjusted_lr, weight_decay=run_config["WEIGHT_DECAY"])
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer) if mixed_precision else base_optimizer
     loss_fn = AsymmetricPenaltyBinaryCrossentropy(
         label_smoothing=run_config["LABEL_SMOOTHING"],
@@ -487,16 +507,8 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
     print(f"✓ Found 1 positive training file and {len(negative_train_files)} negative training shards.")
     print(f"✓ Found 1 positive validation file and {len(validation_neg_files)} negative validation shards.")
 
-    # Create validation dataset (same for all shards) - use training embedding table for consistency
+    # No shared validation dataset - each shard will create its own
     load_embedding_table(lookup_path_train)
-    val_files = [positive_val_file] + validation_neg_files[:1]  # Use first validation shard
-    val_ds = create_dataset(val_files, batch_size, is_training=False, apply_masking=False)
-
-    # Apply subset to validation dataset if needed
-    if subset < 1.0 and val_samples:
-        val_steps = val_samples // batch_size
-        val_ds = val_ds.take(val_steps)
-        print(f"Applied subset to validation: taking {val_steps} batches")
 
     # Save run configuration
     run_config['training_subset'] = subset
@@ -517,11 +529,15 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
         print(f"PROCESSING SHARD {shard_idx + 1}/{num_shards}")
         print(f"{'='*100}")
 
+        # Select corresponding validation shard (cycle through if not enough validation shards)
+        negative_val_file = validation_neg_files[shard_idx % len(validation_neg_files)]
+
         best_mcc = train_single_shard(
             shard_idx=shard_idx,
             positive_train_file=positive_train_file,
             negative_train_file=negative_train_file,
-            val_ds=val_ds,
+            positive_val_file=positive_val_file,
+            negative_val_file=negative_val_file,
             lookup_path_train=lookup_path_train,
             lookup_path_val=lookup_path_val,
             out_dir=out_dir,
@@ -534,12 +550,14 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
             noise_std=noise_std,
             enable_masking=enable_masking,
             train_samples=train_samples,
-            num_shards=num_shards
+            val_samples=val_samples,
+            subset=subset
         )
 
         shard_results[f"shard_{shard_idx}"] = {
             "best_val_mcc": float(best_mcc),
-            "negative_file": os.path.basename(negative_train_file)
+            "negative_train_file": os.path.basename(negative_train_file),
+            "negative_val_file": os.path.basename(negative_val_file)
         }
 
     # Save summary of all shard results
@@ -551,7 +569,8 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
     print("TRAINING SUMMARY")
     print(f"{'='*100}")
     for shard_name, results in shard_results.items():
-        print(f"{shard_name}: Best Val MCC = {results['best_val_mcc']:.4f} ({results['negative_file']})")
+        print(f"{shard_name}: Best Val MCC = {results['best_val_mcc']:.4f}")
+        print(f"  Train: {results['negative_train_file']} | Val: {results['negative_val_file']}")
 
     avg_mcc = np.mean([results['best_val_mcc'] for results in shard_results.values()])
     print(f"\nAverage MCC across all shards: {avg_mcc:.4f}")
@@ -561,12 +580,12 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
 def main(args):
     """Main function to run the per-shard training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 25, "BATCH_SIZE": 256, "LEARNING_RATE": 5e-4,
-        "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.5,
+        "MHC_CLASS": 1, "EPOCHS": 30, "BATCH_SIZE": 256, "LEARNING_RATE": 3e-4,
+        "EMBED_DIM": 32, "HEADS": 4, "NOISE_STD": 0.3, "TRANSFORMER_LAYERS": 3,
         "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
-        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2,
-        "DROPOUT_RATE": 0.6, "L2_REG": 0.01, "WEIGHT_DECAY": 1e-3,
-        "description": "Per-shard training with stronger regularization to prevent overfitting"
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.15, "MHC_RECON_LOSS_WEIGHT": 0.15,
+        "DROPOUT_RATE": 0.4, "L2_REG": 0.005, "WEIGHT_DECAY": 5e-4, "STOCHASTIC_DEPTH_RATE": 0.15,
+        "description": "Per-shard training with generalized model architecture for better generalization"
     }
 
     base_output_folder = "../results/PMBind_runs_per_shard/"

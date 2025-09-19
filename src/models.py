@@ -497,6 +497,193 @@ def pmbind_multitask_modified(max_pep_len: int,
     return pMHC_multitask_model
 
 
+def pmbind_multitask_generalized(max_pep_len: int,
+                                max_mhc_len: int,
+                                emb_dim: int = 64,
+                                heads: int = 4,
+                                transformer_layers: int = 2,
+                                mask_token: float = MASK_TOKEN,
+                                pad_token: float = PAD_TOKEN,
+                                noise_std: float = 0.1,
+                                latent_dim: int = 128,
+                                drop_out_rate: float = 0.3,
+                                l2_reg: float = 0.01,
+                                ESM_dim: int = 1536,
+                                stochastic_depth_rate: float = 0.1):
+    """
+    Improved multi-task model with better generalization capabilities:
+    - Multiple transformer layers with residual connections
+    - Stochastic depth for regularization
+    - Improved attention mechanism
+    - Better pooling strategy
+    - Advanced dropout techniques
+    """
+    # -------------------------------------------------------------------
+    # INPUTS
+    # -------------------------------------------------------------------
+    pep_blossom62_in = layers.Input((max_pep_len, 23), name="pep_blossom62")
+    pep_mask_in = layers.Input((max_pep_len,), name="pep_mask")
+    pep_ohe_target_in = layers.Input((max_pep_len, 21), name="pep_ohe_target")
+
+    mhc_emb_in = layers.Input((max_mhc_len, ESM_dim), name="mhc_emb")
+    mhc_mask_in = layers.Input((max_mhc_len,), name="mhc_mask")
+    mhc_ohe_target_in = layers.Input((max_mhc_len, 21), name="mhc_ohe_target")
+
+    # -------------------------------------------------------------------
+    # IMPROVED ENCODER WITH MULTIPLE LAYERS
+    # -------------------------------------------------------------------
+    # 1. Embed Peptide and MHC to the same dimension with improved initialization
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_blossom62_in, pep_mask_in)
+    pep = PositionalEncoding(23, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)
+    pep = layers.Dense(emb_dim, name="pep_dense_embed",
+                      kernel_initializer='he_normal',
+                      kernel_regularizer=keras.regularizers.l2(l2_reg))(pep)
+    pep = layers.LayerNormalization(name="pep_layer_norm")(pep)
+    pep = layers.SpatialDropout1D(drop_out_rate * 0.5, name="pep_dropout")(pep)
+
+    mhc = AddGaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc_emb_in)
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc, mhc_mask_in)
+    mhc = PositionalEncoding(ESM_dim, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)
+    mhc = layers.Dense(emb_dim, name="mhc_dense_embed",
+                      kernel_initializer='he_normal',
+                      kernel_regularizer=keras.regularizers.l2(l2_reg))(mhc)
+    mhc = layers.LayerNormalization(name="mhc_layer_norm")(mhc)
+    mhc = layers.SpatialDropout1D(drop_out_rate * 0.5, name="mhc_dropout")(mhc)
+
+    # Add Gaussian noise for regularization
+    pep = AddGaussianNoise(noise_std, name="pep_gaussian_noise")(pep)
+
+    # Concatenate sequences
+    pmhc_concat = layers.Concatenate(axis=1, name="pmhc_concat")([pep, mhc])  # (B, P+M, D)
+
+    # -------------------------------------------------------------------
+    # MULTI-LAYER TRANSFORMER WITH STOCHASTIC DEPTH
+    # -------------------------------------------------------------------
+    x = pmhc_concat
+
+    for layer_idx in range(transformer_layers):
+        # Stochastic depth - randomly skip layers during training
+        survival_prob = 1.0 - stochastic_depth_rate * (layer_idx / transformer_layers)
+
+        # Self-attention layer
+        attn_output, attn_weights = SelfAttentionWith2DMask(
+            query_dim=emb_dim,
+            context_dim=emb_dim,
+            output_dim=emb_dim,
+            heads=heads,
+            return_att_weights=(layer_idx == transformer_layers - 1),  # Only return weights from last layer
+            self_attn_mhc=False,
+            apply_rope=True,
+            name=f"pmhc_attention_layer_{layer_idx}"
+        )(x, pep_mask_in, mhc_mask_in)
+
+        # Stochastic depth implementation
+        if layer_idx > 0:  # Skip first layer for stability
+            attn_output = layers.Lambda(
+                lambda inputs: tf.cond(
+                    tf.random.uniform([]) < survival_prob,
+                    lambda: inputs[0],
+                    lambda: inputs[1]
+                ),
+                name=f"stochastic_depth_{layer_idx}"
+            )([attn_output, x])
+
+        # Residual connection and layer norm
+        x = layers.Add(name=f"residual_add_{layer_idx}")([x, attn_output])
+        x = layers.LayerNormalization(name=f"layer_norm_{layer_idx}")(x)
+
+        # Feed-forward network with residual connection
+        ffn = layers.Dense(emb_dim * 2, activation='gelu',
+                          kernel_regularizer=keras.regularizers.l2(l2_reg),
+                          name=f"ffn_dense1_{layer_idx}")(x)
+        ffn = layers.Dropout(drop_out_rate, name=f"ffn_dropout_{layer_idx}")(ffn)
+        ffn = layers.Dense(emb_dim,
+                          kernel_regularizer=keras.regularizers.l2(l2_reg),
+                          name=f"ffn_dense2_{layer_idx}")(ffn)
+
+        # Residual connection for FFN
+        x = layers.Add(name=f"ffn_residual_add_{layer_idx}")([x, ffn])
+        x = layers.LayerNormalization(name=f"ffn_layer_norm_{layer_idx}")(x)
+
+    latent_sequence = x  # Final output: (B, P+M, D)
+
+    # -------------------------------------------------------------------
+    # IMPROVED BINDING PREDICTION HEAD
+    # -------------------------------------------------------------------
+    # Multiple pooling strategies for better representation
+    pooled_mean = GlobalMeanPooling1D(name="latent_mean_pool", axis=-2)(latent_sequence)  # (B, D)
+    pooled_std = GlobalSTDPooling1D(name="latent_std_pool", axis=-2)(latent_sequence)    # (B, D)
+    pooled_max = layers.GlobalMaxPooling1D(name="latent_max_pool")(latent_sequence)      # (B, D)
+
+    # Attention-based pooling
+    attention_weights = layers.Dense(1, activation='tanh', name="attention_pool_dense")(latent_sequence)
+    attention_weights = layers.Softmax(axis=1, name="attention_pool_softmax")(attention_weights)
+    pooled_attention = layers.Dot(axes=[1, 1], name="attention_pooled")([attention_weights, latent_sequence])
+    pooled_attention = layers.Flatten(name="attention_flatten")(pooled_attention)
+
+    # Combine all pooling strategies
+    pooled_combined = layers.Concatenate(name="pooled_combined")([
+        pooled_mean, pooled_std, pooled_max, pooled_attention
+    ])
+
+    # Multi-layer classification head with regularization
+    binding_head = layers.Dense(emb_dim * 2, activation="gelu",
+                               kernel_regularizer=keras.regularizers.l2(l2_reg),
+                               name="binding_dense1")(pooled_combined)
+    binding_head = layers.BatchNormalization(name="binding_batch_norm")(binding_head)
+    binding_head = layers.Dropout(drop_out_rate, name="binding_dropout1")(binding_head)
+
+    binding_head = layers.Dense(emb_dim, activation="gelu",
+                               kernel_regularizer=keras.regularizers.l2(l2_reg),
+                               name="binding_dense2")(binding_head)
+    binding_head = layers.Dropout(drop_out_rate * 0.5, name="binding_dropout2")(binding_head)
+
+    binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred", dtype="float32")(binding_head)
+
+    # -------------------------------------------------------------------
+    # IMPROVED RECONSTRUCTION HEAD
+    # -------------------------------------------------------------------
+    pep_latent_seq = latent_sequence[:, :max_pep_len, :]  # (B, P, D)
+    mhc_latent_seq = latent_sequence[:, max_pep_len:, :]  # (B, M, D)
+
+    # Peptide reconstruction with residual connections
+    pep_recon = layers.Dense(emb_dim, activation='gelu',
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name='pep_recon_dense1')(pep_latent_seq)
+    pep_recon = layers.LayerNormalization(name='pep_recon_norm')(pep_recon)
+    pep_recon = layers.Dropout(drop_out_rate, name='pep_recon_dropout')(pep_recon)
+    pep_recon_pred = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon)
+
+    # MHC reconstruction with residual connections
+    mhc_recon = layers.Dense(emb_dim, activation='gelu',
+                            kernel_regularizer=keras.regularizers.l2(l2_reg),
+                            name='mhc_recon_dense1')(mhc_latent_seq)
+    mhc_recon = layers.LayerNormalization(name='mhc_recon_norm')(mhc_recon)
+    mhc_recon = layers.Dropout(drop_out_rate, name='mhc_recon_dropout')(mhc_recon)
+    mhc_recon_pred = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon)
+
+    pep_out = layers.Concatenate(name='pep_ytrue_ypred')([pep_ohe_target_in, pep_recon_pred])
+    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred')([mhc_ohe_target_in, mhc_recon_pred])
+
+    # -------------------------------------------------------------------
+    # MODEL DEFINITION
+    # -------------------------------------------------------------------
+    pMHC_generalized_model = keras.Model(
+        inputs=[pep_blossom62_in, pep_mask_in, mhc_emb_in, mhc_mask_in, pep_ohe_target_in, mhc_ohe_target_in],
+        outputs={
+            "pep_ytrue_ypred": pep_out,
+            "mhc_ytrue_ypred": mhc_out,
+            "cls_ypred": binding_pred,
+            "attn_weights": attn_weights,
+            "latent_vector": pooled_combined,
+            "latent_seq": latent_sequence
+        },
+        name="pMHC_Generalized_Transformer"
+    )
+
+    return pMHC_generalized_model
+
+
 # def pmbind_multitask_co_attn(max_pep_len: int,
 #                             max_mhc_len: int,
 #                             emb_dim: int = 64,
