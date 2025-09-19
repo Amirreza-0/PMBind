@@ -154,7 +154,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):
     return features
 
 
-def create_dataset(file_list, batch_size, is_training=True, apply_masking=True):
+def create_dataset(file_list, batch_size, is_training=True, apply_masking=True, subset_steps=None):
     """Creates a tf.data.Dataset from a specific list of files."""
     if not file_list:
         raise ValueError("File list provided to create_dataset is empty.")
@@ -176,6 +176,11 @@ def create_dataset(file_list, batch_size, is_training=True, apply_masking=True):
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
 
     dataset = dataset.batch(batch_size, drop_remainder=is_training)
+
+    # Apply subset if specified
+    if subset_steps is not None:
+        dataset = dataset.take(subset_steps)
+
     dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
     return dataset
 
@@ -252,7 +257,8 @@ def eval_step(model, batch_data, loss_fn, metrics, run_conf):
 
 def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_ds,
                       lookup_path_train, lookup_path_val, out_dir, run_config,
-                      epochs, batch_size, lr, embed_dim, heads, noise_std, enable_masking=True):
+                      epochs, batch_size, lr, embed_dim, heads, noise_std, enable_masking=True,
+                      train_samples=None, num_shards=1):
     """Train a single model on one balanced shard."""
 
     print(f"\n{'='*80}")
@@ -266,7 +272,14 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
 
     # Create training dataset for this shard
     epoch_train_files = [positive_train_file, negative_train_file]
-    train_ds = create_dataset(epoch_train_files, batch_size, is_training=True, apply_masking=enable_masking)
+
+    # Calculate training steps for subset if applicable
+    train_steps = None
+    if train_samples:
+        train_steps = train_samples // (num_shards * batch_size)  # Divide by number of shards
+
+    train_ds = create_dataset(epoch_train_files, batch_size, is_training=True,
+                             apply_masking=enable_masking, subset_steps=train_steps)
 
     # Build model
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
@@ -423,6 +436,18 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
         metadata['ESM_DIM'], metadata['MHC_CLASS']
     )
 
+    # Get sample counts and apply subset
+    train_samples = metadata.get('train_samples', None)
+    val_samples = metadata.get('val_samples', None)
+
+    if train_samples and subset < 1.0:
+        original_train_samples = train_samples
+        train_samples = int(train_samples * subset)
+        val_samples = int(val_samples * subset) if val_samples else None
+        print(f"Using {subset * 100:.1f}% subset of data: {train_samples:,} / {original_train_samples:,} train samples")
+        if val_samples:
+            print(f"Validation samples adjusted to: {val_samples:,}")
+
     # Define file paths
     positive_train_file = os.path.join(tfrecord_dir, "train", "positive_samples.tfrecord")
     negative_train_files = sorted(tf.io.gfile.glob(os.path.join(tfrecord_dir, "train", "negative_samples_*.tfrecord")))
@@ -446,10 +471,22 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
 
     # Create validation dataset (same for all shards)
     load_embedding_table(lookup_path_val)
-    val_files = [positive_val_file, validation_neg_files[0]]  # Use first validation shard
+    val_files = [positive_val_file] + validation_neg_files[:1]  # Use first validation shard
     val_ds = create_dataset(val_files, batch_size, is_training=False, apply_masking=False)
 
+    # Apply subset to validation dataset if needed
+    if subset < 1.0 and val_samples:
+        val_steps = val_samples // batch_size
+        val_ds = val_ds.take(val_steps)
+        print(f"Applied subset to validation: taking {val_steps} batches")
+
     # Save run configuration
+    run_config['training_subset'] = subset
+    run_config['validation_subset'] = subset
+    run_config['MAX_PEP_LEN'] = MAX_PEP_LEN
+    run_config['MAX_MHC_LEN'] = MAX_MHC_LEN
+    run_config['ESM_DIM'] = ESM_DIM
+    run_config['MHC_CLASS'] = MHC_CLASS
     with open(os.path.join(out_dir, "run_config.json"), "w") as f:
         json.dump(run_config, f, indent=4)
 
@@ -477,7 +514,9 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
             embed_dim=embed_dim,
             heads=heads,
             noise_std=noise_std,
-            enable_masking=enable_masking
+            enable_masking=enable_masking,
+            train_samples=train_samples,
+            num_shards=num_shards
         )
 
         shard_results[f"shard_{shard_idx}"] = {
