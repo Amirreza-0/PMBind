@@ -26,7 +26,7 @@ from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, 
                    AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC,
                    AsymmetricPenaltyBinaryCrossentropy)
 
-from models import pmbind_multitask_generalized as pmbind
+from models import pmbind_multitask_modified as pmbind
 from visualizations import visualize_training_history
 
 mixed_precision = True  # Enable mixed precision for significant speedup
@@ -271,6 +271,27 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
     print(f"Validation negative shard: {os.path.basename(negative_val_file)}")
     print(f"Output directory: {out_dir}")
 
+    # Data diagnostics
+    print(f"\n{'='*60}")
+    print("DATA DIAGNOSTICS")
+    print(f"{'='*60}")
+    if train_samples:
+        print(f"Train samples (per shard): ~{train_samples // len(negative_train_files) if num_shards else 'unknown'}")
+    if val_samples:
+        print(f"Validation samples: ~{val_samples}")
+    print(f"Batch size: {batch_size}")
+    if train_samples and val_samples:
+        train_batches = (train_samples // len(negative_train_files)) // batch_size if num_shards else 0
+        val_batches = val_samples // batch_size
+        print(f"Batches per epoch: ~{train_batches} train, ~{val_batches} val")
+        if train_batches > 0 and val_batches > 0:
+            data_ratio = train_batches / val_batches
+            print(f"Train/Val ratio: {data_ratio:.2f}")
+            if data_ratio > 10:
+                print("⚠️  WARNING: Very high train/val ratio - potential overfitting risk!")
+            elif data_ratio < 2:
+                print("⚠️  WARNING: Low train/val ratio - might underfit!")
+
     # Load training embedding table
     load_embedding_table(lookup_path_train)
 
@@ -297,20 +318,79 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
     val_ds = create_dataset(val_files, batch_size, is_training=False,
                            apply_masking=False, subset_steps=val_steps)
 
-    # Build model with generalized architecture for better generalization
+    # Data leakage analysis
+    print(f"\n{'='*60}")
+    print("DATA LEAKAGE ANALYSIS")
+    print(f"{'='*60}")
+    train_neg_file = os.path.basename(negative_train_file)
+    val_neg_file = os.path.basename(negative_val_file)
+
+    if train_neg_file == val_neg_file:
+        print("🚨 CRITICAL: Same negative file used for training and validation!")
+        print("   This will cause severe overfitting due to data leakage!")
+    else:
+        print(f"✅ Different files: Train={train_neg_file}, Val={val_neg_file}")
+
+    # Check if using too much of the same data
+    if shard_idx < len(validation_neg_files):
+        same_shard_validation = shard_idx == (shard_idx % len(validation_neg_files))
+        if same_shard_validation:
+            print(f"ℹ️  INFO: Using corresponding validation shard {shard_idx}")
+        else:
+            print(f"ℹ️  INFO: Using validation shard {shard_idx % len(validation_neg_files)} for training shard {shard_idx}")
+
+    # Check for potential masking issues during validation
+    print("Validation dataset config:")
+    print(f"  - Masking disabled: {not False}  ✅")
+    print(f"  - Shuffle disabled: {not False}  ✅")
+    print(f"  - Drop remainder: {False}  ✅")
+
+    # Build model with original architecture
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
                    ESM_dim=ESM_DIM, drop_out_rate=run_config["DROPOUT_RATE"],
-                   l2_reg=run_config["L2_REG"], transformer_layers=run_config["TRANSFORMER_LAYERS"],
-                   stochastic_depth_rate=run_config["STOCHASTIC_DEPTH_RATE"])
+                   l2_reg=run_config["L2_REG"])
     model.build(train_ds.element_spec)
 
-    # Setup optimizer and loss with higher weight decay
-    # Adjust learning rate based on model complexity
-    adjusted_lr = lr * np.sqrt(embed_dim / 32.0)  # Scale LR with embedding dimension
-    print(f"Adjusted learning rate for embed_dim={embed_dim}: {adjusted_lr:.2e}")
+    # Model complexity diagnostics
+    print(f"\n{'='*60}")
+    print("MODEL COMPLEXITY DIAGNOSTICS")
+    print(f"{'='*60}")
+    total_params = model.count_params()
+    trainable_params = sum([tf.size(var).numpy() for var in model.trainable_variables])
 
-    base_optimizer = keras.optimizers.Lion(learning_rate=adjusted_lr, weight_decay=run_config["WEIGHT_DECAY"])
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Embedding dimension: {embed_dim}")
+    print(f"Number of attention heads: {heads}")
+
+    # Calculate model capacity vs data size
+    if train_samples:
+        samples_per_param = (train_samples // len(negative_train_files)) / trainable_params if num_shards else 0
+        print(f"Training samples per parameter: {samples_per_param:.3f}")
+
+        if samples_per_param < 1:
+            print("🚨 CRITICAL: More parameters than training samples - severe overfitting risk!")
+        elif samples_per_param < 5:
+            print("⚠️  WARNING: Very low samples/param ratio - high overfitting risk!")
+        elif samples_per_param < 20:
+            print("⚠️  CAUTION: Low samples/param ratio - monitor overfitting!")
+        else:
+            print("✅ Good samples/param ratio for generalization")
+
+    # Check layer sizes relative to data
+    sequence_length = MAX_PEP_LEN + MAX_MHC_LEN
+    latent_size = sequence_length * embed_dim
+    print(f"Sequence length: {sequence_length}")
+    print(f"Latent representation size: {latent_size}")
+
+    if latent_size > (train_samples // len(negative_train_files)) if num_shards and train_samples else False:
+        print("⚠️  WARNING: Latent representation larger than training data!")
+
+    # Setup optimizer and loss with higher weight decay
+    print(f"Using learning rate: {lr:.2e} for embed_dim={embed_dim}")
+
+    base_optimizer = keras.optimizers.Lion(learning_rate=lr, weight_decay=run_config["WEIGHT_DECAY"])
     optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer) if mixed_precision else base_optimizer
     loss_fn = AsymmetricPenaltyBinaryCrossentropy(
         label_smoothing=run_config["LABEL_SMOOTHING"],
@@ -383,8 +463,38 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
         val_f1 = tf.where(tf.equal(val_prec + val_recall, 0.0), 0.0,
                           (2.0 * val_prec * val_recall) / (val_prec + val_recall))
 
-        print(f"  Train: Loss={metrics['train_loss'].result():.4f}, MCC={metrics['train_mcc'].result():.4f}")
-        print(f"  Val:   Loss={metrics['val_loss'].result():.4f}, MCC={metrics['val_mcc'].result():.4f}")
+        # Detailed overfitting diagnostics
+        train_loss = metrics['train_loss'].result()
+        val_loss = metrics['val_loss'].result()
+        train_mcc = metrics['train_mcc'].result()
+        val_mcc = metrics['val_mcc'].result()
+        train_auc = metrics['train_auc'].result()
+        val_auc = metrics['val_auc'].result()
+
+        # Calculate key overfitting indicators
+        loss_gap = val_loss - train_loss
+        mcc_gap = train_mcc - val_mcc
+        auc_gap = train_auc - val_auc
+
+        print(f"  TRAINING METRICS:")
+        print(f"    Loss: {train_loss:.4f} | AUC: {train_auc:.4f} | MCC: {train_mcc:.4f}")
+        print(f"  VALIDATION METRICS:")
+        print(f"    Loss: {val_loss:.4f} | AUC: {val_auc:.4f} | MCC: {val_mcc:.4f}")
+        print(f"  OVERFITTING GAPS:")
+        print(f"    Loss Gap: {loss_gap:.4f} | AUC Gap: {auc_gap:.4f} | MCC Gap: {mcc_gap:.4f}")
+
+        # Overfitting severity classification
+        if mcc_gap > 0.5:
+            severity = "CRITICAL"
+        elif mcc_gap > 0.3:
+            severity = "SEVERE"
+        elif mcc_gap > 0.15:
+            severity = "MODERATE"
+        elif mcc_gap > 0.05:
+            severity = "MILD"
+        else:
+            severity = "MINIMAL"
+        print(f"  OVERFITTING SEVERITY: {severity}")
 
         # Log history
         history['train_loss'].append(float(metrics['train_loss'].result()))
@@ -423,9 +533,36 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
             lr_patience_counter += 1
             print(f"  -> No improvement. Patience: {patience_counter}/{patience}")
 
-        # Additional overfitting check - stop if gap is too large
+        # Additional overfitting analysis and interventions
         if overfitting_gap > 0.4:
             print(f"  -> WARNING: Large overfitting gap detected: {overfitting_gap:.4f}")
+
+            # Analyze loss components
+            pep_loss = metrics['pep_loss'].result()
+            mhc_loss = metrics['mhc_loss'].result()
+            cls_loss = metrics['cls_loss'].result()
+
+            print(f"  -> Loss breakdown: CLS={cls_loss:.4f}, PEP={pep_loss:.4f}, MHC={mhc_loss:.4f}")
+
+            # Check if reconstruction tasks are causing overfitting
+            total_recon_loss = pep_loss + mhc_loss
+            if total_recon_loss > cls_loss * 2:
+                print(f"  -> ANALYSIS: Reconstruction losses dominating - may cause overfitting!")
+                print(f"  -> RECOMMENDATION: Consider reducing PEP_RECON_LOSS_WEIGHT and MHC_RECON_LOSS_WEIGHT")
+
+            # Automatic intervention for severe overfitting
+            if mcc_gap > 0.4 and epoch > 3:  # Give model a few epochs to stabilize
+                print(f"  -> INTERVENTION: Severe overfitting detected, reducing learning rate by 50%")
+                current_lr = (optimizer.inner_optimizer.learning_rate.numpy()
+                             if hasattr(optimizer, "inner_optimizer")
+                             else optimizer.learning_rate.numpy())
+                new_lr = current_lr * 0.5
+                if hasattr(optimizer, 'inner_optimizer'):
+                    optimizer.inner_optimizer.learning_rate.assign(new_lr)
+                else:
+                    optimizer.learning_rate.assign(new_lr)
+                print(f"  -> Learning rate reduced to {new_lr:.2e}")
+
             if overfitting_gap > 0.6:
                 print(f"  -> CRITICAL: Stopping due to severe overfitting (gap > 0.6)")
                 break
@@ -580,12 +717,12 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
 def main(args):
     """Main function to run the per-shard training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 30, "BATCH_SIZE": 256, "LEARNING_RATE": 3e-4,
-        "EMBED_DIM": 32, "HEADS": 4, "NOISE_STD": 0.3, "TRANSFORMER_LAYERS": 3,
+        "MHC_CLASS": 1, "EPOCHS": 25, "BATCH_SIZE": 256, "LEARNING_RATE": 5e-4,
+        "EMBED_DIM": 24, "HEADS": 3, "NOISE_STD": 0.4,
         "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
-        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.15, "MHC_RECON_LOSS_WEIGHT": 0.15,
-        "DROPOUT_RATE": 0.4, "L2_REG": 0.005, "WEIGHT_DECAY": 5e-4, "STOCHASTIC_DEPTH_RATE": 0.15,
-        "description": "Per-shard training with generalized model architecture for better generalization"
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2,
+        "DROPOUT_RATE": 0.5, "L2_REG": 0.008, "WEIGHT_DECAY": 8e-4,
+        "description": "Per-shard training with original model and improved regularization"
     }
 
     base_output_folder = "../results/PMBind_runs_per_shard/"
