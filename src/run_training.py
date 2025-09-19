@@ -403,22 +403,19 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     print(f"✓ Using CosineDecayRestarts schedule: initial_lr={lr}, first_decay_steps={decay_steps}")
 
     # Create Lion optimizer with cosine decay schedule and weight decay for regularization
-    base_optimizer = keras.optimizers.Lion(learning_rate=cosine_decay_schedule, weight_decay=1e-4)
+    base_optimizer = keras.optimizers.Lion(learning_rate=lr, weight_decay=1e-4)
     if mixed_precision:
-        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(
-            base_optimizer,
-            #initial_scale=32768.0,  # Higher initial scale
-            #dynamic_growth_steps=2000  # Adapt every 2000 steps
-        )
+        optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer)
         print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
     else:
         optimizer = base_optimizer
+    print(f"✓ Using constant learning rate: {lr:.2e}")
 
     # Best practice for class weights: inverse frequency weighting
     # pos_ratio = 0.02, neg_ratio = 0.98
     # n_samples / (n_classes * class_frequency)
     pos_weight = 1.0 / (2 * pos_ratio)  # = 25.0
-    neg_weight = 1.0 / (2 * 1-pos_ratio)  # = 0.51
+    neg_weight = 1.0 / (2 * (1-pos_ratio))  # = 0.51
 
     # Normalize so negative class weight = 1.0
     class_weight_dict = {0: 1.0, 1: pos_weight / neg_weight}  # {0: 1.0, 1: 49.0}
@@ -556,17 +553,19 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             print(f"  -> No improvement. Patience: {patience_counter}/{patience}")
 
         if lr_patience_counter >= lr_patience:
-            current_lr = optimizer.inner_optimizer.learning_rate.numpy() if hasattr(optimizer,
-                                                                                    'inner_optimizer') else optimizer.learning_rate.numpy()
-
+            current_lr = (
+                optimizer.inner_optimizer.learning_rate.numpy()
+                if hasattr(optimizer, "inner_optimizer")
+                else optimizer.learning_rate.numpy()
+            )
             if current_lr > min_lr:
                 new_lr = max(current_lr * lr_reduction_factor, min_lr)
-                if hasattr(optimizer, 'inner_optimizer'):
+                if hasattr(optimizer, "inner_optimizer"):
                     optimizer.inner_optimizer.learning_rate.assign(new_lr)
                 else:
                     optimizer.learning_rate.assign(new_lr)
                 print(f"  -> Reducing learning rate to {new_lr:.2e}")
-                lr_patience_counter = 0  # Reset counter after reduction
+                lr_patience_counter = 0
 
         if patience_counter >= patience:
             print(f"\n*** Early stopping triggered. Best validation MCC: {best_val_mcc:.4f} ***")
@@ -586,7 +585,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 10, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
+        "MHC_CLASS": 1, "EPOCHS": 10, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-3,
         "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.4, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
         "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.4,
         "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights"
@@ -647,6 +646,6 @@ if __name__ == "__main__":
                         help="Path to model weights (.h5 file) to resume training from.")
     parser.add_argument("--subset", type=float, default=1.0, help="Subset percentage of training data to use.")
     parser.add_argument("--ls_param", type=float, default=0.2, help="Label smoothing parameter.")
-    parser.add_argument("--as_param", type=float, default=10.0, help="Asymmetric loss scaling parameter.")
+    parser.add_argument("--as_param", type=float, default=5.0, help="Asymmetric loss scaling parameter.")
     args = parser.parse_args()
     main(args)
