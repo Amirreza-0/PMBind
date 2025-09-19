@@ -343,8 +343,7 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
                 'MCC': f"{metrics['train_mcc'].result():.4f}",
             })
 
-        # Validation (load validation embedding table)
-        load_embedding_table(lookup_path_val)
+        # Validation - no need to reload embedding table since we're using training table consistently
         for batch_data in tqdm(val_ds, desc=f"Validating Shard {shard_idx}", unit="batch"):
             eval_step(model, batch_data, loss_fn, metrics, run_config)
 
@@ -409,8 +408,7 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file, val_
             print(f"  -> Early stopping. Best MCC: {best_val_mcc:.4f}")
             break
 
-        # Reload training embedding table for next epoch
-        load_embedding_table(lookup_path_train)
+        # Training embedding table is already loaded consistently, no need to reload
 
     # Save final model and history
     model.save_weights(os.path.join(out_dir, f"final_model_shard_{shard_idx}.weights.h5"))
@@ -469,8 +467,8 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
     print(f"✓ Found 1 positive training file and {len(negative_train_files)} negative training shards.")
     print(f"✓ Found 1 positive validation file and {len(validation_neg_files)} negative validation shards.")
 
-    # Create validation dataset (same for all shards)
-    load_embedding_table(lookup_path_val)
+    # Create validation dataset (same for all shards) - use training embedding table for consistency
+    load_embedding_table(lookup_path_train)
     val_files = [positive_val_file] + validation_neg_files[:1]  # Use first validation shard
     val_ds = create_dataset(val_files, batch_size, is_training=False, apply_masking=False)
 
