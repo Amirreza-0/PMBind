@@ -261,7 +261,7 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
                       positive_val_file, negative_val_file,
                       lookup_path_train, lookup_path_val, out_dir, run_config,
                       epochs, batch_size, lr, embed_dim, heads, noise_std, enable_masking=True,
-                      train_samples=None, val_samples=None, subset=1.0):
+                      train_samples=None, val_samples=None, subset=1.0, num_shards=1):
     """Train a single model on one balanced shard."""
 
     print(f"\n{'='*80}")
@@ -275,13 +275,16 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
     print(f"\n{'='*60}")
     print("DATA DIAGNOSTICS")
     print(f"{'='*60}")
-    if train_samples:
-        print(f"Train samples (per shard): ~{train_samples // len(negative_train_files) if num_shards else 'unknown'}")
+    if train_samples and num_shards > 0:
+        samples_per_shard = train_samples // num_shards
+        print(f"Train samples (per shard): ~{samples_per_shard:,}")
     if val_samples:
-        print(f"Validation samples: ~{val_samples}")
+        print(f"Validation samples: ~{val_samples:,}")
     print(f"Batch size: {batch_size}")
-    if train_samples and val_samples:
-        train_batches = (train_samples // len(negative_train_files)) // batch_size if num_shards else 0
+
+    if train_samples and val_samples and num_shards > 0:
+        samples_per_shard = train_samples // num_shards
+        train_batches = samples_per_shard // batch_size
         val_batches = val_samples // batch_size
         print(f"Batches per epoch: ~{train_batches} train, ~{val_batches} val")
         if train_batches > 0 and val_batches > 0:
@@ -300,8 +303,9 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
 
     # Calculate training steps for subset if applicable
     train_steps = None
-    if train_samples:
-        train_steps = train_samples // (num_shards * batch_size)  # Divide by number of shards
+    if train_samples and num_shards > 0:
+        samples_per_shard = train_samples // num_shards
+        train_steps = samples_per_shard // batch_size
 
     train_ds = create_dataset(epoch_train_files, batch_size, is_training=True,
                              apply_masking=enable_masking, subset_steps=train_steps)
@@ -331,19 +335,14 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
     else:
         print(f"✅ Different files: Train={train_neg_file}, Val={val_neg_file}")
 
-    # Check if using too much of the same data
-    if shard_idx < len(validation_neg_files):
-        same_shard_validation = shard_idx == (shard_idx % len(validation_neg_files))
-        if same_shard_validation:
-            print(f"ℹ️  INFO: Using corresponding validation shard {shard_idx}")
-        else:
-            print(f"ℹ️  INFO: Using validation shard {shard_idx % len(validation_neg_files)} for training shard {shard_idx}")
+    # Check validation shard usage pattern
+    print(f"ℹ️  INFO: Training shard {shard_idx}, Validation file: {val_neg_file}")
 
     # Check for potential masking issues during validation
     print("Validation dataset config:")
-    print(f"  - Masking disabled: {not False}  ✅")
-    print(f"  - Shuffle disabled: {not False}  ✅")
-    print(f"  - Drop remainder: {False}  ✅")
+    print(f"  - Masking disabled: True  ✅")
+    print(f"  - Shuffle disabled: True  ✅")
+    print(f"  - Drop remainder: False  ✅")
 
     # Build model with original architecture
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
@@ -365,8 +364,9 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
     print(f"Number of attention heads: {heads}")
 
     # Calculate model capacity vs data size
-    if train_samples:
-        samples_per_param = (train_samples // len(negative_train_files)) / trainable_params if num_shards else 0
+    if train_samples and num_shards > 0:
+        samples_per_shard = train_samples // num_shards
+        samples_per_param = samples_per_shard / trainable_params
         print(f"Training samples per parameter: {samples_per_param:.3f}")
 
         if samples_per_param < 1:
@@ -384,8 +384,10 @@ def train_single_shard(shard_idx, positive_train_file, negative_train_file,
     print(f"Sequence length: {sequence_length}")
     print(f"Latent representation size: {latent_size}")
 
-    if latent_size > (train_samples // len(negative_train_files)) if num_shards and train_samples else False:
-        print("⚠️  WARNING: Latent representation larger than training data!")
+    if train_samples and num_shards > 0:
+        samples_per_shard = train_samples // num_shards
+        if latent_size > samples_per_shard:
+            print("⚠️  WARNING: Latent representation larger than training data!")
 
     # Setup optimizer and loss with higher weight decay
     print(f"Using learning rate: {lr:.2e} for embed_dim={embed_dim}")
@@ -688,7 +690,8 @@ def train_per_shard(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, em
             enable_masking=enable_masking,
             train_samples=train_samples,
             val_samples=val_samples,
-            subset=subset
+            subset=subset,
+            num_shards=num_shards
         )
 
         shard_results[f"shard_{shard_idx}"] = {
@@ -733,12 +736,27 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting per-shard training: {run_name}\nOutput directory: {out_dir}")
 
-    tfrecord_dir = f"/media/amirreza/Crucial-500/PMBind_dataset/cross_validation_dataset/mhc{RUN_CONFIG['MHC_CLASS']}/tfrecords/fold_{fold_to_run:02d}_split/"
+    # Try multiple possible paths for tfrecord directory
+    possible_paths = [
+        f"/media/amirreza/Crucial-500/PMBind_dataset/cross_validation_dataset/mhc{RUN_CONFIG['MHC_CLASS']}/tfrecords/fold_{fold_to_run:02d}_split/",
+        f"../data/cross_validation_dataset/mhc{RUN_CONFIG['MHC_CLASS']}/tfrecords/fold_{fold_to_run:02d}_split/",
+        f"data/cross_validation_dataset/mhc{RUN_CONFIG['MHC_CLASS']}/tfrecords/fold_{fold_to_run:02d}_split/"
+    ]
 
-    if not os.path.exists(tfrecord_dir) or not os.path.exists(os.path.join(tfrecord_dir, 'metadata.json')):
-        print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")
-        print("Please run the data splitting script first.")
+    tfrecord_dir = None
+    for path in possible_paths:
+        if os.path.exists(path) and os.path.exists(os.path.join(path, 'metadata.json')):
+            tfrecord_dir = path
+            break
+
+    if tfrecord_dir is None:
+        print(f"Error: TFRecord directory not found in any of these locations:")
+        for path in possible_paths:
+            print(f"  - {path}")
+        print("Please run the data splitting script first or check the path.")
         sys.exit(1)
+
+    print(f"✅ Using TFRecord directory: {tfrecord_dir}")
 
     train_per_shard(
         tfrecord_dir=tfrecord_dir,
