@@ -186,7 +186,7 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
     dataset = tf.data.TFRecordDataset(file_list, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
     if is_training:
         print("✓ Shuffling")
-        dataset = dataset.shuffle(buffer_size=1000000, reshuffle_each_iteration=True)
+        dataset = dataset.shuffle(buffer_size=100_000, reshuffle_each_iteration=True)
     dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
     if is_training and apply_masking:
         print("✓ Applying dynamic masking augmentation")
@@ -204,7 +204,7 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
 # Training & Evaluation Steps
 # ----------------------------------------------------------------------
 @tf.function()
-def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights):
+def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights, run_conf):
     """Compiled training step with proper mixed precision handling."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
@@ -223,8 +223,8 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weigh
         raw_recon_loss_pep = tf.where(tf.math.is_finite(raw_recon_loss_pep), raw_recon_loss_pep, 0.0)
         raw_recon_loss_mhc = tf.where(tf.math.is_finite(raw_recon_loss_mhc), raw_recon_loss_mhc, 0.0)
         # Balanced loss weighting for stability
-        total_loss_weighted = (1.0 * weighted_cls_loss) + (0.05 * raw_recon_loss_pep) + (0.05 * raw_recon_loss_mhc)
-        total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 10.0)
+        total_loss_weighted = (run_conf["CLS_LOSS_WEIGHT"] * weighted_cls_loss) + (run_conf["PEP_RECON_LOSS_WEIGHT"] * raw_recon_loss_pep) + (run_conf["MHC_RECON_LOSS_WEIGHT"] * raw_recon_loss_mhc)
+        total_loss_weighted = tf.clip_by_value(total_loss_weighted, 0.0, 15.0)
 
         # Use proper LossScaleOptimizer methods for mixed precision
         if mixed_precision:
@@ -253,28 +253,28 @@ def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weigh
 
 
 @tf.function()
-def eval_step(model, batch_data, focal_loss_fn, metrics):
+def eval_step(model, batch_data, loss_fn, metrics, run_conf):
     """Compiled evaluation step."""
     outputs = model(batch_data, training=False)
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
 
     # Simple binary crossentropy for classification (no class weighting for validation)
-    cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
+    cls_loss = loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
 
     # Reconstruction losses using masked_categorical_crossentropy
     recon_loss_pep = masked_categorical_crossentropy(outputs["pep_ytrue_ypred"], batch_data["pep_mask"])
     recon_loss_mhc = masked_categorical_crossentropy(outputs["mhc_ytrue_ypred"], batch_data["mhc_mask"])
 
     # Total validation loss (same weighting as training but no class weights)
-    total_val_loss = (1.0 * cls_loss) + (0.2 * recon_loss_pep) + (0.2 * recon_loss_mhc)
+    total_loss_weighted = (run_conf["CLS_LOSS_WEIGHT"] * cls_loss) + (run_conf["PEP_RECON_LOSS_WEIGHT"] * recon_loss_pep) + (run_conf["MHC_RECON_LOSS_WEIGHT"] * recon_loss_mhc)
 
     metrics['val_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
     metrics['val_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['val_loss'].update_state(total_val_loss)
+    metrics['val_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(recon_loss_pep)
     metrics['mhc_loss'].update_state(recon_loss_mhc)
     metrics['cls_loss'].update_state(cls_loss)
@@ -341,7 +341,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False
         )
-        dataset = dataset.shuffle(buffer_size=100000)
+        dataset = dataset.shuffle(buffer_size=100_000)
         dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
         if enable_masking:
             dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
@@ -364,7 +364,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
-                   ESM_dim=ESM_DIM, drop_out_rate=0.5)
+                   ESM_dim=ESM_DIM, drop_out_rate=run_config["DROPOUT_RATE"])
 
     model.build(sample_train_ds.element_spec)
 
@@ -417,8 +417,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     # Best practice for class weights: inverse frequency weighting
     # pos_ratio = 0.02, neg_ratio = 0.98
     # n_samples / (n_classes * class_frequency)
-    pos_weight = 1.0 / (2 * 1-pos_ratio)  # = 25.0
-    neg_weight = 1.0 / (2 * pos_ratio)  # = 0.51
+    pos_weight = 1.0 / (2 * pos_ratio)  # = 25.0
+    neg_weight = 1.0 / (2 * 1-pos_ratio)  # = 0.51
 
     # Normalize so negative class weight = 1.0
     class_weight_dict = {0: 1.0, 1: pos_weight / neg_weight}  # {0: 1.0, 1: 49.0}
@@ -452,14 +452,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     history['subset'] = subset  # Store subset info in history
     best_val_mcc = -1.0  # MCC ranges from -1 to 1, start with worst possible
     # Early stopping parameters
-    patience = 5  # Stop if no improvement for 5 epochs
-    patience_counter = 0
-    min_improvement = 0.001  # Minimum improvement to reset patience
-    # Learning rate reduction on plateau
-    lr_patience = 3  # Reduce LR if no improvement for 3 epochs
-    lr_patience_counter = 0
-    lr_reduction_factor = 0.5
-    min_lr = 1e-7
+    patience, patience_counter, min_improvement = 7, 0, 0.001
+    lr_patience, lr_patience_counter, lr_reduction_factor, min_lr = 3, 0, 0.5, 1e-7
 
     for epoch in range(epochs):
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
@@ -471,7 +465,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         # Use dataset length divided by batch size for progress bar
         pbar = tqdm(train_ds_epoch, desc="Training", unit="batch", total=train_steps)
         for batch_data in pbar:
-            train_step(model, batch_data, loss_fn, optimizer, metrics, class_weights_tensor)
+            train_step(model, batch_data, loss_fn, optimizer, metrics, class_weights_tensor, run_config)
 
             # Calculate F1 manually: F1 = (2 * Precision * Recall) / (Precision + Recall)
             prec = metrics['train_precision'].result()
@@ -498,7 +492,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 
         # Validation
         for batch_data in tqdm(val_ds, desc="Validating", unit="batch", total=val_steps):
-            eval_step(model, batch_data, loss_fn, metrics)
+            eval_step(model, batch_data, loss_fn, metrics, run_config)
 
         # Calculate F1 manually for both train and val
         train_prec = metrics['train_precision'].result()
@@ -553,20 +547,17 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         current_val_mcc = metrics['val_mcc'].result()
         if current_val_mcc > best_val_mcc + min_improvement:
             best_val_mcc = current_val_mcc
-            patience_counter = 0  # Reset patience
-            lr_patience_counter = 0  # Reset LR patience
+            patience_counter, lr_patience_counter = 0, 0
             model.save_weights(os.path.join(out_dir, "best_model.weights.h5"))
             print(f"  -> New best model saved with Val MCC: {best_val_mcc:.4f}")
         else:
             patience_counter += 1
             lr_patience_counter += 1
-            print(f"  -> No improvement. Patience: {patience_counter}/{patience}, LR Patience: {lr_patience_counter}/{lr_patience}")
+            print(f"  -> No improvement. Patience: {patience_counter}/{patience}")
 
-        # Learning rate reduction on plateau
         if lr_patience_counter >= lr_patience:
-            current_lr = optimizer.learning_rate.numpy() if hasattr(optimizer.learning_rate, 'numpy') else optimizer.learning_rate
-            if hasattr(optimizer, 'inner_optimizer'):  # For LossScaleOptimizer
-                current_lr = optimizer.inner_optimizer.learning_rate.numpy()
+            current_lr = optimizer.inner_optimizer.learning_rate.numpy() if hasattr(optimizer,
+                                                                                    'inner_optimizer') else optimizer.learning_rate.numpy()
 
             if current_lr > min_lr:
                 new_lr = max(current_lr * lr_reduction_factor, min_lr)
@@ -574,13 +565,11 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
                     optimizer.inner_optimizer.learning_rate.assign(new_lr)
                 else:
                     optimizer.learning_rate.assign(new_lr)
-                lr_patience_counter = 0
-                print(f"  -> Learning rate reduced from {current_lr:.2e} to {new_lr:.2e}")
+                print(f"  -> Reducing learning rate to {new_lr:.2e}")
+                lr_patience_counter = 0  # Reset counter after reduction
 
-        # Early stopping check
         if patience_counter >= patience:
-            print(f"\n*** Early stopping triggered after {patience} epochs without improvement ***")
-            print(f"*** Best validation MCC: {best_val_mcc:.4f} ***")
+            print(f"\n*** Early stopping triggered. Best validation MCC: {best_val_mcc:.4f} ***")
             break
 
     print("\nTraining finished. Saving final model and generating visualizations...")
@@ -597,9 +586,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 5, "BATCH_SIZE": 256, "LEARNING_RATE": 5e-4,
-        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
-        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.1, "MHC_RECON_LOSS_WEIGHT": 0.1,
+        "MHC_CLASS": 1, "EPOCHS": 10, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
+        "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.4, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.4,
         "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights"
     }
 
@@ -657,7 +646,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to model weights (.h5 file) to resume training from.")
     parser.add_argument("--subset", type=float, default=1.0, help="Subset percentage of training data to use.")
-    parser.add_argument("--ls_param", type=float, default=0.1, help="Label smoothing parameter.")
-    parser.add_argument("--as_param", type=float, default=3.0, help="Asymmetric loss scaling parameter.")
+    parser.add_argument("--ls_param", type=float, default=0.2, help="Label smoothing parameter.")
+    parser.add_argument("--as_param", type=float, default=10.0, help="Asymmetric loss scaling parameter.")
     args = parser.parse_args()
     main(args)
