@@ -105,8 +105,8 @@ def _parse_tf_example(example_proto):
     pep_ohe_target = tf.one_hot(pep_ohe_indices, depth=vocab_size_ohe, dtype=tf.float32)
     mhc_ohe_target = tf.one_hot(mhc_ohe_indices, depth=vocab_size_ohe, dtype=tf.float32)
     # Masks are based on the original indices which correctly identify padding
-    pep_mask = tf.where(pep_indices == PAD_INDEX, PAD_TOKEN, NORM_TOKEN)
-    mhc_mask = tf.where(tf.reduce_all(tf.cast(mhc_emb, tf.float32) == PAD_VALUE, axis=-1), PAD_TOKEN, NORM_TOKEN)
+    pep_mask = tf.where(pep_indices == 22, PAD_TOKEN, NORM_TOKEN)
+    mhc_mask = tf.where(mhc_indices == 22, PAD_TOKEN, NORM_TOKEN)
     labels = tf.cast(parsed['label'], tf.int32)
     labels = tf.expand_dims(labels, axis=-1)
     return {
@@ -128,7 +128,6 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     # Peptide Masking
     valid_pep_positions = tf.where(tf.equal(features["pep_mask"], NORM_TOKEN))
     num_valid_pep = tf.shape(valid_pep_positions)[0]
-    # --- CORRECTED MASK COUNT ---
     # At least 2 positions, or 15% of the valid sequence length
     num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.30, tf.int32))
     shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
@@ -145,7 +144,6 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     # MHC Masking
     valid_mhc_positions = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
     num_valid_mhc = tf.shape(valid_mhc_positions)[0]
-    # --- CORRECTED MASK COUNT ---
     # At least 5 positions, or 15% of the valid sequence length
     num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.80, tf.int32))
     shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
@@ -157,7 +155,6 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
         mhc_dtype = features["mhc_emb"].dtype
         mask_updates_mhc = tf.fill([num_to_mask_mhc, tf.shape(features["mhc_emb"])[-1]], tf.cast(MASK_VALUE, mhc_dtype))
         features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], shuffled_mhc_indices, mask_updates_mhc)
-    # --- OPTIONAL: IMPLEMENTATION OF FEATURE-DIMENSION MASKING ---
     # This logic was in the original generator but is a distinct augmentation step.
     # It can be enabled if you find it improves model robustness.
     if emd_mask_d2:
@@ -236,7 +233,7 @@ def create_stratified_dataset_for_epoch(tfrecord_dir, batch_size, epoch, pos_rat
 
     # Create tf.data options with TensorFlow 2.20 optimization
     options = tf.data.Options()
-    options.autotune.min_parallelism = 2  # TF 2.20 feature for faster pipeline warm-up
+    options.autotune.min_parallelism = 2  # Ensure at least 2 threads for parallelism
     options.experimental_deterministic = False  # Allow non-deterministic for better performance
 
     # Create datasets for positive and negative samples
@@ -263,12 +260,12 @@ def create_stratified_dataset_for_epoch(tfrecord_dir, batch_size, epoch, pos_rat
 
     # Shuffle both datasets with epoch-specific seeds
     pos_dataset = pos_dataset.shuffle(
-        buffer_size=10_000,
+        buffer_size=711_000,
         seed=epoch_seed,
         reshuffle_each_iteration=True
     )
     neg_dataset = neg_dataset.shuffle(
-        buffer_size=50_000,
+        buffer_size=500_000,
         seed=epoch_seed + 1,  # Different seed for negative samples
         reshuffle_each_iteration=True
     )
@@ -324,7 +321,7 @@ def create_train_dataset_for_epoch(tfrecord_dir, enable_masking=True, subset=1.0
         tfrecord_dir=tfrecord_dir,
         batch_size=batch_size,
         epoch=epoch,
-        pos_ratio=0.5,  # 50-50 stratified batches
+        pos_ratio=0.02,  # 50-50 stratified batches
         enable_masking=enable_masking,
         subset=subset
     )
