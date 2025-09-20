@@ -261,11 +261,25 @@ def train_step(model, batch_data, loss_fn, optimizer, metrics, class_weights, ru
     labels_flat = tf.reshape(batch_data["labels"], [-1])
     preds_flat = tf.reshape(outputs["cls_ypred"], [-1])
 
-    metrics['train_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['train_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['train_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['train_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['train_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    # Ensure predictions are in valid range for AUC [0, 1]
+    preds_clipped = tf.clip_by_value(preds_flat, 1e-7, 1.0 - 1e-7)
+
+    # Debug: Check class distribution in batch
+    pos_count = tf.reduce_sum(tf.cast(labels_flat, tf.int32))
+    batch_size = tf.shape(labels_flat)[0]
+
+    # Only update AUC if we have both classes in the batch
+    has_both_classes = tf.logical_and(
+        tf.greater(pos_count, 0),
+        tf.less(pos_count, batch_size)
+    )
+
+    metrics['train_acc'].update_state(labels_flat, preds_clipped)
+    if has_both_classes:
+        metrics['train_auc'].update_state(labels_flat, preds_clipped)
+    metrics['train_precision'].update_state(labels_flat, preds_clipped)
+    metrics['train_recall'].update_state(labels_flat, preds_clipped)
+    metrics['train_mcc'].update_state(labels_flat, preds_clipped)
     metrics['train_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(raw_recon_loss_pep)
     metrics['mhc_loss'].update_state(raw_recon_loss_mhc)
@@ -289,11 +303,25 @@ def eval_step(model, batch_data, loss_fn, metrics, run_conf):
     # Total validation loss (same weighting as training but no class weights)
     total_loss_weighted = (run_conf["CLS_LOSS_WEIGHT"] * cls_loss) + (run_conf["PEP_RECON_LOSS_WEIGHT"] * recon_loss_pep) + (run_conf["MHC_RECON_LOSS_WEIGHT"] * recon_loss_mhc)
 
-    metrics['val_acc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['val_auc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['val_precision'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['val_recall'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
-    metrics['val_mcc'].update_state(labels_flat, tf.cast(preds_flat, tf.float32))
+    # Ensure predictions are in valid range for AUC [0, 1]
+    preds_clipped = tf.clip_by_value(preds_flat, 1e-7, 1.0 - 1e-7)
+
+    # Debug: Check class distribution in batch
+    pos_count = tf.reduce_sum(tf.cast(labels_flat, tf.int32))
+    batch_size = tf.shape(labels_flat)[0]
+
+    # Only update AUC if we have both classes in the batch
+    has_both_classes = tf.logical_and(
+        tf.greater(pos_count, 0),
+        tf.less(pos_count, batch_size)
+    )
+
+    metrics['val_acc'].update_state(labels_flat, preds_clipped)
+    if has_both_classes:
+        metrics['val_auc'].update_state(labels_flat, preds_clipped)
+    metrics['val_precision'].update_state(labels_flat, preds_clipped)
+    metrics['val_recall'].update_state(labels_flat, preds_clipped)
+    metrics['val_mcc'].update_state(labels_flat, preds_clipped)
     metrics['val_loss'].update_state(total_loss_weighted)
     metrics['pep_loss'].update_state(recon_loss_pep)
     metrics['mhc_loss'].update_state(recon_loss_mhc)
@@ -446,12 +474,12 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     class_weights_tensor = tf.constant([class_weight_dict[0], class_weight_dict[1]], dtype=tf.float32)
     metrics = {
         'train_loss': tf.keras.metrics.Mean(name='train_loss'),
-        'train_auc': tf.keras.metrics.AUC(name='train_auc'),
+        'train_auc': tf.keras.metrics.AUC(name='train_auc', num_thresholds=2000),
         'train_acc': tf.keras.metrics.BinaryAccuracy(name='train_accuracy'),
         'train_precision': tf.keras.metrics.Precision(name='train_precision'),
         'train_recall': tf.keras.metrics.Recall(name='train_recall'),
         'train_mcc': BinaryMCC(name='train_mcc'),
-        'val_auc': tf.keras.metrics.AUC(name='val_auc'),
+        'val_auc': tf.keras.metrics.AUC(name='val_auc', num_thresholds=2000),
         'val_acc': tf.keras.metrics.BinaryAccuracy(name='val_accuracy'),
         'val_precision': tf.keras.metrics.Precision(name='val_precision'),
         'val_recall': tf.keras.metrics.Recall(name='val_recall'),
