@@ -10,6 +10,7 @@ This script uses a highly efficient TFRecord-based data pipeline:
 5.  The tf.data pipeline reconstructs full batches on-the-fly, maximizing performance.
 """
 import csv
+import glob
 import sys
 import re
 import numpy as np
@@ -175,50 +176,158 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
                                                               masked_embeddings)
     return features
 
-# You would then call this in your create_dataset function:
-# dataset = dataset.map(lambda x: apply_dynamic_masking(x, emd_mask_d2=False), num_parallel_calls=tf.data.AUTOTUNE)
-
-def create_balanced_dataset(dataset, batch_size, pos_ratio=0.02):
-    """
-    Fast approach: Use larger shuffle buffer and better interleaving to reduce
-    empty-class batches without complex stratified sampling.
-    """
-    # Much larger shuffle buffer to better mix classes
-    large_buffer_size = min(500_000, batch_size * 100)
-
-    return (dataset
-            .shuffle(buffer_size=large_buffer_size, reshuffle_each_iteration=True)
-            .batch(batch_size, drop_remainder=True))
-
-
-def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking=True, stratified=True, pos_ratio=0.02):
-    """Creates a tf.data.Dataset from a set of sharded, compressed TFRecord files."""
-    file_list = tf.io.gfile.glob(filepath_pattern)
+def create_dataset(file_list, batch_size, is_training=True, apply_masking=True):
+    """Creates a tf.data.Dataset from a specific list of files."""
     if not file_list:
-        raise ValueError(f"No files found for pattern: {filepath_pattern}")
-    print(f"Creating dataset from {len(file_list)} TFRecord files for pattern: {filepath_pattern}")
-    dataset = tf.data.TFRecordDataset(file_list, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE)
+        raise ValueError("File list provided to create_dataset is empty.")
+
+    # Using interleave for better mixing of records from the positive and negative files
+    dataset = tf.data.Dataset.from_tensor_slices(file_list)
+    dataset = dataset.interleave(
+        lambda x: tf.data.TFRecordDataset(x, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE),
+        cycle_length=len(file_list),
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=not is_training
+    )
+
     if is_training:
         print("✓ Shuffling")
         dataset = dataset.shuffle(buffer_size=100_000, reshuffle_each_iteration=True)
+
     dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
+
     if is_training and apply_masking:
         print("✓ Applying dynamic masking augmentation")
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
 
-    if is_training and stratified:
-        print(f"✓ Using improved shuffling to reduce class imbalance in batches")
-        dataset = create_balanced_dataset(dataset, batch_size, pos_ratio)
-    else:
-        # Standard batching for validation or non-stratified training
-        dataset = dataset.batch(
-            batch_size,
-            drop_remainder=is_training
-        )
-
+    dataset = dataset.batch(
+        batch_size,
+        drop_remainder=is_training
+    )
     dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
     return dataset
 
+def create_stratified_dataset_for_epoch(tfrecord_dir, batch_size, epoch, pos_ratio=0.5, enable_masking=True, subset=1.0):
+    """Creates dynamically stratified batches that change between epochs while maintaining stratification.
+
+    Args:
+        tfrecord_dir: Directory containing positive and negative TFRecord shards
+        batch_size: Size of each batch
+        epoch: Current epoch number (used for seeding to ensure different samples each epoch)
+        pos_ratio: Ratio of positive samples in each batch (default 0.5 for 50-50 split)
+        enable_masking: Whether to apply dynamic masking augmentation
+        subset: Subset of data to use (1.0 = full dataset)
+
+    Returns:
+        tf.data.Dataset with stratified batches
+    """
+    # Find positive and negative TFRecord files
+    pos_pattern = os.path.join(tfrecord_dir, "train", "positive_shard_*.tfrecord")
+    neg_pattern = os.path.join(tfrecord_dir, "train", "negative_shard_*.tfrecord")
+
+    pos_files = sorted(glob.glob(pos_pattern))
+    neg_files = sorted(glob.glob(neg_pattern))
+
+    if not pos_files or not neg_files:
+        raise FileNotFoundError(f"No positive or negative TFRecord files found with patterns: {pos_pattern}, {neg_pattern}")
+
+    print(f"✓ Found {len(pos_files)} positive shards and {len(neg_files)} negative shards")
+    print(f"✓ Creating stratified batches with {pos_ratio:.1%} positive samples per batch")
+
+    # Create tf.data options with TensorFlow 2.20 optimization
+    options = tf.data.Options()
+    options.autotune.min_parallelism = 2  # TF 2.20 feature for faster pipeline warm-up
+    options.experimental_deterministic = False  # Allow non-deterministic for better performance
+
+    # Create datasets for positive and negative samples
+    pos_dataset = tf.data.Dataset.from_tensor_slices(pos_files)
+    pos_dataset = pos_dataset.with_options(options)
+    pos_dataset = pos_dataset.interleave(
+        lambda x: tf.data.TFRecordDataset(x, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE),
+        cycle_length=min(len(pos_files), 4),
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=False
+    )
+
+    neg_dataset = tf.data.Dataset.from_tensor_slices(neg_files)
+    neg_dataset = neg_dataset.with_options(options)
+    neg_dataset = neg_dataset.interleave(
+        lambda x: tf.data.TFRecordDataset(x, compression_type="GZIP", num_parallel_reads=tf.data.AUTOTUNE),
+        cycle_length=min(len(neg_files), 4),
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=False
+    )
+
+    # Add epoch-based seeding for different shuffling each epoch
+    epoch_seed = epoch * 999  # Different seed for each epoch
+
+    # Shuffle both datasets with epoch-specific seeds
+    pos_dataset = pos_dataset.shuffle(
+        buffer_size=10_000,
+        seed=epoch_seed,
+        reshuffle_each_iteration=True
+    )
+    neg_dataset = neg_dataset.shuffle(
+        buffer_size=50_000,
+        seed=epoch_seed + 1,  # Different seed for negative samples
+        reshuffle_each_iteration=True
+    )
+
+    # Parse examples
+    pos_dataset = pos_dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
+    neg_dataset = neg_dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
+
+    # Calculate batch composition
+    pos_per_batch = int(batch_size * pos_ratio)
+    neg_per_batch = batch_size - pos_per_batch
+
+    print(f"✓ Batch composition: {pos_per_batch} positive + {neg_per_batch} negative = {batch_size} total")
+
+    # Create stratified sampling using tf.data.experimental.sample_from_datasets
+    # This ensures each batch has the exact desired ratio
+    sample_weights = [pos_ratio, 1.0 - pos_ratio]
+    stratified_dataset = tf.data.experimental.sample_from_datasets(
+        [pos_dataset, neg_dataset],
+        weights=sample_weights,
+        seed=epoch_seed + 2  # Another epoch-specific seed
+    )
+
+    # Apply masking if requested
+    if enable_masking:
+        print("✓ Applying dynamic masking augmentation")
+        stratified_dataset = stratified_dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
+
+    # Batch the stratified samples
+    stratified_dataset = stratified_dataset.batch(batch_size, drop_remainder=True)
+
+    # Apply subset if needed
+    if subset < 1.0:
+        # Estimate total batches and take subset
+        estimated_batches = 1000  # Conservative estimate
+        target_batches = max(10, int(estimated_batches * subset))
+        stratified_dataset = stratified_dataset.take(target_batches)
+        print(f"✓ Using subset: taking {target_batches} batches this epoch")
+
+    # Prefetch for performance
+    stratified_dataset = stratified_dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+    return stratified_dataset
+
+# Create dataset function for epoch-level reshuffling (updated to use dynamic stratified sampling)
+def create_train_dataset_for_epoch(tfrecord_dir, enable_masking=True, subset=1.0, epoch=0, batch_size=1024):
+    """Creates a training dataset for a specific epoch with dynamic stratified batching.
+
+    This function creates stratified batches where samples change between epochs
+    while maintaining the desired positive/negative ratio.
+    """
+    return create_stratified_dataset_for_epoch(
+        tfrecord_dir=tfrecord_dir,
+        batch_size=batch_size,
+        epoch=epoch,
+        pos_ratio=0.5,  # 50-50 stratified batches
+        enable_masking=enable_masking,
+        subset=subset
+    )
 
 # ──────────────────────────────────────────────────────────────────────
 # Training & Evaluation Steps
@@ -333,7 +442,6 @@ def eval_step(model, batch_data, loss_fn, metrics, run_conf):
 # ----------------------------------------------------------------------
 def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, heads, noise_std, run_config,
           resume_from_weights=None, enable_masking=True, subset=1.0):
-    """Fully optimized training function using the new data pipeline."""
 
     global MAX_PEP_LEN, MAX_MHC_LEN, ESM_DIM, MHC_CLASS
     MHC_CLASS = mhc_class
@@ -374,40 +482,19 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     train_pattern = os.path.join(tfrecord_dir, "train_shard_*.tfrecord")
     val_pattern = os.path.join(tfrecord_dir, "validation_shard_*.tfrecord")
 
-    # Create dataset function for epoch-level reshuffling
-    def create_train_dataset_for_epoch(epoch):
-        file_list = tf.io.gfile.glob(train_pattern)
-        random.seed(epoch + 999)  # Different seed each epoch
-        random.shuffle(file_list)  # Shuffle file order
-
-        # Interleave files for better class distribution
-        file_dataset = tf.data.Dataset.from_tensor_slices(file_list)
-        dataset = file_dataset.interleave(
-            lambda filename: tf.data.TFRecordDataset(filename, compression_type="GZIP"),
-            cycle_length=min(len(file_list), 16),  # Increased cycle length
-            block_length=16,  # Read more records from each file before switching
-            num_parallel_calls=tf.data.AUTOTUNE,
-            deterministic=False
-        )
-        # Remove the extra shuffle here since create_balanced_dataset will handle it
-        dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
-        if enable_masking:
-            dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
-
-        # Use improved shuffling for better class distribution
-        dataset = create_balanced_dataset(dataset, batch_size, pos_ratio)
-
-        # Apply subset if needed
-        if subset < 1.0 and train_steps:
-            dataset = dataset.take(train_steps)
-
-        dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-        return dataset
-
-    val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False, stratified=False)
+    val_files = sorted(glob.glob(val_pattern))
+    if not val_files:
+        raise FileNotFoundError(f"No validation TFRecord files found with pattern: {val_pattern}")
+    val_ds = create_dataset(val_files, batch_size, is_training=False, apply_masking=False)
 
     # Create a sample training dataset for model building
-    sample_train_ds = create_train_dataset_for_epoch(0)
+    sample_train_ds = create_train_dataset_for_epoch(
+        tfrecord_dir,
+        enable_masking=False,
+        subset=0.1,
+        epoch=0,
+        batch_size=batch_size
+    )
 
     model = pmbind(max_pep_len=MAX_PEP_LEN, max_mhc_len=MAX_MHC_LEN, emb_dim=embed_dim,
                    heads=heads, noise_std=noise_std, latent_dim=embed_dim * 2,
@@ -503,8 +590,14 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print(f"\n{'=' * 60}\nEpoch {epoch + 1}/{epochs}\n{'=' * 60}")
         for m in metrics.values(): m.reset_state()
 
-        # Create freshly shuffled dataset for this epoch (subset already applied)
-        train_ds_epoch = create_train_dataset_for_epoch(epoch)
+        # Create freshly shuffled stratified dataset for this epoch (subset already applied)
+        train_ds_epoch = create_train_dataset_for_epoch(
+            tfrecord_dir,
+            enable_masking=enable_masking,
+            subset=subset,
+            epoch=epoch,
+            batch_size=batch_size
+        )
 
         # Use dataset length divided by batch size for progress bar
         pbar = tqdm(train_ds_epoch, desc="Training", unit="batch", total=train_steps)
