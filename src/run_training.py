@@ -29,7 +29,7 @@ from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, 
                    clean_key, masked_categorical_crossentropy, seq_to_indices,
                    AMINO_ACID_VOCAB, PAD_INDEX, BLOSUM62, AA, PAD_INDEX_OHE, BinaryMCC,
                    AsymmetricPenaltyBinaryCrossentropy)
-from models import pmbind_multitask as pmbind
+from models import pmbind_multitask_modified as pmbind
 from visualizations import visualize_training_history
 
 mixed_precision = True  # Enable mixed precision for significant speedup
@@ -320,7 +320,7 @@ def create_train_dataset_for_epoch(tfrecord_dir, enable_masking=True, subset=1.0
         tfrecord_dir=tfrecord_dir,
         batch_size=batch_size,
         epoch=epoch,
-        pos_ratio=0.02,  # 50-50 stratified batches
+        pos_ratio=0.5,  # 50-50 stratified batches
         enable_masking=enable_masking,
         subset=subset
     )
@@ -467,6 +467,10 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         print(f"Batches per epoch: {train_steps:,} train, {val_steps:,} val (batch_size={batch_size})")
         total_train_batches = train_steps * epochs
         print(f"Total training batches across {epochs} epochs: {total_train_batches:,}")
+    if subset < 1.0:
+        estimated_batches = 711000 // batch_size  # Rough estimate based on dataset size
+        target_batches = max(10, int(estimated_batches * subset))
+        train_steps = target_batches
     else:
         print("Warning: Dataset sizes not found in metadata. Progress bar won't show totals.")
         train_steps = None
@@ -547,7 +551,8 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     neg_weight = 1.0 / (2 * (1-pos_ratio))  # = 0.51
 
     # Normalize so negative class weight = 1.0
-    class_weight_dict = {0: 1.0, 1: pos_weight / neg_weight}  # {0: 1.0, 1: 49.0}
+    # class_weight_dict = {0: 1.0, 1: pos_weight / neg_weight}  # {0: 1.0, 1: 49.0}
+    class_weight_dict = {0: 1.0, 1: 1.0}  # {0: 1.0, 1: 49.0}
     print(f"✓ Using class weights: {class_weight_dict}")
 
     loss_fn = AsymmetricPenaltyBinaryCrossentropy(label_smoothing=run_config["LABEL_SMOOTHING"], asymmetry_strength=run_config["ASYMMETRIC_LOSS_SCALE"])
@@ -706,9 +711,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-4,
-        "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.4, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
-        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.4,
+        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-2,
+        "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.1, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.2,
         "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights model 1 pool D"
     }
 
