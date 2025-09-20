@@ -60,6 +60,7 @@ VECTOR_TO_AA = {tuple(v): k for k, v in BLOSUM62.items()}
 AA = "ACDEFGHIKLMNPQRSTVWY-"
 AA_TO_INT = {a: i for i, a in enumerate(AA)}
 UNK_IDX = 20  # Index for "unknown"
+UNK_IDX_23 = 22  # Index for "unknown" in BLOSUM62 (23 total chars)
 MASK_TOKEN = -1.0
 NORM_TOKEN = 1.0
 PAD_TOKEN = -2.0
@@ -314,7 +315,7 @@ def seq_to_ohe_indices(seq, max_seq_len):
     """Converts an amino acid sequence to an array of integer indices FOR OHE TARGET."""
     indices = np.full(max_seq_len, PAD_INDEX_OHE, dtype=np.int8)
     for i, aa in enumerate(seq.upper()[:max_seq_len]):
-        indices[i] = AA_TO_INT.get(aa, UNK_IDX)
+        indices[i] = AA_TO_INT.get(aa, UNK_IDX_23)
     return indices
 
 # ----------------------- Mixed precision helpers -----------------------
