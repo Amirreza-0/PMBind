@@ -68,15 +68,163 @@ def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
     )
 
 
+def visualize_attention_weights(attn_weights, peptide_seq, mhc_seq, max_pep_len, max_mhc_len,
+                               out_dir, sample_idx=0, head_idx=None, save_all_heads=False):
+    """
+    Visualize attention weights from the PMBind model.
+
+    Args:
+        attn_weights: Tensor of shape (B, heads, P+M, P+M) with attention scores.
+        peptide_seq: Peptide sequence string.
+        mhc_seq: MHC sequence string (truncated to fit max_mhc_len).
+        max_pep_len: Maximum peptide length.
+        max_mhc_len: Maximum MHC length.
+        out_dir: Output directory to save plots.
+        sample_idx: Index of sample to visualize (default: 0).
+        head_idx: Index of attention head to visualize (default: None, average all heads).
+        save_all_heads: Whether to save individual plots for all attention heads.
+
+    Returns:
+        None
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Convert to numpy for visualization
+    try:
+        attn_weights = attn_weights.numpy()
+    except:
+        pass  # Already numpy
+
+    # Get attention weights for the specified sample
+    sample_attn = attn_weights[sample_idx]  # Shape: (heads, P+M, P+M)
+
+    # Prepare sequence labels
+    pep_len = min(len(peptide_seq), max_pep_len)
+    mhc_len = min(len(mhc_seq), max_mhc_len)
+
+    # Create sequence labels for visualization
+    pep_labels = [f"P{i+1}:{peptide_seq[i]}" for i in range(pep_len)]
+    mhc_labels = [f"M{i+1}:{mhc_seq[i]}" for i in range(mhc_len)]
+    seq_labels = pep_labels + mhc_labels
+
+    # Only consider the actual sequence lengths, not padded positions
+    relevant_attn = sample_attn[:, :pep_len+mhc_len, :pep_len+mhc_len]
+
+    if head_idx is not None:
+        # Visualize specific head
+        _plot_single_attention_head(relevant_attn[head_idx], seq_labels, pep_len, mhc_len,
+                                  f'Attention Weights - Head {head_idx} (Sample {sample_idx})',
+                                  os.path.join(out_dir, f"attention_head_{head_idx}_sample_{sample_idx}.png"))
+    else:
+        # Average across all heads
+        avg_attn = np.mean(relevant_attn, axis=0)
+        _plot_single_attention_head(avg_attn, seq_labels, pep_len, mhc_len,
+                                  f'Average Attention Weights (Sample {sample_idx})',
+                                  os.path.join(out_dir, f"attention_avg_sample_{sample_idx}.png"))
+
+    if save_all_heads:
+        # Save individual plots for each attention head
+        for h in range(relevant_attn.shape[0]):
+            _plot_single_attention_head(relevant_attn[h], seq_labels, pep_len, mhc_len,
+                                      f'Attention Weights - Head {h} (Sample {sample_idx})',
+                                      os.path.join(out_dir, f"attention_head_{h}_sample_{sample_idx}.png"))
+
+    # Create peptide-to-MHC and MHC-to-peptide cross-attention visualizations
+    _plot_cross_attention_maps(relevant_attn, peptide_seq, mhc_seq, pep_len, mhc_len,
+                              out_dir, sample_idx)
+
+
+def _plot_single_attention_head(attn_matrix, seq_labels, pep_len, mhc_len, title, filename):
+    """Helper function to plot a single attention head."""
+    plt.figure(figsize=(max(12, len(seq_labels) * 0.5), max(10, len(seq_labels) * 0.4)))
+
+    # Create heatmap
+    sns.heatmap(attn_matrix,
+                xticklabels=seq_labels,
+                yticklabels=seq_labels,
+                cmap='viridis',
+                cbar_kws={'label': 'Attention Score'},
+                square=True,
+                linewidths=0.1)
+
+    # Add separator lines between peptide and MHC
+    plt.axvline(x=pep_len, color='red', linewidth=2, linestyle='--', alpha=0.7)
+    plt.axhline(y=pep_len, color='red', linewidth=2, linestyle='--', alpha=0.7)
+
+    # Add text annotations for quadrants
+    plt.text(pep_len/2, -1, 'Peptide', ha='center', va='top', fontweight='bold', fontsize=12)
+    plt.text(pep_len + mhc_len/2, -1, 'MHC', ha='center', va='top', fontweight='bold', fontsize=12)
+    plt.text(-1, pep_len/2, 'Peptide', ha='right', va='center', fontweight='bold', fontsize=12, rotation=90)
+    plt.text(-1, pep_len + mhc_len/2, 'MHC', ha='right', va='center', fontweight='bold', fontsize=12, rotation=90)
+
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.xlabel('Key/Value Positions', fontsize=12)
+    plt.ylabel('Query Positions', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Attention plot saved to {filename}")
+
+
+def _plot_cross_attention_maps(attn_weights, peptide_seq, mhc_seq, pep_len, mhc_len, out_dir, sample_idx):
+    """Plot cross-attention maps between peptide and MHC."""
+    # Average across heads for cross-attention analysis
+    avg_attn = np.mean(attn_weights, axis=0)
+
+    # Extract cross-attention blocks
+    pep_to_mhc = avg_attn[:pep_len, pep_len:pep_len+mhc_len]  # Peptide queries attending to MHC
+    mhc_to_pep = avg_attn[pep_len:pep_len+mhc_len, :pep_len]  # MHC queries attending to peptide
+
+    # Plot peptide-to-MHC attention
+    plt.figure(figsize=(max(10, mhc_len * 0.5), max(6, pep_len * 0.5)))
+    sns.heatmap(pep_to_mhc,
+                xticklabels=[f"M{i+1}:{mhc_seq[i]}" for i in range(mhc_len)],
+                yticklabels=[f"P{i+1}:{peptide_seq[i]}" for i in range(pep_len)],
+                cmap='viridis',
+                cbar_kws={'label': 'Attention Score'},
+                annot=True if pep_len <= 15 and mhc_len <= 20 else False,
+                fmt='.2f')
+    plt.title(f'Peptide → MHC Cross-Attention (Sample {sample_idx})', fontsize=14, fontweight='bold')
+    plt.xlabel('MHC Positions', fontsize=12)
+    plt.ylabel('Peptide Positions', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"cross_attention_pep_to_mhc_sample_{sample_idx}.png"),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Plot MHC-to-peptide attention
+    plt.figure(figsize=(max(8, pep_len * 0.5), max(8, mhc_len * 0.4)))
+    sns.heatmap(mhc_to_pep,
+                xticklabels=[f"P{i+1}:{peptide_seq[i]}" for i in range(pep_len)],
+                yticklabels=[f"M{i+1}:{mhc_seq[i]}" for i in range(mhc_len)],
+                cmap='viridis',
+                cbar_kws={'label': 'Attention Score'},
+                annot=True if pep_len <= 15 and mhc_len <= 20 else False,
+                fmt='.2f')
+    plt.title(f'MHC → Peptide Cross-Attention (Sample {sample_idx})', fontsize=14, fontweight='bold')
+    plt.xlabel('Peptide Positions', fontsize=12)
+    plt.ylabel('MHC Positions', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"cross_attention_mhc_to_pep_sample_{sample_idx}.png"),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"✓ Cross-attention plots saved for sample {sample_idx}")
+
+
 def visualize_cross_attention_weights(cross_attn_scores, peptide_seq, mhc_seq):
     """
+    Legacy function for backward compatibility.
     Visualize cross-attention weights between peptide and MHC sequences.
 
     Args:
         cross_attn_scores: Tensor of shape (B, N_peptide, N_mhc) with attention scores.
         peptide_seq: List of peptide sequences.
         mhc_seq: List of MHC sequences.
-        top_n: Number of top attention scores to visualize.
 
     Returns:
         None

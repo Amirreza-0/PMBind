@@ -30,7 +30,7 @@ from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOK
                    clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA, OHE_to_seq_single,
                    masked_categorical_crossentropy, split_y_true_y_pred)
 from models import pmbind_multitask_modified as pmbind
-from visualizations import _analyze_latents
+from visualizations import _analyze_latents, visualize_attention_weights
 
 # --- Globals & Configuration ---
 EMB_DB: np.lib.npyio.NpzFile | None = None
@@ -181,6 +181,66 @@ def generate_sample_data_for_viz(df, idx, max_pep_len, max_mhc_len, seq_map, emb
     return data, pep_seq, mhc_seq
 
 
+def generate_attention_visualizations(model, df, seq_map, embed_map, max_pep_len, max_mhc_len, out_dir, name):
+    """Generate attention weight visualizations for a sample of the data."""
+    print("\n--- Generating attention weight visualizations ---")
+    attention_out_dir = os.path.join(out_dir, "attention_weights")
+    os.makedirs(attention_out_dir, exist_ok=True)
+
+    # Select a few representative samples for attention visualization
+    num_samples_to_viz = min(5, len(df))
+    sample_indices = np.random.choice(len(df), num_samples_to_viz, replace=False) if len(df) > 5 else range(len(df))
+
+    for i, sample_idx in enumerate(sample_indices):
+        sample_row = df.iloc[sample_idx]
+        sample_data, pep_seq, mhc_seq = generate_sample_data_for_viz(df, sample_idx, max_pep_len, max_mhc_len, seq_map, embed_map)
+
+        # Convert to tensors for model input
+        model_input = {k: tf.convert_to_tensor(v) for k, v in sample_data.items()}
+
+        # Get model outputs including attention weights
+        outputs = model(model_input, training=False)
+
+        if "attn_weights" in outputs:
+            attn_weights = outputs["attn_weights"]
+
+            # Create sample-specific output directory
+            sample_out_dir = os.path.join(attention_out_dir, f"sample_{sample_idx}")
+            os.makedirs(sample_out_dir, exist_ok=True)
+
+            # Visualize attention weights
+            visualize_attention_weights(
+                attn_weights=attn_weights,
+                peptide_seq=pep_seq,
+                mhc_seq=mhc_seq,
+                max_pep_len=max_pep_len,
+                max_mhc_len=max_mhc_len,
+                out_dir=sample_out_dir,
+                sample_idx=0,  # Since we're processing one sample at a time
+                head_idx=None,  # Average across heads
+                save_all_heads=True  # Save individual head visualizations
+            )
+
+            # Also save sample information
+            with open(os.path.join(sample_out_dir, "sample_info.txt"), "w") as f:
+                f.write(f"Sample Index: {sample_idx}\n")
+                f.write(f"Peptide: {pep_seq}\n")
+                f.write(f"MHC Allele: {sample_row['allele']}\n")
+                f.write(f"MHC Sequence: {mhc_seq[:50]}{'...' if len(mhc_seq) > 50 else ''}\n")
+                if 'assigned_label' in sample_row:
+                    f.write(f"True Label: {sample_row['assigned_label']}\n")
+                if 'prediction_score' in sample_row:
+                    f.write(f"Prediction Score: {sample_row['prediction_score']:.4f}\n")
+                if 'prediction_label' in sample_row:
+                    f.write(f"Predicted Label: {sample_row['prediction_label']}\n")
+
+            print(f"✓ Attention visualizations saved for sample {sample_idx}")
+        else:
+            print(f"Warning: Model does not output attention weights for sample {sample_idx}")
+
+    print(f"✓ All attention weight visualizations saved to {attention_out_dir}")
+
+
 def run_visualizations(df, latents_pooled, latents_seq, out_dir, name, max_pep_len, max_mhc_len, seq_map, embed_map,
                        source_col=None):
     print("\nGenerating latent space visualizations...")
@@ -292,6 +352,10 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
 
     run_visualizations(df_infer, latents_pooled, latents_seq, os.path.join(out_dir, "visualizations"), name,
                        max_pep_len, max_mhc_len, seq_map, embed_map, source_col)
+
+    # Generate attention weight visualizations
+    generate_attention_visualizations(model, df_infer, seq_map, embed_map, max_pep_len, max_mhc_len,
+                                    os.path.join(out_dir, "visualizations"), name)
 
     # --- save input and predictions of the first 10 samples in a csv file ---
     pred_samples_df = df_infer.head(10)

@@ -18,7 +18,7 @@ MIN_ALLELES_FOR_CV = 1  # Minimum alleles needed for CV after test set extractio
 N_TVAL_FOLD_SAMPLES = 4  # Number of alleles to leave out for Ensemble Validation
 N_VAL_FOLD_SAMPLES = 4  # Number of alleles to leave out for validation in each fold
 TAKE_SUBSET = False  # Whether to save folds as subsets of df/k
-LEAVE_ALLELE_GROUP_OUT = True  # Whether to leave one allele group out completely (True) or just one allele (False)
+LEAVE_ALLELE_GROUP_OUT = False  # Whether to leave one allele group out completely (True) or just one allele (False)
 
 # Input/Output paths
 ROOT_DIR = pathlib.Path("../data/binding_affinity_data").resolve()
@@ -43,37 +43,37 @@ KEY_TRANS = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})  # for vectoriz
 
 
 if MHC_CLASS == 2:
-    test_alleles = ["H-2-IAd-A/H-2-IAd-B",
-                    "HLA-DPA1*03:01/HLA-DPB1*04:02",
+    test_alleles = ["H-2-IAk-A/H-2-IAk-B",
+                    "HLA-DPA1*01:03/HLA-DPB1*14:01",
                     "HLA-DQA1*02:01/HLA-DQB1*04:02",
                     "HLA-DRA/HLA-DRB1*16:02",
                     # "HLA-DRA/HLA-DRB3*03:01"
                     ]
-    tval_alleles = ["H-2-Iek-A/H-2-Iek-B",
-                    "HLA-DQA1*01:01/HLA-DQB1*05:03",
-                    "HLA-DPA1*01:03/HLA-DPB1*17:01",
+    tval_alleles = ["H-2-IAu-A/H-2-IAu-B",
+                    "HLA-DPA1*01:03/HLA-DPB1*105:01",
+                    "HLA-DQA1*05:01/HLA-DQB1*04:02",
                     "HLA-DRA/HLA-DRB1*12:02",
                     ]
 
 else:
-    test_alleles = ["BoLA-3:00101", "DLA-8850801",
-                    "Eqca-1600101", "Gogo-B0101",
+    test_alleles = ["BoLA-6:01302", "DLA-8850801",
+                    "Eqca-1600101",
                     "H-2-Kk", "HLA-A*02:50",
                     "HLA-B*45:06",
                     "HLA-C*12:12", "HLA-E01:03",
-                    "Mamu-A7*00103", "Mamu-B*06502",
-                    "Patr-B17:01", "SLA-107:01",
-                    "HLA-C*18:01"]
+                    "Mamu-A1*02601" "Mamu-B*00401",
+                    "Patr-A06:02", "Patr-B09:01",
+                    "SLA-107:01"]
 
     tval_alleles = ["SLA-107:02",
-                    "Patr-B24:01",
-                    "Mamu-B*08701",
-                    "Mamu-A1*02601",
+                    "SLA-304:01",
+                    "Mamu-B*01001",
+                    "Mamu-A1*00701",
                     "HLA-C*15:04",
                     "HLA-B*15:42",
-                    "HLA-A*03:19",
+                    "HLA-A*32:15",
                     "H-2-Dd",
-                    "BoLA-6:04101"]
+                    "BoLA-3:00101"]
 
 major_allele_groups = ['MAMU', 'PATR', 'SLA', 'BOLA', 'DLA', 'H-2', 'HLA-A', 'HLA-B', 'HLA-C', 'HLA-E', 'HLA-DRB',
                        'HLA-DQA', 'HLA-DQB', 'HLA-DPA', 'HLA-DPB', 'EQCA', 'GOGO']
@@ -85,11 +85,12 @@ def train_val_split(
         target_col: str = "assigned_label",
         id_col: str = "mhc_embedding_key",
         train_size: float = 0.8,
-        random_state: int = 42,
+        random_state: int = 999,
         n_val_ids: int = 1,
         take_subset: bool = False,
         LEAVE_ALLELE_GROUP_OUT: bool = False,
-        major_allele_groups: list = None
+        major_allele_groups: list = None,
+        tval_df: pd.DataFrame = None
 ):
     """
     Perform k-fold cross-validation split with option to leave out entire allele groups.
@@ -240,6 +241,12 @@ def train_val_split(
         fold_val = pd.concat([fold_val, left_out_data], ignore_index=True)
 
         print(f"  Added {len(left_out_data)} rows from left-out IDs to validation")
+
+        # Add tval data to validation set for each fold
+        if tval_df is not None and not tval_df.empty:
+            fold_val = pd.concat([fold_val, tval_df], ignore_index=True)
+            print(f"  Added {len(tval_df)} rows from tval set to validation")
+
         print(f"  Final validation size: {len(fold_val)} rows")
 
         # Select remaining rows for training
@@ -549,7 +556,8 @@ def _execute_main_logic():
         n_val_ids=N_VAL_FOLD_SAMPLES,  # number of alleles to leave out for validation in each fold
         take_subset=TAKE_SUBSET,
         LEAVE_ALLELE_GROUP_OUT=LEAVE_ALLELE_GROUP_OUT,
-        major_allele_groups=major_allele_groups
+        major_allele_groups=major_allele_groups,
+        tval_df=df_tval
     )
 
     cv_dir = OUT_DIR / "cv_folds"

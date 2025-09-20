@@ -431,9 +431,9 @@ def pmbind_multitask_modified(max_pep_len: int,
 
     # pmhc self-attention with 2D mask
     pmhc_interaction, pmhc_attn_weights = SelfAttentionWith2DMask(
-        query_dim=emb_dim,
-        context_dim=emb_dim,
-        output_dim=emb_dim,
+        query_dim=latent_dim,
+        context_dim=latent_dim,
+        output_dim=latent_dim,
         heads=heads,
         return_att_weights=True,
         self_attn_mhc=False,  # Prevent both peptide and MHC self-attention in this layer
@@ -451,11 +451,11 @@ def pmbind_multitask_modified(max_pep_len: int,
     # -------------------------------------------------------------------
     # pooled_mean2 = GlobalMeanPooling1D(name="latent_vector_pool-2", axis=-2)(latent_sequence) # (B, D)
     pooled_std2 = GlobalSTDPooling1D(name="latent_vector_std-2", axis=-2)(latent_sequence) # (B, D)
-    pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(latent_sequence)  # (B, P+M)
+    # pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(latent_sequence)  # (B, P+M)
     # pooled_std1 = GlobalSTDPooling1D(name="latent_vector_std-1", axis=-1)(latent_sequence)  # (B, P+M)
 
     # concatenate mean and std pooled vectors
-    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_std2, pooled_mean1]) # (B, 1*(P+M+D))
+    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_std2]) # (B, 1*(D))
 
     binding_head = layers.Dense(emb_dim, activation="gelu", name="binding_dense1", kernel_regularizer=keras.regularizers.l2(l2_reg))(pooled_latent)
     binding_head = layers.GaussianDropout((drop_out_rate*1.5), name="binding_gaussian_dropout")(binding_head)

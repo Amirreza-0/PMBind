@@ -21,6 +21,7 @@ import json
 import os
 from tqdm import tqdm
 import argparse
+import random
 
 # Local imports
 from utils import (get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
@@ -128,7 +129,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     num_valid_pep = tf.shape(valid_pep_positions)[0]
     # --- CORRECTED MASK COUNT ---
     # At least 2 positions, or 15% of the valid sequence length
-    num_to_mask_pep = tf.maximum(4, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.3, tf.int32))
+    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.30, tf.int32))
     shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
     if tf.shape(shuffled_pep_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
@@ -166,7 +167,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
             valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
             # Create a random mask for the feature dimensions
             dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
-                0.30, features["mhc_emb"].dtype)
+                0.50, features["mhc_emb"].dtype)
             # Apply the mask (multiply by 0 where True, 1 where False)
             masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
             # Scatter the modified embeddings back into the original tensor
@@ -204,12 +205,12 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
 # Training & Evaluation Steps
 # ----------------------------------------------------------------------
 @tf.function()
-def train_step(model, batch_data, focal_loss_fn, optimizer, metrics, class_weights, run_conf):
+def train_step(model, batch_data, loss_fn, optimizer, metrics, class_weights, run_conf):
     """Compiled training step with proper mixed precision handling."""
     with tf.GradientTape() as tape:
         outputs = model(batch_data, training=True)
         # Compute individual losses
-        raw_cls_loss = focal_loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
+        raw_cls_loss = loss_fn(batch_data["labels"], tf.cast(outputs["cls_ypred"], tf.float32))
 
         # Apply class weights manually
         labels_flat = tf.reshape(batch_data["labels"], [-1])
@@ -329,8 +330,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     # Create dataset function for epoch-level reshuffling
     def create_train_dataset_for_epoch(epoch):
         file_list = tf.io.gfile.glob(train_pattern)
-        import random
-        random.seed(epoch + 42)  # Different seed each epoch
+        random.seed(epoch + 999)  # Different seed each epoch
         random.shuffle(file_list)  # Shuffle file order
 
         # Interleave files for better class distribution
@@ -355,9 +355,6 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         return dataset
 
     val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False)
-
-    if subset < 1.0 and val_steps:
-        val_ds = val_ds.take(val_steps)
 
     # Create a sample training dataset for model building
     sample_train_ds = create_train_dataset_for_epoch(0)
@@ -403,7 +400,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     print(f"✓ Using CosineDecayRestarts schedule: initial_lr={lr}, first_decay_steps={decay_steps}")
 
     # Create Lion optimizer with cosine decay schedule and weight decay for regularization
-    base_optimizer = keras.optimizers.Lion(learning_rate=lr, weight_decay=1e-4)
+    base_optimizer = keras.optimizers.Lion(learning_rate=cosine_decay_schedule, weight_decay=1e-5)
     if mixed_precision:
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(base_optimizer)
         print("✓ Using LossScaleOptimizer wrapper for Lion with mixed precision")
@@ -449,7 +446,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     history['subset'] = subset  # Store subset info in history
     best_val_mcc = -1.0  # MCC ranges from -1 to 1, start with worst possible
     # Early stopping parameters
-    patience, patience_counter, min_improvement = 7, 0, 0.001
+    patience, patience_counter, min_improvement = 15, 0, 0.001
     lr_patience, lr_patience_counter, lr_reduction_factor, min_lr = 3, 0, 0.5, 1e-7
 
     for epoch in range(epochs):
@@ -585,13 +582,13 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 10, "BATCH_SIZE": 512, "LEARNING_RATE": 1e-3,
+        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
         "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.4, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
         "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.4,
-        "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights"
+        "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights model 1 pool D"
     }
 
-    base_output_folder = "../results/PMBind_runs_optimized5/"
+    base_output_folder = "../results/PMBind_runs_optimized8-1D/"
     run_id_base = 0
 
     fold_to_run = args.fold  # Get fold from args

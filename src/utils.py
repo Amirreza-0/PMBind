@@ -1071,6 +1071,12 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         self.apply_rope = apply_rope  # flag for rotary positional embedding
 
     def build(self, input_shape):
+        # Validate input dim matches provided dims (since a single x is used for q/k/v)
+        in_dim = int(input_shape[-1])
+        if in_dim != self.query_dim or in_dim != self.context_dim:
+            raise ValueError(
+                f"Input dim {in_dim} must match query_dim {self.query_dim} and context_dim {self.context_dim}.")
+
         # Projection weights
         self.norm1 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln1_{self.name}')
         self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
