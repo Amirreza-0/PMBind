@@ -129,7 +129,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     valid_pep_positions = tf.where(tf.equal(features["pep_mask"], NORM_TOKEN))
     num_valid_pep = tf.shape(valid_pep_positions)[0]
     # At least 2 positions, or 15% of the valid sequence length
-    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.30, tf.int32))
+    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.15, tf.int32))
     shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
     if tf.shape(shuffled_pep_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
@@ -145,7 +145,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
     valid_mhc_positions = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
     num_valid_mhc = tf.shape(valid_mhc_positions)[0]
     # At least 5 positions, or 15% of the valid sequence length
-    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.80, tf.int32))
+    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.30, tf.int32))
     shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
     if tf.shape(shuffled_mhc_indices)[0] > 0:
         # Update the mask to MASK_TOKEN (-1.0)
@@ -165,7 +165,7 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
             valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
             # Create a random mask for the feature dimensions
             dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
-                0.50, features["mhc_emb"].dtype)
+                0.15, features["mhc_emb"].dtype)
             # Apply the mask (multiply by 0 where True, 1 where False)
             masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
             # Scatter the modified embeddings back into the original tensor
@@ -219,8 +219,8 @@ def create_stratified_dataset_for_epoch(tfrecord_dir, batch_size, epoch, pos_rat
         tf.data.Dataset with stratified batches
     """
     # Find positive and negative TFRecord files
-    pos_pattern = os.path.join(tfrecord_dir, "train", "positive_shard_*.tfrecord")
-    neg_pattern = os.path.join(tfrecord_dir, "train", "negative_shard_*.tfrecord")
+    pos_pattern = os.path.join(tfrecord_dir, "train", "positive_*.tfrecord")
+    neg_pattern = os.path.join(tfrecord_dir, "train", "negative_*.tfrecord")
 
     pos_files = sorted(glob.glob(pos_pattern))
     neg_files = sorted(glob.glob(neg_pattern))
@@ -231,7 +231,6 @@ def create_stratified_dataset_for_epoch(tfrecord_dir, batch_size, epoch, pos_rat
     print(f"✓ Found {len(pos_files)} positive shards and {len(neg_files)} negative shards")
     print(f"✓ Creating stratified batches with {pos_ratio:.1%} positive samples per batch")
 
-    # Create tf.data options with TensorFlow 2.20 optimization
     options = tf.data.Options()
     options.autotune.min_parallelism = 2  # Ensure at least 2 threads for parallelism
     options.experimental_deterministic = False  # Allow non-deterministic for better performance
@@ -300,7 +299,7 @@ def create_stratified_dataset_for_epoch(tfrecord_dir, batch_size, epoch, pos_rat
     # Apply subset if needed
     if subset < 1.0:
         # Estimate total batches and take subset
-        estimated_batches = 1000  # Conservative estimate
+        estimated_batches = 711000 // batch_size  # Rough estimate based on dataset size
         target_batches = max(10, int(estimated_batches * subset))
         stratified_dataset = stratified_dataset.take(target_batches)
         print(f"✓ Using subset: taking {target_batches} batches this epoch")
@@ -451,7 +450,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         'val_samples', None)
     pos_count = metadata.get('train_positive_counts', 0)
     neg_count = metadata.get('train_negative_counts', 0)
-    pos_ratio = pos_count / (pos_count + neg_count) if (pos_count + neg_count) > 0 else 0.0
+    pos_ratio = pos_count / (pos_count + neg_count) if (pos_count + neg_count) > 0 else 0.02
     # Apply subset to training samples
     if train_samples:
         original_train_samples = train_samples
@@ -476,8 +475,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     lookup_path = os.path.join(tfrecord_dir, "train_mhc_embedding_lookup.npz")
     load_embedding_table(lookup_path)
 
-    train_pattern = os.path.join(tfrecord_dir, "train_shard_*.tfrecord")
-    val_pattern = os.path.join(tfrecord_dir, "validation_shard_*.tfrecord")
+    val_pattern = os.path.join(tfrecord_dir, "validation", "validation_*.tfrecord")
 
     val_files = sorted(glob.glob(val_pattern))
     if not val_files:
@@ -689,20 +687,6 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
             lr_patience_counter += 1
             print(f"  -> No improvement. Patience: {patience_counter}/{patience}")
 
-        if lr_patience_counter >= lr_patience:
-            current_lr = (
-                optimizer.inner_optimizer.learning_rate.numpy()
-                if hasattr(optimizer, "inner_optimizer")
-                else optimizer.learning_rate.numpy()
-            )
-            if current_lr > min_lr:
-                new_lr = max(current_lr * lr_reduction_factor, min_lr)
-                if hasattr(optimizer, "inner_optimizer"):
-                    optimizer.inner_optimizer.learning_rate.assign(new_lr)
-                else:
-                    optimizer.learning_rate.assign(new_lr)
-                print(f"  -> Reducing learning rate to {new_lr:.2e}")
-                lr_patience_counter = 0
 
         if patience_counter >= patience:
             print(f"\n*** Early stopping triggered. Best validation MCC: {best_val_mcc:.4f} ***")
@@ -722,7 +706,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3,
+        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-4,
         "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.4, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
         "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.4,
         "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights model 1 pool D"
@@ -738,7 +722,7 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
 
-    tfrecord_dir = f"/media/amirreza/Crucial-500/PMDb/cross_validation_dataset/mhc{MHC_CLASS}/tfrecords/fold_{fold_to_run:02d}/"
+    tfrecord_dir = f"/media/amirreza/Crucial-500/PMDb/cross_validation_dataset/mhc{MHC_CLASS}/tfrecords/fold_{fold_to_run:02d}_split/"
 
     if not os.path.exists(tfrecord_dir) or not os.path.exists(os.path.join(tfrecord_dir, 'metadata.json')):
         print(f"Error: TFRecord directory not found or is incomplete: {tfrecord_dir}")

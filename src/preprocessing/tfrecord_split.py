@@ -133,7 +133,7 @@ def main():
     parser.add_argument('--val_pattern', type=str, default='validation_shard_*.tfrecord',
                         help='Pattern for validation files')
     parser.add_argument('--split_train', action='store_true', default=True, help='Split training set')
-    parser.add_argument('--split_val', action='store_true', default=True, help='Split validation set')
+    parser.add_argument('--split_val', action='store_true', default=False, help='Split validation set')
     args = parser.parse_args()
 
     if not os.path.exists(args.data_dir):
