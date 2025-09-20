@@ -178,7 +178,55 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
 # You would then call this in your create_dataset function:
 # dataset = dataset.map(lambda x: apply_dynamic_masking(x, emd_mask_d2=False), num_parallel_calls=tf.data.AUTOTUNE)
 
-def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking=True):
+def create_stratified_batch(dataset, batch_size, pos_ratio=0.02):
+    """Create stratified batches ensuring both positive and negative samples in each batch."""
+    # Calculate target counts for each class in a batch
+    pos_count = max(1, int(batch_size * pos_ratio))
+    neg_count = batch_size - pos_count
+
+    # Split dataset by class
+    pos_ds = dataset.filter(lambda x: tf.equal(x["labels"][0], 1))
+    neg_ds = dataset.filter(lambda x: tf.equal(x["labels"][0], 0))
+
+    # Shuffle both classes
+    pos_ds = pos_ds.shuffle(buffer_size=10000, reshuffle_each_iteration=True)
+    neg_ds = neg_ds.shuffle(buffer_size=50000, reshuffle_each_iteration=True)
+
+    # Repeat to ensure infinite stream
+    pos_ds = pos_ds.repeat()
+    neg_ds = neg_ds.repeat()
+
+    # Batch each class separately
+    pos_batched = pos_ds.batch(pos_count)
+    neg_batched = neg_ds.batch(neg_count)
+
+    # Combine batches
+    def combine_batches(pos_batch, neg_batch):
+        combined = {}
+        for key in pos_batch.keys():
+            combined[key] = tf.concat([pos_batch[key], neg_batch[key]], axis=0)
+        return combined
+
+    # Zip and combine
+    stratified_ds = tf.data.Dataset.zip((pos_batched, neg_batched))
+    stratified_ds = stratified_ds.map(combine_batches, num_parallel_calls=tf.data.AUTOTUNE)
+
+    # Shuffle within each batch to mix positive and negative samples
+    def shuffle_batch(batch):
+        batch_size = tf.shape(batch["labels"])[0]
+        indices = tf.range(batch_size)
+        shuffled_indices = tf.random.shuffle(indices)
+
+        shuffled_batch = {}
+        for key, value in batch.items():
+            shuffled_batch[key] = tf.gather(value, shuffled_indices)
+        return shuffled_batch
+
+    stratified_ds = stratified_ds.map(shuffle_batch, num_parallel_calls=tf.data.AUTOTUNE)
+    return stratified_ds
+
+
+def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking=True, stratified=True, pos_ratio=0.02):
     """Creates a tf.data.Dataset from a set of sharded, compressed TFRecord files."""
     file_list = tf.io.gfile.glob(filepath_pattern)
     if not file_list:
@@ -192,11 +240,17 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
     if is_training and apply_masking:
         print("✓ Applying dynamic masking augmentation")
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
-    # Correct: `batch` has no num_parallel_calls
-    dataset = dataset.batch(
-        batch_size,
-        drop_remainder=is_training
-    )
+
+    if is_training and stratified:
+        print(f"✓ Creating stratified batches with pos_ratio={pos_ratio}")
+        dataset = create_stratified_batch(dataset, batch_size, pos_ratio)
+    else:
+        # Standard batching for validation or non-stratified training
+        dataset = dataset.batch(
+            batch_size,
+            drop_remainder=is_training
+        )
+
     dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
     return dataset
 
@@ -345,7 +399,9 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
         if enable_masking:
             dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
-        dataset = dataset.batch(batch_size, drop_remainder=True)
+
+        # Use stratified batching for training
+        dataset = create_stratified_batch(dataset, batch_size, pos_ratio)
 
         # Apply subset if needed
         if subset < 1.0 and train_steps:
@@ -354,7 +410,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
         return dataset
 
-    val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False)
+    val_ds = create_dataset(val_pattern, batch_size, is_training=False, apply_masking=False, stratified=False)
 
     # Create a sample training dataset for model building
     sample_train_ds = create_train_dataset_for_epoch(0)
