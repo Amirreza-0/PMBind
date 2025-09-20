@@ -178,52 +178,17 @@ def apply_dynamic_masking(features, emd_mask_d2=True):  # Added optional flag
 # You would then call this in your create_dataset function:
 # dataset = dataset.map(lambda x: apply_dynamic_masking(x, emd_mask_d2=False), num_parallel_calls=tf.data.AUTOTUNE)
 
-def create_stratified_batch(dataset, batch_size, pos_ratio=0.02):
-    """Create stratified batches ensuring both positive and negative samples in each batch."""
-    # Calculate target counts for each class in a batch
-    pos_count = max(1, int(batch_size * pos_ratio))
-    neg_count = batch_size - pos_count
+def create_balanced_dataset(dataset, batch_size, pos_ratio=0.02):
+    """
+    Fast approach: Use larger shuffle buffer and better interleaving to reduce
+    empty-class batches without complex stratified sampling.
+    """
+    # Much larger shuffle buffer to better mix classes
+    large_buffer_size = min(500_000, batch_size * 100)
 
-    # Split dataset by class
-    pos_ds = dataset.filter(lambda x: tf.equal(x["labels"][0], 1))
-    neg_ds = dataset.filter(lambda x: tf.equal(x["labels"][0], 0))
-
-    # Shuffle both classes
-    pos_ds = pos_ds.shuffle(buffer_size=10000, reshuffle_each_iteration=True)
-    neg_ds = neg_ds.shuffle(buffer_size=50000, reshuffle_each_iteration=True)
-
-    # Repeat to ensure infinite stream
-    pos_ds = pos_ds.repeat()
-    neg_ds = neg_ds.repeat()
-
-    # Batch each class separately
-    pos_batched = pos_ds.batch(pos_count)
-    neg_batched = neg_ds.batch(neg_count)
-
-    # Combine batches
-    def combine_batches(pos_batch, neg_batch):
-        combined = {}
-        for key in pos_batch.keys():
-            combined[key] = tf.concat([pos_batch[key], neg_batch[key]], axis=0)
-        return combined
-
-    # Zip and combine
-    stratified_ds = tf.data.Dataset.zip((pos_batched, neg_batched))
-    stratified_ds = stratified_ds.map(combine_batches, num_parallel_calls=tf.data.AUTOTUNE)
-
-    # Shuffle within each batch to mix positive and negative samples
-    def shuffle_batch(batch):
-        batch_size = tf.shape(batch["labels"])[0]
-        indices = tf.range(batch_size)
-        shuffled_indices = tf.random.shuffle(indices)
-
-        shuffled_batch = {}
-        for key, value in batch.items():
-            shuffled_batch[key] = tf.gather(value, shuffled_indices)
-        return shuffled_batch
-
-    stratified_ds = stratified_ds.map(shuffle_batch, num_parallel_calls=tf.data.AUTOTUNE)
-    return stratified_ds
+    return (dataset
+            .shuffle(buffer_size=large_buffer_size, reshuffle_each_iteration=True)
+            .batch(batch_size, drop_remainder=True))
 
 
 def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking=True, stratified=True, pos_ratio=0.02):
@@ -242,8 +207,8 @@ def create_dataset(filepath_pattern, batch_size, is_training=True, apply_masking
         dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
 
     if is_training and stratified:
-        print(f"✓ Creating stratified batches with pos_ratio={pos_ratio}")
-        dataset = create_stratified_batch(dataset, batch_size, pos_ratio)
+        print(f"✓ Using improved shuffling to reduce class imbalance in batches")
+        dataset = create_balanced_dataset(dataset, batch_size, pos_ratio)
     else:
         # Standard batching for validation or non-stratified training
         dataset = dataset.batch(
@@ -391,17 +356,18 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
         file_dataset = tf.data.Dataset.from_tensor_slices(file_list)
         dataset = file_dataset.interleave(
             lambda filename: tf.data.TFRecordDataset(filename, compression_type="GZIP"),
-            cycle_length=min(len(file_list), 8),
+            cycle_length=min(len(file_list), 16),  # Increased cycle length
+            block_length=16,  # Read more records from each file before switching
             num_parallel_calls=tf.data.AUTOTUNE,
             deterministic=False
         )
-        dataset = dataset.shuffle(buffer_size=100_000)
+        # Remove the extra shuffle here since create_balanced_dataset will handle it
         dataset = dataset.map(_parse_tf_example, num_parallel_calls=tf.data.AUTOTUNE)
         if enable_masking:
             dataset = dataset.map(apply_dynamic_masking, num_parallel_calls=tf.data.AUTOTUNE)
 
-        # Use stratified batching for training
-        dataset = create_stratified_batch(dataset, batch_size, pos_ratio)
+        # Use improved shuffling for better class distribution
+        dataset = create_balanced_dataset(dataset, batch_size, pos_ratio)
 
         # Apply subset if needed
         if subset < 1.0 and train_steps:
