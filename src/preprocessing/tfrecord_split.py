@@ -21,7 +21,7 @@ from tqdm import tqdm
 BATCH_SIZE = 32768
 
 
-def create_writers(output_dir, num_negative_files=63):
+def create_writers(output_dir, num_negative_files=57):
     """Create and open TFRecordWriter objects for all output files."""
     os.makedirs(output_dir, exist_ok=True)
 
@@ -100,7 +100,7 @@ def split_tfrecords_fastest(file_pattern, output_dir, dataset_name="Dataset", to
                 writers['positive'].write(record)
                 stats['positive'] += 1
             else:
-                writer_idx = negative_file_index % 63
+                writer_idx = negative_file_index % 57
                 writers['negative'][writer_idx].write(record)
                 stats['negative'] += 1
                 negative_file_index += 1
@@ -113,10 +113,10 @@ def split_tfrecords_fastest(file_pattern, output_dir, dataset_name="Dataset", to
     close_writers(writers)
 
     print("\nNegative samples distribution:")
-    neg_counts = [0] * 63
+    neg_counts = [0] * 57
     # Calculate the final distribution accurately
     for i in range(stats['negative']):
-        neg_counts[i % 63] += 1
+        neg_counts[i % 57] += 1
     for i, count in enumerate(neg_counts):
         print(f"  negative_samples_{i:02d}.tfrecord: {count:,} samples")
 
@@ -179,6 +179,39 @@ def main():
         val_stats = split_function(val_pattern, val_output_dir, "Validation", val_samples)
         all_stats['validation'] = val_stats
 
+    if not args.split_val:
+        # save validation as one file if not splitting
+        valid_pattern = os.path.join(args.data_dir, args.val_pattern)
+        valid_output_dir = os.path.join(args.output_dir, 'validation')
+        os.makedirs(valid_output_dir, exist_ok=True)
+        valid_files = sorted(glob.glob(valid_pattern))
+        if valid_files:
+            out_path = os.path.join(valid_output_dir, "validation_samples.tfrecord")
+            valid_writer = tf.io.TFRecordWriter(out_path, options='GZIP')
+            total_valid = 0
+            pos_valid = 0
+            neg_valid = 0
+            for vf in valid_files:
+                for record in tf.data.TFRecordDataset(vf, compression_type="GZIP"):
+                    # count labels for accurate stats
+                    parsed = tf.io.parse_single_example(
+                        record, {'label': tf.io.FixedLenFeature([], tf.int64)}
+                    )
+                    if int(parsed['label'].numpy()) == 1:
+                        pos_valid += 1
+                    else:
+                        neg_valid += 1
+                    valid_writer.write(record.numpy())
+                    total_valid += 1
+            valid_writer.close()
+            all_stats['validation'] = {
+                'total': total_valid,
+                'positive': pos_valid,
+                'negative': neg_valid,
+                'single_file': True
+            }
+            print(f"\nValidation samples saved to {out_path} with {total_valid} samples.")
+
     end_time = time.time()
 
     print("\n" + "=" * 60)
@@ -189,7 +222,7 @@ def main():
         print(f"\n{name.upper()} Set Results:")
         print(f"  Total samples processed: {stats['total']:,}")
         print(f"  Positive samples: {stats['positive']:,} → 1 file")
-        print(f"  Negative samples: {stats['negative']:,} → 63 files")
+        print(f"  Negative samples: {stats['negative']:,} → 57 files")
 
     stats_path = os.path.join(args.output_dir, 'split_statistics.json')
     with open(stats_path, 'w') as f:
