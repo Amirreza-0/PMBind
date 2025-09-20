@@ -46,19 +46,19 @@ def init_worker(npz_path, seq_map_data, embed_map_data, mhc_class, esm_dim, max_
     MAX_MHC_LEN = max_mhc
 
 
-def get_embedding_for_worker(emb_key, cleaned_key):
+def get_embedding_for_worker(emb_key, embed_map, emb_db):
     """Helper for workers to retrieve embeddings, including Class II logic."""
     # This function now assumes emb_key is never None because we filter upstream.
     if MHC_CLASS == 2:
-        key_parts = cleaned_key.split('_')
+        key_parts = emb_key.split('_')
         if len(key_parts) >= 2:
-            embd_key1 = get_embed_key(key_parts[0], EMBED_MAP)
-            embd_key2 = get_embed_key(key_parts[1], EMBED_MAP)
-            if embd_key1 and embd_key2 and embd_key1 in EMB_DB and embd_key2 in EMB_DB:
-                emb1, emb2 = EMB_DB[embd_key1], EMB_DB[embd_key2]
+            embd_key1 = get_embed_key(key_parts[0], embed_map)
+            embd_key2 = get_embed_key(key_parts[1], embed_map)
+            if embd_key1 and embd_key2 and embd_key1 in emb_db and embd_key2 in emb_db:
+                emb1, emb2 = emb_db[embd_key1], emb_db[embd_key2]
                 return np.concatenate([emb1, emb2], axis=0)
-    if emb_key in EMB_DB:
-        return EMB_DB[emb_key]
+    if emb_key in emb_db:
+        return emb_db[emb_key]
     # Fallback, though this should ideally not be reached
     return np.zeros((1, ESM_DIM))
 
@@ -134,7 +134,7 @@ def create_artifacts(df_path, output_dir, name, args):
     print(f"\n--- Processing {name} dataset from {df_path} ---")
 
     # Initialize EMB_DB for the main process
-    global EMB_DB
+    EMB_DB: np.lib.npyio.NpzFile | None = None
     if EMB_DB is None:
         EMB_DB = np.load(args.embed_npz, mmap_mode="r")
 
@@ -147,11 +147,17 @@ def create_artifacts(df_path, output_dir, name, args):
     unique_emb_keys = df_full['_emb_key'].unique()
     embedding_dict, key_to_id_map = {}, {}
     for i, key in enumerate(tqdm(unique_emb_keys, desc=f"Extracting unique embeddings for {name}")):
-        cleaned_key = df_full[df_full['_emb_key'] == key]['_cleaned_key'].iloc[0]
         # This function call is now safe because 'key' can no longer be None
-        emb = get_embedding_for_worker(key, cleaned_key)
+        emb = get_embedding_for_worker(key, EMBED_MAP, EMB_DB)
         padded_emb = np.full((MAX_MHC_LEN, ESM_DIM), PAD_VALUE, dtype=np.float16)
         padded_emb[:emb.shape[0]] = emb.astype(np.float16)
+        # set positions that has mhc_indices as 22 to 0
+        if MHC_CLASS == 1:
+            mhc_indices = seq_to_indices(get_seq(key, SEQ_MAP), MAX_MHC_LEN)
+        else:
+            mhc_seq = get_mhc_seq_class2(key, EMBED_MAP, SEQ_MAP)
+            mhc_indices = seq_to_indices(mhc_seq, MAX_MHC_LEN)
+        padded_emb[mhc_indices == 22] = 0
         embedding_dict[str(i)] = padded_emb
         key_to_id_map[key] = i
 
@@ -162,7 +168,7 @@ def create_artifacts(df_path, output_dir, name, args):
     df_full['embedding_id'] = df_full['_emb_key'].map(key_to_id_map)
 
     num_workers = max(1, mp.cpu_count() // 2)
-    chunk_size = int(np.ceil(len(df_full) / (num_workers * 4)))
+    chunk_size = int(np.ceil(len(df_full) / (num_workers)))
     chunks = [df_full.iloc[i:i + chunk_size] for i in range(0, len(df_full), chunk_size)]
     worker_args = [(chunk, os.path.join(output_dir, f"{name}_shard_{i:04d}.tfrecord")) for i, chunk in
                    enumerate(chunks)]
