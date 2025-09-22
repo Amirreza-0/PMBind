@@ -583,7 +583,7 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
     history['subset'] = subset  # Store subset info in history
     best_val_mcc = -1.0  # MCC ranges from -1 to 1, start with worst possible
     # Early stopping parameters
-    patience, patience_counter, min_improvement = 15, 0, 0.001
+    patience, patience_counter, min_improvement = 25, 0, 0.001
     lr_patience, lr_patience_counter, lr_reduction_factor, min_lr = 3, 0, 0.5, 1e-7
 
     for epoch in range(epochs):
@@ -711,13 +711,13 @@ def train(tfrecord_dir, out_dir, mhc_class, epochs, batch_size, lr, embed_dim, h
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 20, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-2,
-        "EMBED_DIM": 16, "HEADS": 2, "NOISE_STD": 0.1, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
-        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.2, "MHC_RECON_LOSS_WEIGHT": 0.2, "DROPOUT_RATE": 0.2,
-        "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights model 1 pool D"
+        "MHC_CLASS": 1, "EPOCHS": 120, "BATCH_SIZE": 1024, "LEARNING_RATE": 5e-4,
+        "EMBED_DIM": 32, "HEADS": 2, "NOISE_STD": 0.5, "LABEL_SMOOTHING": args.ls_param, "ASYMMETRIC_LOSS_SCALE": args.as_param,
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_RECON_LOSS_WEIGHT": 0.01, "MHC_RECON_LOSS_WEIGHT": 0.01, "DROPOUT_RATE": 0.5,
+        "description": "Optimized run with tf.data pipeline and mixed precision, with AsymmetricLoss and label smoothing and class weights model 1 pool D mean2"
     }
 
-    base_output_folder = "../results/PMBind_runs_optimized8-1D/"
+    base_output_folder = "../results/PMBind_runs_optimized11-1D/"
     run_id_base = 0
 
     fold_to_run = args.fold  # Get fold from args
@@ -771,7 +771,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to model weights (.h5 file) to resume training from.")
     parser.add_argument("--subset", type=float, default=1.0, help="Subset percentage of training data to use.")
-    parser.add_argument("--ls_param", type=float, default=0.2, help="Label smoothing parameter.")
-    parser.add_argument("--as_param", type=float, default=5.0, help="Asymmetric loss scaling parameter.")
+    parser.add_argument("--ls_param", type=float, default=0.1, help="Label smoothing parameter.")
+    parser.add_argument("--as_param", type=float, default=10.0, help="Asymmetric loss scaling parameter.")
     args = parser.parse_args()
     main(args)

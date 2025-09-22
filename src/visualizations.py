@@ -3,7 +3,7 @@
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 import os
-from .utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask, \
+from utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask, \
     MaskedEmbedding
 import uuid
 import matplotlib.pyplot as plt
@@ -14,7 +14,7 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 from kneed import KneeLocator
 import matplotlib.colors as mcolors
-from .utils import reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython
+from utils import reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython
 import os
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, confusion_matrix
 import matplotlib.pyplot as plt

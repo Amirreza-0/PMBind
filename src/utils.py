@@ -107,11 +107,12 @@ def OHE_to_seq(ohe: np.ndarray, gap: bool = False) -> list:
     return sequence  # Return list of sequences
 
 
-def OHE_to_seq_single(ohe: np.ndarray, gap=False) -> str:
+def OHE_to_seq_single(ohe: np.ndarray, gap=True) -> str:
     """
     Convert a one-hot encoded matrix back to a peptide sequence.
     Args:
         ohe: One-hot encoded matrix of shape (N, 21).
+        gap: Whether to treat all-zeroed rows as gaps ('-'). # should be true in most cases
     Returns:
         sequence: Peptide sequence as a string.
     """

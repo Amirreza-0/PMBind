@@ -28,7 +28,7 @@ from sklearn.metrics import (confusion_matrix, ConfusionMatrixDisplay, roc_auc_s
 # Local imports (ensure these utility scripts are in the same directory or Python path)
 from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
                    clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA, OHE_to_seq_single,
-                   masked_categorical_crossentropy, split_y_true_y_pred)
+                   masked_categorical_crossentropy, split_y_true_y_pred, get_mhc_seq_class2)
 from models import pmbind_multitask_modified as pmbind
 from visualizations import _analyze_latents, visualize_attention_weights
 
@@ -95,12 +95,11 @@ class OptimizedDataGenerator(keras.utils.Sequence):
             data["pep_blossom62"][i] = seq_to_blossom62(pep_seq, max_seq_len=self.max_pep_len)
             data["pep_ohe_target"][i] = seq_to_onehot(pep_seq, max_seq_len=self.max_pep_len)
             data["pep_mask"][i, :pep_len] = NORM_TOKEN
+            data["mhc_ohe_target"][i] = seq_to_onehot(mhc_seq, max_seq_len=self.max_mhc_len)
             emb = self._get_embedding(emb_key, cleaned_key)
             L = emb.shape[0]
             data["mhc_emb"][i, :L] = emb
-            data["mhc_emb"][i, L:, :] = PAD_VALUE
-            data["mhc_mask"][i, ~np.all(data["mhc_emb"][i] == PAD_VALUE, axis=-1)] = NORM_TOKEN
-            data["mhc_ohe_target"][i] = seq_to_onehot(mhc_seq, max_seq_len=self.max_mhc_len)
+            data["mhc_mask"][i, ~np.all(data["mhc_ohe_target"][i] == PAD_VALUE, axis=-1)] = NORM_TOKEN #20 is unkown index
             data["labels"][i, 0] = int(self.label_arr[master_idx])
         return {k: tf.convert_to_tensor(v) for k, v in data.items()}
 
@@ -110,11 +109,6 @@ def preprocess_df(df, seq_map, embed_map):
         lambda r: r.get('mhc_embedding_key', r['allele'].replace(' ', '').replace('*', '').replace(':', '')), axis=1)
     df['_emb_key'] = df['_cleaned_key'].apply(lambda k: get_embed_key(clean_key(k), embed_map))
     if MHC_CLASS == 2:
-        def get_mhc_seq_class2(key):
-            parts = key.split('_')
-            return seq_map.get(get_embed_key(clean_key(parts[0]), seq_map), '') + seq_map.get(
-                get_embed_key(clean_key(parts[1]), seq_map), '') if len(parts) >= 2 else ''
-
         df['_mhc_seq'] = df['_cleaned_key'].apply(get_mhc_seq_class2)
     else:
         df['_mhc_seq'] = df['_emb_key'].apply(lambda k: seq_map.get(get_embed_key(clean_key(k), seq_map), ''))
@@ -161,23 +155,14 @@ def visualize_inference_results(df, true_labels, scores, out_dir, name):
     plt.close()
 
 
-def generate_sample_data_for_viz(df, idx, max_pep_len, max_mhc_len, seq_map, embed_map):
-    sample_row = df.iloc[idx]
-    pep_seq, emb_key, cleaned_key, mhc_seq = sample_row['long_mer'].upper(), sample_row['_emb_key'], sample_row[
-        '_cleaned_key'], sample_row['_mhc_seq']
-    data = {"pep_blossom62": np.zeros((1, max_pep_len, 23), np.float32),
-            "pep_mask": np.full((1, max_pep_len), PAD_TOKEN, dtype=np.float32),
-            "mhc_emb": np.zeros((1, max_mhc_len, ESM_DIM), np.float32),
-            "mhc_mask": np.full((1, max_mhc_len), PAD_TOKEN, dtype=np.float32)}
-    pep_len = len(pep_seq)
-    data["pep_blossom62"][0] = seq_to_blossom62(pep_seq, max_seq_len=max_pep_len)
-    data["pep_mask"][0, :pep_len] = NORM_TOKEN
+def generate_sample_data_for_viz(df,max_pep_len, max_mhc_len, seq_map, embed_map):
+    if isinstance(df, pd.Series):
+        df = df.to_frame().T
     gen = OptimizedDataGenerator(df, seq_map, embed_map, max_pep_len, max_mhc_len, 1)
-    emb = gen._get_embedding(emb_key, cleaned_key)
-    L = emb.shape[0]
-    data["mhc_emb"][0, :L] = emb
-    data["mhc_emb"][0, L:, :] = PAD_VALUE
-    data["mhc_mask"][0, ~np.all(data["mhc_emb"][0] == PAD_VALUE, axis=-1)] = NORM_TOKEN
+    data = gen[0]
+    data = {k: v.numpy() for k, v in data.items()}
+    pep_seq = OHE_to_seq_single(data['pep_ohe_target'][0], gap=True)
+    mhc_seq = OHE_to_seq_single(data['mhc_ohe_target'][0], gap=True)
     return data, pep_seq, mhc_seq
 
 
@@ -188,12 +173,12 @@ def generate_attention_visualizations(model, df, seq_map, embed_map, max_pep_len
     os.makedirs(attention_out_dir, exist_ok=True)
 
     # Select a few representative samples for attention visualization
-    num_samples_to_viz = min(5, len(df))
+    num_samples_to_viz = min(1, len(df))
     sample_indices = np.random.choice(len(df), num_samples_to_viz, replace=False) if len(df) > 5 else range(len(df))
 
     for i, sample_idx in enumerate(sample_indices):
         sample_row = df.iloc[sample_idx]
-        sample_data, pep_seq, mhc_seq = generate_sample_data_for_viz(df, sample_idx, max_pep_len, max_mhc_len, seq_map, embed_map)
+        sample_data, pep_seq, mhc_seq = generate_sample_data_for_viz(sample_row, max_pep_len, max_mhc_len, seq_map, embed_map)
 
         # Convert to tensors for model input
         model_input = {k: tf.convert_to_tensor(v) for k, v in sample_data.items()}
@@ -260,7 +245,9 @@ def run_visualizations(df, latents_pooled, latents_seq, out_dir, name, max_pep_l
                          dataset_name=name, highlight_mask=highlight_mask)
 
     print("\n--- Generating supplementary plots (inputs, masks) ---")
-    sample_data, pep_seq, _ = generate_sample_data_for_viz(df, 0, max_pep_len, max_mhc_len, seq_map, embed_map)
+    sample_idx = 0
+    sample_row = df.iloc[sample_idx]
+    sample_data, pep_seq, _ = generate_sample_data_for_viz(sample_row, max_pep_len, max_mhc_len, seq_map, embed_map)
     fig, axes = plt.subplots(2, 2, figsize=(15, 8))
     fig.suptitle(f'Input Data Sample (Peptide: {pep_seq}, Allele: {df.iloc[0]["allele"]})', fontsize=16)
     sns.heatmap(sample_data['pep_blossom62'][0].T, ax=axes[0, 0], cmap='gray_r')
@@ -312,7 +299,9 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
         with h5py.File(latents_seq_path, 'w') as f_seq, h5py.File(latents_pooled_path, 'w') as f_pooled:
             d_seq = f_seq.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len, embed_dim),
                                          dtype='float32')
-            d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len + embed_dim),
+            # d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len + embed_dim),
+            #                                    dtype='float32')
+            d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), embed_dim),
                                                dtype='float32')
             for i, batch in enumerate(tqdm(infer_gen, desc=f"Inference on {name}", file=sys.stdout)):
                 outputs = model(batch, training=False)

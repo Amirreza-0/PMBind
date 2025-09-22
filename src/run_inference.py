@@ -17,11 +17,11 @@ import re
 # ==============================================================================
 CONFIG = {
     # Directory containing all your trained model folders (e.g., run_..._fold0, run_..._fold1)
-    "BASE_MODEL_DIR": "/home/amirreza/Desktop/PMBind/results/PMBind_runs_optimized_bak",
+    "BASE_MODEL_DIR": "/home/amirreza/Desktop/PMBind/results/PMBind_runs_optimized8-1D/",
     # Base directory where all inference output will be saved.
-    "BASE_OUTPUT_FOLDER": "/media/amirreza/Crucial-500/PMBind_results",
+    "BASE_OUTPUT_FOLDER": "/media/amirreza/Crucial-500/PMBind_results_MCC7-pershard8-27/",
     # Root directory of the cross-validation dataset.
-    "DATA_ROOT": "../data/cross_validation_dataset",
+    "DATA_ROOT": "/media/amirreza/Crucial-500/PMDb/cross_validation_dataset/",
     # Directory containing the ESM embedding files (.npz and .csv).
     "EMBEDDING_DIR": "/media/amirreza/Crucial-500/ESM/esm3-open/PMGen_whole_seq_/",
     # Full path to the aligned allele sequence CSV file.
@@ -70,7 +70,7 @@ def run_inference_for_fold(model_dir, base_output_folder, fold):
     """Sets up paths and orchestrates calls to simple_infer.py for a single fold."""
 
     mhc_class_str = f"mhc{CONFIG['MHC_CLASS']}"
-    config_path = os.path.join(model_dir, "config.json")
+    config_path = os.path.join(model_dir, "run_config.json")
     model_weights_path = os.path.join(model_dir, "best_model.weights.h5")
 
     if not os.path.exists(model_weights_path):
