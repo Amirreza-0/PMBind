@@ -99,7 +99,8 @@ class OptimizedDataGenerator(keras.utils.Sequence):
             emb = self._get_embedding(emb_key, cleaned_key)
             L = emb.shape[0]
             data["mhc_emb"][i, :L] = emb
-            data["mhc_mask"][i, ~np.all(data["mhc_ohe_target"][i] == PAD_VALUE, axis=-1)] = NORM_TOKEN #20 is unkown index
+            is_padding = np.all(data["mhc_ohe_target"][i, :] == 0, axis=-1)
+            data["mhc_mask"][i, ~is_padding] = NORM_TOKEN
             data["labels"][i, 0] = int(self.label_arr[master_idx])
         return {k: tf.convert_to_tensor(v) for k, v in data.items()}
 
@@ -299,10 +300,10 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
         with h5py.File(latents_seq_path, 'w') as f_seq, h5py.File(latents_pooled_path, 'w') as f_pooled:
             d_seq = f_seq.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len, embed_dim),
                                          dtype='float32')
-            # d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len + embed_dim),
-            #                                    dtype='float32')
-            d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), embed_dim),
+            d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), max_pep_len + max_mhc_len + embed_dim),
                                                dtype='float32')
+            # d_pooled = f_pooled.create_dataset('latents', shape=(len(df_infer), embed_dim),
+            #                                    dtype='float32')
             for i, batch in enumerate(tqdm(infer_gen, desc=f"Inference on {name}", file=sys.stdout)):
                 outputs = model(batch, training=False)
                 all_predictions.append(outputs["cls_ypred"].numpy())
