@@ -55,31 +55,156 @@ BLOSUM62 = {
 
 # Create a reverse mapping from a BLOSUM62 vector to an amino acid character.
 # The score lists are converted to tuples so they can be used as dictionary keys.
-VECTOR_TO_AA = {tuple(v): k for k, v in BLOSUM62.items()}
-
-AA = "ACDEFGHIKLMNPQRSTVWY-"
-AA_TO_INT = {a: i for i, a in enumerate(AA)}
-UNK_IDX = 20  # Index for "unknown"
-UNK_IDX_23 = 22  # Index for "unknown" in BLOSUM62 (23 total chars)
 MASK_TOKEN = -1.0
 NORM_TOKEN = 1.0
 PAD_TOKEN = -2.0
 PAD_VALUE = 0.0
 MASK_VALUE = 0.0
 
+AMINO_ACID_MAP = {tuple(v): k for k, v in BLOSUM62.items()}
+
+AA = "ACDEFGHIKLMNPQRSTVWY"
+AA_TO_INT = {a: i for i, a in enumerate(AA)}
+UNK_IDX_OHE = PAD_INDEX_OHE = len(AA) # 20 total chars for OHE
+
+# Create a mapping from Amino Acid to an integer index
+AA_BLOSUM = "ARNDCQEGHILKMFPSTWYVBZ"
+AA_TO_BLOSUM_IDX = {aa: i for i, aa in enumerate(AA_BLOSUM)}
+PAD_INDEX_62 = len(AA_BLOSUM) # The new padding index is 23
+
+# Create a constant TensorFlow tensor to act as a lookup table
+BLOSUM62_VECTORS = np.array([BLOSUM62[aa] for aa in AA_BLOSUM] + [[0.0] * 23], dtype=np.float32)
+BLOSUM62_TABLE = tf.constant(BLOSUM62_VECTORS)
 
 def seq_to_onehot(sequence: str, max_seq_len: int) -> np.ndarray:
     """Convert peptide sequence to one-hot encoding"""
     arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32) # initialize padding with 0
     for j, aa in enumerate(sequence.upper()[:max_seq_len]):
-        arr[j, AA_TO_INT.get(aa, UNK_IDX)] = 1.0
+        arr[j, AA_TO_INT.get(aa, UNK_IDX_OHE)] = 1.0
         # print number of UNKs in the sequence
-    # num_unks = np.sum(arr[:, UNK_IDX])
+    # num_unks = np.sum(arr[:, UNK_IDX_OHE])
     # zero out gaps
     arr[:, AA_TO_INT['-']] = PAD_VALUE  # Set gaps to PAD_VALUE
     # if num_unks > 0:
     #     print(f"Warning: {num_unks} unknown amino acids in sequence '{sequence}'")
     return arr
+
+
+def OHE_to_seq(ohe: np.ndarray, gap: bool = False) -> list:
+    """
+    Convert a one-hot encoded matrix back to a peptide sequence.
+    # (B, max_pep_len, 21) -> (B, max_pep_len)
+    Args:
+        ohe: One-hot encoded matrix of shape (B, N, 21).
+    Returns:
+        sequence: Peptide sequence as a string. (B,)
+    """
+    sequence = []
+    for i in range(ohe.shape[0]):  # Iterate over batch dimension
+        seq = []
+        for j in range(ohe.shape[1]):  # Iterate over sequence length
+            if gap and np.all(ohe[i, j] == 0):
+                seq.append('-')
+            else:
+                aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
+                if aa_index < len(AA):  # Check if it's a valid amino acid index
+                    seq.append(AA[aa_index])
+                else:
+                    seq.append('-')  # Use '-' for unknown amino acids
+        sequence.append(''.join(seq))  # Join the list into a string
+    return sequence  # Return list of sequences
+
+
+def OHE_to_seq_single(ohe: np.ndarray, gap=False) -> str:
+    """
+    Convert a one-hot encoded matrix back to a peptide sequence.
+    Args:
+        ohe: One-hot encoded matrix of shape (N, 21).
+    Returns:
+        sequence: Peptide sequence as a string.
+    """
+    seq = []
+    for j in range(ohe.shape[0]):  # Iterate over sequence length
+        if gap and np.all(ohe[j] == 0):
+            seq.append('-')
+        else:
+            aa_index = np.argmax(ohe[j])  # Get index of the max value in one-hot encoding
+            seq.append(AA[aa_index])
+    return ''.join(seq)  # Join the list into a string
+
+def seq_to_blossom62(sequence: str, max_seq_len: int) -> np.ndarray:
+    """
+    Converts a peptide sequence into a matrix using BLOSUM62 substitution scores.
+    This function maps each amino acid in the input sequence to its corresponding
+    vector of substitution scores from the BLOSUM62 matrix. The resulting matrix
+    is padded or truncated to a specified maximum length.
+    Args:
+        sequence (str): The input peptide sequence.
+        max_seq_len (int): The target length for the output matrix. Sequences
+                           shorter than this will be padded with zeros, and
+                           longer ones will be truncated.
+    Returns:
+        np.ndarray: A NumPy array of shape (max_seq_len, 23) where each row
+                    corresponds to an amino acid's BLOSUM62 scores.
+    """
+    # The BLOSUM62 matrix has 23 columns corresponding to the score list length.
+    num_features = 23
+    # Initialize the output array with the padding value (0.0).
+    arr = np.full((max_seq_len, num_features), PAD_VALUE, dtype=np.float32)
+    # Use the vector for '-' (unknown) as the default for any character
+    # not found in the BLOSUM62 dictionary, including gaps ('-').
+    default_vector = BLOSUM62['-']
+    # Iterate over the sequence up to the maximum length.
+    for i, aa in enumerate(sequence.upper()[:max_seq_len]):
+        # Retrieve the BLOSUM62 vector for the current amino acid.
+        # If the amino acid is not a key in the dictionary, use the default vector.
+        blosum_vector = BLOSUM62.get(aa, default_vector)
+        arr[i, :] = blosum_vector
+    return arr
+
+
+def blosum62_to_seq(blosum_matrix: np.ndarray) -> str:
+    """
+    Converts a BLOSUM62 matrix back into a peptide sequence.
+    This function iterates through each row of the input matrix, finds the
+    corresponding amino acid from the BLOSUM62 mapping, and reconstructs the
+    sequence. It stops when it encounters a padding row (all zeros).
+    Args:
+        blosum_matrix (np.ndarray): A NumPy array of shape (N, 23) containing
+                                    BLOSUM62 scores.
+    Returns:
+        str: The reconstructed peptide sequence.
+    """
+    sequence = []
+    # Iterate through each row (vector) in the input matrix.
+    for row in blosum_matrix:
+        # Check if the row is a padding vector (all elements are PAD_VALUE).
+        # If so, we have reached the end of the sequence.
+        if not np.any(row):
+            break
+        # Convert the NumPy array row to a tuple to make it hashable.
+        row_tuple = tuple(np.array(row))
+        # Look up the amino acid in the reverse map. Default to '-' if not found.
+        amino_acid = AMINO_ACID_MAP.get(row_tuple, '-')
+        sequence.append(amino_acid)
+    return "".join(sequence)
+
+
+def seq_to_indices_blosum62(seq, max_seq_len):
+    """Correctly converts an amino acid sequence to an array of integer indices."""
+    indices = np.full(max_seq_len, PAD_INDEX_62, dtype=np.int64)
+    for i, aa in enumerate(seq.upper()[:max_seq_len]):
+        # Use the correct mapping: character -> index
+        indices[i] = AA_TO_BLOSUM_IDX.get(aa, PAD_INDEX_62)
+    return indices
+
+
+def seq_to_ohe_indices(seq, max_seq_len):
+    """Converts an amino acid sequence to an array of integer indices FOR OHE TARGET."""
+    indices = np.full(max_seq_len, PAD_INDEX_OHE, dtype=np.int64)
+    for i, aa in enumerate(seq.upper()[:max_seq_len]):
+        indices[i] = AA_TO_INT.get(aa, PAD_INDEX_OHE)
+    return indices
 
 
 def OHE_to_seq(ohe: np.ndarray, gap: bool = False) -> list:
@@ -225,99 +350,6 @@ class OHEKmerWindows(tf.keras.layers.Layer):
             "alphabet_size": self.alphabet_size,
         })
         return config
-
-
-def seq_to_blossom62(sequence: str, max_seq_len: int) -> np.ndarray:
-    """
-    Converts a peptide sequence into a matrix using BLOSUM62 substitution scores.
-
-    This function maps each amino acid in the input sequence to its corresponding
-    vector of substitution scores from the BLOSUM62 matrix. The resulting matrix
-    is padded or truncated to a specified maximum length.
-
-    Args:
-        sequence (str): The input peptide sequence.
-        max_seq_len (int): The target length for the output matrix. Sequences
-                           shorter than this will be padded with zeros, and
-                           longer ones will be truncated.
-
-    Returns:
-        np.ndarray: A NumPy array of shape (max_seq_len, 23) where each row
-                    corresponds to an amino acid's BLOSUM62 scores.
-    """
-    # The BLOSUM62 matrix has 23 columns corresponding to the score list length.
-    num_features = 23
-
-    # Initialize the output array with the padding value (0.0).
-    arr = np.full((max_seq_len, num_features), PAD_VALUE, dtype=np.float32)
-
-    # Use the vector for 'X' (unknown) as the default for any character
-    # not found in the BLOSUM62 dictionary, including gaps ('-').
-    default_vector = BLOSUM62['X']
-
-    # Iterate over the sequence up to the maximum length.
-    for i, aa in enumerate(sequence.upper()[:max_seq_len]):
-        # Retrieve the BLOSUM62 vector for the current amino acid.
-        # If the amino acid is not a key in the dictionary, use the default vector.
-        blosum_vector = BLOSUM62.get(aa, default_vector)
-        arr[i, :] = blosum_vector
-    return arr
-
-
-def blosum62_to_seq(blosum_matrix: np.ndarray) -> str:
-    """
-    Converts a BLOSUM62 matrix back into a peptide sequence.
-
-    This function iterates through each row of the input matrix, finds the
-    corresponding amino acid from the BLOSUM62 mapping, and reconstructs the
-    sequence. It stops when it encounters a padding row (all zeros).
-
-    Args:
-        blosum_matrix (np.ndarray): A NumPy array of shape (N, 23) containing
-                                    BLOSUM62 scores.
-
-    Returns:
-        str: The reconstructed peptide sequence.
-    """
-    sequence = []
-
-    # Iterate through each row (vector) in the input matrix.
-    for row in blosum_matrix:
-        # Check if the row is a padding vector (all elements are PAD_VALUE).
-        # If so, we have reached the end of the sequence.
-        if not np.any(row):
-            break
-
-        # Convert the NumPy array row to a tuple to make it hashable.
-        row_tuple = tuple(np.array(row))
-
-        # Look up the amino acid in the reverse map. Default to 'X' if not found.
-        amino_acid = VECTOR_TO_AA.get(row_tuple, 'X')
-        sequence.append(amino_acid)
-    return "".join(sequence)
-
-
-AMINO_ACID_VOCAB = "".join(list(BLOSUM62.keys()))
-AMINO_ACID_MAP = {k: i for i, k in enumerate(AMINO_ACID_VOCAB)}
-PAD_INDEX = len(AMINO_ACID_MAP) # Will be 23
-
-def seq_to_indices(seq, max_seq_len):
-    """Converts an amino acid sequence to an array of integer indices FOR BLOSUM62."""
-    indices = np.full(max_seq_len, PAD_INDEX, dtype=np.int8)
-    for i, aa in enumerate(seq.upper()[:max_seq_len]):
-        indices[i] = AMINO_ACID_MAP.get(aa, AMINO_ACID_MAP['X'])
-    return indices
-
-
-# We need a separate padding index for the OHE target logic.
-PAD_INDEX_OHE = len(AA) # Will be 21
-
-def seq_to_ohe_indices(seq, max_seq_len):
-    """Converts an amino acid sequence to an array of integer indices FOR OHE TARGET."""
-    indices = np.full(max_seq_len, PAD_INDEX_OHE, dtype=np.int8)
-    for i, aa in enumerate(seq.upper()[:max_seq_len]):
-        indices[i] = AA_TO_INT.get(aa, UNK_IDX_23)
-    return indices
 
 # ----------------------- Mixed precision helpers -----------------------
 @tf.function
@@ -822,24 +854,6 @@ class ConcatMask(keras.layers.Layer):
         return tf.concat([mask1, mask2], axis=1)
 
 
-# class ConcatBarcode(keras.layers.Layer):
-#     def __init__(self, name='barcode_layer'):
-#         super().__init__(name=name)
-#
-#     def call(self, x, barcode):
-#         """ Args:
-#             x: Input tensor of shape (B, N, D)
-#             barcode: Input tenshor of shape (B,N2,1)
-#         Returns:
-#             x: Tensor with barcode concatenated at the beginning.
-#             mask: Mask tensor of shape (B, N + barcode_length)
-#         """
-#         tf.debugging.assert_rank(x, 3, message="Input tensor x must be 3D (B, N, D)")
-#         barcode = tf.broadcast_to(barcode, shape=(tf.shape(x)[0], tf.shape(barcode)[1], tf.shape(x)[-1]))
-#         # concat barcode to the input
-#         x = tf.concat([barcode, x], axis=1)  # (B,N2+N,D)
-#         return x
-
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='split_layer')
 class SplitLayer(keras.layers.Layer):
     def __init__(self, split_size, name='split_layer'):
@@ -917,13 +931,6 @@ def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_st
     return ks_dict
 
 
-# # Example usage
-# if __name__ == "__main__":
-#     initial_input = 180
-#     output_dims = [79, 43, 19, 11]
-#     result = determine_ks_dict(initial_input, output_dims)
-#     print(result)  # Expected: {"k1": 3, "s1": 2, "k2": 3, "s2": 1, "k3": 3, "s3": 1, "k4": 2, "s4": 1}
-
 @tf.function(reduce_retracing=True)
 def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sample_weight=None, type='cce'):
     """
@@ -984,71 +991,6 @@ def split_y_true_y_pred(y_true_y_pred):
     y_true, y_pred = tf.split(y_true_y_pred, num_or_size_splits=2, axis=-1)
     return y_true, y_pred
 
-
-# class MaskedCategoricalCrossentropy(tf.keras.losses.Loss):
-#     """
-#     Cross‑entropy that **ignores padded tokens via `sample_weight`.**
-#
-#     Expected shapes
-#     ----------------
-#     y_pred : (B, N, 21)  – logits / probabilities for 21 classes
-#     y_true : (B, N, 21)  – one‑hot labels
-#     sample_weight : (B, N) – 1 for real token, 0 for pad (passed by Keras)
-#     """
-#
-#     def __init__(self, *, pad_token=-2., masktoken=-.1, from_logits: bool = True,
-#                  name: str = "masked_categorical_crossentropy"):
-#         # We let Keras do the masking & **reduction**; so we pick SUM_OVER_BATCH_SIZE.
-#         super().__init__(name=name, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
-#         self._from_logits = from_logits
-#         self.pad_token = pad_token
-#         self.mask_token = masktoken
-#
-#
-# def call(self, y_true, y_pred):
-#     # Compute per-token cross-entropy
-#     ce = tf.keras.losses.categorical_crossentropy(
-#         y_true,
-#         y_pred,
-#         from_logits=self._from_logits,
-#         axis=-1,
-#     )
-#     # Mask padded tokens (tokens with zero label vectors)
-#     mask = tf.cast(tf.reduce_sum(y_true, axis=-1) > 0, ce.dtype)
-#     # Apply mask and average over valid tokens
-#     return tf.reduce_sum(ce * mask) / (tf.reduce_sum(mask) + 1e-8)
-#
-#
-# class CustomDense(keras.layers.Layer):
-#     """
-#     Custom dense layer that applies a linear transformation to the input.
-#     """
-#
-#     def __init__(self, units, activation=None, name='custom_dense', mask_token=-1.0, pad_token=-2.0):
-#         super().__init__(name=name)
-#         self.units = units
-#         self.mask_token = mask_token
-#         self.pad_token = pad_token
-#         self.activation = keras.activations.get(activation)
-#
-#     def build(self, input_shape):
-#         self.w = self.add_weight(shape=(input_shape[-1], self.units),
-#                                  initializer='random_normal',
-#                                  trainable=True, name=f'w_{self.name}')
-#         self.b = self.add_weight(shape=(self.units,),
-#                                  initializer='zeros',
-#                                  trainable=True, name=f'b_{self.name}')
-#
-#     def call(self, inputs, mask=None):  # inputs: (B, N, D) mask: (B, N)
-#         output = tf.matmul(inputs, self.w) + self.b
-#         if self.activation is not None:
-#             output = self.activation(output)
-#         if mask is not None:
-#             mask = tf.cast(mask, GLOBAL_DTYPE)
-#             mask = tf.where(mask == self.pad_token, 0.0, 1.0)
-#             mask = tf.expand_dims(mask, axis=-1)  # (B, N, 1)
-#             output *= mask
-#         return output
 
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='SelfAttentionWith2DMask')
 class SelfAttentionWith2DMask(keras.layers.Layer):
@@ -1939,6 +1881,31 @@ class GlobalSTDPooling1D(layers.Layer):
             input_tensor, axis=self.axis, keepdims=False, name=None
         )
         return pooled_std + 1e-9  # avoid 0.0
+
+@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalMaxPooling1D')
+class GlobalMaxPooling1D(layers.Layer):
+    """
+    Global max pooling layer.
+    Computes the max across the last axis (features).
+    """
+
+    def __init__(self, axis=-1, name="global_max_pooling_"):
+        super(GlobalMaxPooling1D, self).__init__(name=name)
+        self.name = name
+        self.axis = axis
+
+    @tf.function(reduce_retracing=True)
+    def call(self, input_tensor):
+        """
+        Computes the global max pooling over the input tensor.
+        :param input_tensor:
+        :return:
+        """
+        # inputs: (B, N, D)
+        max_pool = tf.math.reduce_max(
+            input_tensor, axis=self.axis, keepdims=False
+        )
+        return max_pool  # (B, D)
 
 
 # class GumbelSoftmax(keras.layers.Layer):
