@@ -89,6 +89,11 @@ def load_local_model(model_name: str, device: str):
                 protein = ESMProtein(sequence=seq)
                 t = model.encode(protein)
                 out = model.logits(t, LogitsConfig(sequence=True,
+                                                   structure=True,
+                                                   secondary_structure=True,
+                                                   sasa=True,
+                                                   function=True,
+                                                   residue_annotations =False,
                                                    return_embeddings=True))
                 return out.embeddings.mean(0).cpu().numpy()
             return embed_one
@@ -114,39 +119,18 @@ def load_local_model(model_name: str, device: str):
         raise RuntimeError(f"Don’t know how to load {model_name}: {e}")
 
 
-# Remote (Forge / AWS) wrapper
-def load_remote_client(model_name: str, token: str):
-    import esm
-    client = esm.sdk.client(model_name, token=token)
-    from esm.sdk.api import ESMProtein, LogitsConfig
-    def embed_one(seq: str):
-        protein = ESMProtein(sequence=seq)
-        t = client.encode(protein)
-        out = client.logits(t, LogitsConfig(sequence=True,
-                                            return_embeddings=True))
-        return out.embeddings.mean(0)
-    return embed_one
-
-
-def embed_remote(
-    client,
-    sequences: List[Tuple[str, str]],
-    batch_size: int = 16,
-    pooling: str = "mean",
-) -> Dict[str, np.ndarray]:
-    """
-    Use cloud client; supports .embed() (ESM-C) and .generate_embeddings() (ESM-3).
-    """
-    embeds = {}
-    for i in range(0, len(sequences), batch_size):
-        sub = sequences[i : i + batch_size]
-        ids, seqs = zip(*sub)
-        if hasattr(client, "embed"):
-            out = client.embed(seqs, pooling)
-        else:
-            out = client.generate_embeddings(seqs, pooling)
-        embeds.update({idx: emb for idx, emb in zip(ids, out)})
-    return embeds
+# # Remote (Forge / AWS) wrapper
+# def load_remote_client(model_name: str, token: str):
+#     import esm
+#     client = esm.sdk.client(model_name, token=token)
+#     from esm.sdk.api import ESMProtein, LogitsConfig
+#     def embed_one(seq: str):
+#         protein = ESMProtein(sequence=seq)
+#         t = client.encode(protein)
+#         out = client.logits(t, LogitsConfig(sequence=True,
+#                                             return_embeddings=True))
+#         return out.embeddings.mean(0)
+#     return embed_one
 
 
 def get_chain_(file: pd.DataFrame) -> tuple[list[Any], list[Any], list[list[bool]]]:
@@ -295,16 +279,16 @@ def main(**local_args):
 
 
 if __name__ == "__main__":
-    model = "esmc_600m"                 # or whichever model you want
+    model = "esm3-open"                 # or whichever model you want
     remote = False
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     batch_size = 1
     pooling = "mean"
 
     for mhc_class in (1, 2):            # ← run class-I then class-II
-        dat_path = f"/scratch-scc/users/u15472/PMBind/data/alleles/aligned_PMGen_class_{mhc_class}.csv"
+        dat_path = f"../../data/alleles/aligned_PMGen_class_{mhc_class}.csv"
         out_path = (
-            f"/scratch-scc/users/u15472/PMBind/data/ESM/{model}/PMGen_whole_seq/mhc{mhc_class}_encodings.npz"
+            f"../../data/ESM/{model}/PMGen_whole_seq_/mhc{mhc_class}_encodings.npz"
         )
 
         main(
