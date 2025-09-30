@@ -14,7 +14,7 @@ from collections import Counter
 pd.options.mode.copy_on_write = True
 KEY_TRANS = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})  # for vectorized cleaning
 
-MHC_CLASS = 2
+MHC_CLASS = 1
 
 # TODO run this in a for loop and generate sets with different seeds, in each set leave out one random allele.
 def median_down_sampling(df_path, seed):
@@ -44,7 +44,7 @@ def median_down_sampling(df_path, seed):
         neg_df = df[df['assigned_label'] == 0]
         # Group the current negatives to find the median size
         neg_groups = neg_df.groupby('allele')
-        median_count = int(neg_groups.size().median())
+        median_count = int(neg_groups.size().mean())
         print(f"current median: {median_count}")
         # If the median is 0 or no negatives can be dropped, break to avoid an infinite loop
         if median_count == 0:
@@ -54,7 +54,7 @@ def median_down_sampling(df_path, seed):
         for name, group in tqdm(neg_groups, desc="Resampling negatives", total=len(neg_groups)):
             if len(group) > median_count:
                 # Sample the rows from the group that we want to drop
-                drop_sample = group.sample(n=median_count//2, random_state=42)
+                drop_sample = group.sample(n=int(median_count // 1.7), random_state=42)
                 indices_to_take.extend(drop_sample.index)
             else:
                 print(f"drop all for allele {name} with count {len(group)}")
