@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-pepmhc_cross_attention.py
+models.py
 -------------------------
 
-Minimal end-to-end peptide × MHC cross-attention reconstruction model
-with explainable attention visualisation.
+End-to-end peptide × MHC cross-attention reconstruction model.
+This multi-task, semi-supervised architecture jointly learns a binary binding label (classification) and per-residue reconstruction for both peptide and MHC. A shared transformer-style encoder with a custom 2D-masked cross-attention produces a latent sequence that supports clustering and downstream analyses; the model exposes attention weights and pooled latent vectors for explainability, visualization, and unsupervised / semi-supervised clustering of binding modes.
 
-Author: Amirreza 2025-07-08
+Author: Amirreza 2025-09-29
 """
 import tensorflow as tf
 from tensorflow import keras
