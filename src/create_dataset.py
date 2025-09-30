@@ -11,9 +11,9 @@ from tqdm.auto import tqdm
 # ---------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------
-MHC_CLASS = 2
+MHC_CLASS = 1
 RANDOM_SEED = 999
-K_FOLDS = 3
+K_FOLDS = 5
 MIN_ALLELES_FOR_CV = 1  # Minimum alleles needed for CV after test set extraction
 N_TVAL_FOLD_SAMPLES = 4  # Number of alleles to leave out for Ensemble Validation
 N_VAL_FOLD_SAMPLES = 4  # Number of alleles to leave out for validation in each fold
@@ -40,8 +40,6 @@ pd.options.mode.copy_on_write = True
 KEY_TRANS = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})  # for vectorized cleaning
 
 # manual test alleles
-
-
 if MHC_CLASS == 2:
     test_alleles = ["H-2-IAk-A/H-2-IAk-B",
                     "HLA-DPA1*01:03/HLA-DPB1*14:01",
@@ -82,11 +80,9 @@ major_allele_groups = ['MAMU', 'PATR', 'SLA', 'BOLA', 'DLA', 'H-2', 'HLA-A', 'HL
 def train_val_split(
         df: pd.DataFrame,
         k: int = 5,
-        target_col: str = "assigned_label",
         id_col: str = "mhc_embedding_key",
         train_size: float = 0.8,
         random_state: int = 999,
-        n_val_ids: int = 1,
         take_subset: bool = False,
         LEAVE_ALLELE_GROUP_OUT: bool = False,
         major_allele_groups: list = None,
