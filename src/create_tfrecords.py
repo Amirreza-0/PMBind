@@ -75,7 +75,7 @@ def process_embedding_batch(emb_keys_batch, start_idx, mhc_class):
         # Optimized padding detection - only compute what we need
         seq_len = len(mhc_seq)
         if seq_len < MAX_MHC_LEN:
-            padded_emb[seq_len:] = 0  # Set positions beyond sequence length to 0
+            padded_emb[seq_len:] = PAD_VALUE  # Set positions beyond sequence length to 0
 
         batch_embeddings[str(emb_id)] = padded_emb
         batch_key_to_id[key] = emb_id
