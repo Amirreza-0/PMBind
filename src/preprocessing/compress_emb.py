@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
 
 def load_embedding_db(npz_path: str):
     """Load embedding database with memory mapping."""
@@ -21,15 +22,17 @@ def compress_npz(npz_path):
     """
     EMB_DB = load_embedding_db(npz_path)
     # Convert to array in the same order as .files
-    arr_emb = np.stack([EMB_DB[k] for k in EMB_DB.files], axis=0)  # (B, seq, emb)
+    arr_emb = np.stack([EMB_DB[k] for k in tqdm(EMB_DB.files, desc="Loading embeddings")], axis=0)  # (B, seq, emb)
 
     # Scale across all batches & timesteps
+    print("Scaling embeddings...")
     arr_emb_r = arr_emb.reshape(-1, arr_emb.shape[-1])  # (B*seq, emb)
     scaler = StandardScaler()
     arr_emb_r = scaler.fit_transform(arr_emb_r)
     arr_emb_s = arr_emb_r.reshape(arr_emb.shape)        # (B, seq, emb)
 
     # Pool statistics per token
+    print("Pooling statistics...")
     arr_mean = np.mean(arr_emb_s, axis=-1, keepdims=True)
     arr_std  = np.std(arr_emb_s, axis=-1, keepdims=True)
     arr_min  = np.min(arr_emb_s, axis=-1, keepdims=True)
@@ -39,10 +42,11 @@ def compress_npz(npz_path):
     EMB_DB_pooled = {k: arr_concat[i] for i, k in enumerate(EMB_DB.files)}
 
     # Save compressed database
+    print("Saving compressed database...")
     np.savez_compressed(npz_path.replace('.npz', '_pooled.npz'), **EMB_DB_pooled)
     print(f"Saved compressed embedding database to {npz_path.replace('.npz', '_pooled.npz')}")
     print(f"Original shape: {arr_emb.shape}, Compressed shape: {arr_concat.shape}")
-    print(f"Original size: {EMB_DB.files}, Compressed size: {list(EMB_DB_pooled.keys())}")
+    print(f"Original size: {len(EMB_DB.files)}, Compressed size: {len(EMB_DB_pooled.keys())}")
     print(f"Compression factor: {arr_emb.shape[-1] / arr_concat.shape[-1]:.2f}x")
 
 if __name__ == "__main__":
