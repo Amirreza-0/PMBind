@@ -68,7 +68,7 @@ AA_TO_INT = {a: i for i, a in enumerate(AA)}
 UNK_IDX_OHE = PAD_INDEX_OHE = len(AA) # 20 total chars for OHE
 
 # Create a mapping from Amino Acid to an integer index
-AA_BLOSUM = "ARNDCQEGHILKMFPSTWYVBZ"
+AA_BLOSUM = "ARNDCQEGHILKMFPSTWYVBZX"
 AA_TO_BLOSUM_IDX = {aa: i for i, aa in enumerate(AA_BLOSUM)}
 PAD_INDEX_62 = len(AA_BLOSUM) # The new padding index is 23
 
