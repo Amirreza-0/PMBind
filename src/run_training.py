@@ -47,6 +47,7 @@ allele_seq_path = config["allele_seq_path"]
 embedding_key_path = config["embedding_key_path"]
 embedding_table_path = config["embedding_table_path"]
 val_parquet_path = config["val_parquet_path"]
+train_parquet_path = config["train_parquet_path"]
 bench1_parquet_path = config["bench1_parquet_path"]
 bench2_parquet_path = config["bench2_parquet_path"]
 bench3_parquet_path = config["bench3_parquet_path"]
@@ -471,7 +472,7 @@ def create_datasets(run_config=None):
         raise ValueError("RUN_CONFIG must be provided.")
     print("\nCreating datasets...")
     print("creating train dataset...")
-    train_df = preprocess_df(pd.read_parquet(os.path.join(tfrecord_dir, "train.parquet")), seq_map, embed_map)
+    train_df = preprocess_df(pd.read_parquet(train_parquet_path), seq_map, embed_map)
     print(train_df["assigned_label"].value_counts())
 
     class_weights_array = compute_class_weight(
