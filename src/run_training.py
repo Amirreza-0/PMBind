@@ -490,7 +490,7 @@ def create_datasets(run_config=None):
         embed_map=embed_map,
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
-        batch_size=run_config["BATCH_SIZE"],
+        batch_size=128,
         apply_masking=False  # No masking for validation
     )
     # Bench datasets for live performance tracking during training
@@ -503,7 +503,7 @@ def create_datasets(run_config=None):
         embed_map=embed_map,
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
-        batch_size=run_config["BATCH_SIZE"],
+        batch_size=128,
         apply_masking=False
     )
     # IEDB bench2
@@ -515,7 +515,7 @@ def create_datasets(run_config=None):
         embed_map=embed_map,
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
-        batch_size=run_config["BATCH_SIZE"],
+        batch_size=128,
         apply_masking=False
     )
     # independent test set
@@ -527,7 +527,7 @@ def create_datasets(run_config=None):
         embed_map=embed_map,
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
-        batch_size=run_config["BATCH_SIZE"],
+        batch_size=128,
         apply_masking=False
     )
 
