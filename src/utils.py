@@ -330,6 +330,125 @@ def _neg_inf(dtype: tf.dtypes.DType) -> tf.Tensor:
         return tf.constant(-1e4, dtype=dtype)
     return tf.constant(-1e9, dtype=dtype)
 
+@tf.keras.utils.register_keras_serializable(package='Custom', name='AttentionLayer')
+class AttentionLayer(keras.layers.Layer):
+    """
+    Custom multi-head attention layer supporting self- and cross-attention.
+
+    Args:
+        query_dim (int): Input feature dimension for query.
+        context_dim (int): Input feature dimension for context (key and value).
+        output_dim (int): Output feature dimension.
+        type (str): 'self' or 'cross'.
+        heads (int): Number of attention heads.
+        resnet (bool): Whether to use residual connection.
+        return_att_weights (bool): Whether to return attention weights.
+        name (str): Layer name.
+        epsilon (float): Epsilon for layer normalization.
+        gate (bool): Whether to use gating mechanism.
+        mask_token (float): Value for masked tokens.
+        pad_token (float): Value for padded tokens.
+    """
+    def __init__(self, query_dim, context_dim, output_dim, type, heads=4,
+                 resnet=True, return_att_weights=False, name='attention',
+                 epsilon=1e-6, gate=True, mask_token=-1., pad_token=-2.):
+        super().__init__(name=name)
+        assert isinstance(query_dim, int) and isinstance(context_dim, int) and isinstance(output_dim, int)
+        assert type in ['self', 'cross']
+        if resnet:
+            assert query_dim == output_dim
+        self.query_dim = query_dim
+        self.context_dim = context_dim
+        self.output_dim = output_dim
+        self.type = type
+        self.heads = heads
+        self.resnet = resnet
+        self.return_att_weights = return_att_weights
+        self.epsilon = epsilon
+        self.gate = gate
+        self.mask_token = mask_token
+        self.pad_token = pad_token
+        self.att_dim = output_dim // heads  # Attention dimension per head
+
+    def build(self, input_shape):
+        # Projection weights (will be float32 variables under mixed policy)
+        self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'q_proj_{self.name}')
+        self.k_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'k_proj_{self.name}')
+        self.v_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'v_proj_{self.name}')
+        if self.gate:
+            self.g = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
+                                     initializer='random_uniform', trainable=True, name=f'gate_{self.name}')
+        self.norm = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_{self.name}')
+        if self.type == 'cross':
+            self.norm_context = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_context_{self.name}')
+        self.norm_out = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_out_{self.name}')
+        self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
+                                     initializer='random_normal', trainable=True, name=f'outw_{self.name}')
+        self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
+                                     trainable=True, name=f'outb_{self.name}')
+        # keep scale in compute dtype
+        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.keras.mixed_precision.global_policy().compute_dtype))
+
+    @tf.function
+    def call(self, x, mask, context=None, context_mask=None):
+        """
+        Args:
+            x: Tensor of shape (B, N, query_dim) for query.
+            mask: Tensor of shape (B, N).
+            context: Tensor of shape (B, M, context_dim) for key/value in cross-attention.
+            context_mask: Tensor of shape (B, M) for context.
+        """
+        mask = tf.cast(mask, self.compute_dtype)
+        if self.type == 'self':
+            context = x
+            context_mask = mask
+            q_input = k_input = v_input = self.norm(x)
+            mask_q = mask_k = tf.where(mask == self.pad_token, 0., 1.)
+        else:
+            assert context is not None and context_mask is not None
+            q_input = self.norm(x)
+            k_input = v_input = self.norm_context(context)
+            mask_q = tf.where(mask == self.pad_token, 0., 1.)
+            mask_k = tf.where(tf.cast(context_mask, self.compute_dtype) == self.pad_token, 0., 1.)
+
+        # Project query, key, value
+        q = tf.einsum('bnd,hde->bhne', tf.cast(q_input, self.compute_dtype), tf.cast(self.q_proj, self.compute_dtype))
+        k = tf.einsum('bmd,hde->bhme', tf.cast(k_input, self.compute_dtype), tf.cast(self.k_proj, self.compute_dtype))
+        v = tf.einsum('bmd,hde->bhme', tf.cast(v_input, self.compute_dtype), tf.cast(self.v_proj, self.compute_dtype))
+
+        # Compute attention scores
+        att = tf.einsum('bhne,bhme->bhnm', q, k) * tf.cast(self.scale, self.compute_dtype)
+        mask_q_exp = tf.expand_dims(mask_q, axis=1)
+        mask_k_exp = tf.expand_dims(mask_k, axis=1)
+        attention_mask = tf.einsum('bqn,bkm->bqnm', mask_q_exp, mask_k_exp)
+        attention_mask = tf.broadcast_to(attention_mask, tf.shape(att))
+        att += (1.0 - attention_mask) * _neg_inf(att.dtype)
+        att = tf.nn.softmax(att, axis=-1) * attention_mask
+
+        # Compute output
+        out = tf.einsum('bhnm,bhme->bhne', att, v)
+        if self.gate:
+            g = tf.einsum('bnd,hde->bhne', tf.cast(q_input, self.compute_dtype), tf.cast(self.g, self.compute_dtype))
+            g = tf.nn.sigmoid(g)
+            out *= g
+
+        out = tf.transpose(out, [0, 2, 1, 3])
+        out = tf.reshape(out, [tf.shape(x)[0], tf.shape(x)[1], self.heads * self.att_dim])
+        out = tf.matmul(out, tf.cast(self.out_w, self.compute_dtype)) + tf.cast(self.out_b, self.compute_dtype)
+
+        if self.resnet:
+            out += tf.cast(x, self.compute_dtype)
+
+        out = self.norm_out(out)
+        mask_exp = tf.expand_dims(mask_q, axis=-1)
+        out *= mask_exp
+
+        return (out, att) if self.return_att_weights else out
+
+
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='MaskedEmbedding')
 class MaskedEmbedding(keras.layers.Layer):
     def __init__(self, mask_token=-1., pad_token=-2., name='masked_embedding'):
