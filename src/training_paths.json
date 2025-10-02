@@ -4,6 +4,7 @@
   "embedding_key_path": "../data/ESM/esm3-open/PMGen_whole_seq_pooled/mhc1_encodings.csv",
   "embedding_table_path": "../data/ESM/esm3-open/PMGen_whole_seq_pooled/mhc1_encodings.npz",
   "val_parquet_path": "../data/parquets/val_seed_999.parquet",
+  "train_parquet_path": "../data/parquets/train_seed_999.parquet",
   "bench1_parquet_path": "../data/bench_data/benchmark_IEDB_2025_07_03.parquet",
   "bench2_parquet_path": "../data/bench_data/CapsNet_IEDB_test_binary.parquet",
   "bench3_parquet_path": "../data/bench_data/test_set.parquet"
