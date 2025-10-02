@@ -1,3 +1,5 @@
+import json
+
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
@@ -26,7 +28,31 @@ from collections import Counter
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
 
+# Create a reverse mapping from a BLOSUM62 vector to an amino acid character.
+# The score lists are converted to tuples so they can be used as dictionary keys.
 # Constants
+PHYSICHE_PROPERTIES = {
+    "A": [0.51, 0.169, 0.471, 0.279, 0.141, 0.294, 0, 0.262, 0.512, 0, 0.404],
+    "R": [0.667, 0.726, 0.321, 1, 0.905, 0.529, 0.327, 0.169, 0.372, 1, 1],
+    "N": [0.745, 0.39, 0.164, 0.658, 0.51, 0.235, 0.14, 0.313, 0.116, 0.065, 0.33],
+    "D": [0.745, 0.304, 0.021, 0.793, 0.515, 0.235, 0.14, 0.601, 0.14, 0.956, 0],
+    "C": [0.608, 0.314, 0.76, 0.072, 0, 0.559, 0.14, 0.947, 0.907, 0.028, 0.285],
+    "Q": [0.667, 0.531, 0.178, 0.649, 0.608, 0.529, 0.14, 0.416, 0.023, 0.068, 0.36],
+    "E": [0.667, 0.482, 0.092, 0.883, 0.602, 0.529, 0.14, 0.561, 0.163, 0.96, 0.056],
+    "G": [0, 0, 0.275, 0.189, 0.103, 0, 0, 0.24, 0.581, 0, 0.401],
+    "H": [0.686, 0.554, 0.326, 0.468, 0.402, 0.529, 0.14, 0.313, 0.581, 0.992, 0.603],
+    "I": [1, 0.65, 1, 0, 0.083, 0.824, 0.308, 0.424, 0.93, 0.003, 0.407],
+    "L": [0.961, 0.65, 0.734, 0.081, 0.138, 0.824, 0.308, 0.463, 0.907, 0.003, 0.402],
+    "K": [0.667, 0.692, 0, 0.568, 1, 0.529, 0.327, 0.313, 0, 0.952, 0.872],
+    "M": [0.765, 0.612, 0.603, 0.171, 0.206, 0.765, 0.308, 0.405, 0.814, 0.028, 0.372],
+    "F": [0.686, 0.772, 0.665, 0, 0.114, 0.853, 0.682, 0.462, 1, 0.007, 0.339],
+    "P": [0.353, 0.372, 0.012, 0.198, 0.411, 0.588, 0.271, 0, 0.302, 0.03, 0.442],
+    "S": [0.52, 0.172, 0.155, 0.477, 0.303, 0.206, 0, 0.24, 0.419, 0.032, 0.364],
+    "T": [0.49, 0.349, 0.256, 0.523, 0.337, 0.235, 0.14, 0.313, 0.419, 0.032, 0.362],
+    "W": [0.686, 1, 0.681, 0.207, 0.219, 1, 1, 0.537, 0.674, 0.04, 0.39],
+    "Y": [0.686, 0.796, 0.591, 0.477, 0.454, 0.853, 0.682, 1, 0.419, 0.031, 0.362],
+    "V": [0.745, 0.487, 0.859, 0.036, 0.094, 0.647, 0.234, 0.369, 0.674, 0.003, 0.399],
+}
 BLOSUM62 = {
     'A': [4, -1, -2, -2, 0, -1, -1, 0, -2, -1, -1, -1, -1, -2, -1, 1, 0, -3, -2, 0, -2, -1, 0],
     'R': [-1, 5, 0, -2, -3, 1, 0, -2, 0, -3, -2, 2, -1, -3, -2, -1, -1, -3, -2, -3, -1, 0, -1],
@@ -53,6 +79,32 @@ BLOSUM62 = {
     'X': [0, -1, -1, -1, -2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, 0, 0, -2, -1, -1, -1, -1, -1],
 }
 
+BLOSUM62_N = {
+ "A": [0.533, 0.2, 0.133, 0.133, 0.267, 0.2, 0.2, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.133, 0.2, 0.333, 0.267, 0.067, 0.133, 0.267, 0.133, 0.2, 0.267],
+ "R": [0.2, 0.6, 0.267, 0.133, 0.067, 0.333, 0.267, 0.133, 0.267, 0.067, 0.133, 0.4, 0.2, 0.067, 0.133, 0.2, 0.2, 0.067, 0.133, 0.067, 0.2, 0.267, 0.2],
+ "N": [0.133, 0.267, 0.667, 0.333, 0.067, 0.267, 0.267, 0.267, 0.333, 0.067, 0.067, 0.267, 0.133, 0.067, 0.133, 0.333, 0.267, 0.0, 0.133, 0.067, 0.467, 0.267, 0.2],
+ "D": [0.133, 0.133, 0.333, 0.667, 0.067, 0.267, 0.4, 0.2, 0.2, 0.067, 0.0, 0.2, 0.067, 0.067, 0.2, 0.267, 0.2, 0.0, 0.067, 0.067, 0.533, 0.333, 0.2],
+ "C": [0.267, 0.067, 0.067, 0.067, 0.867, 0.067, 0.0, 0.067, 0.067, 0.2, 0.2, 0.067, 0.2, 0.133, 0.067, 0.2, 0.2, 0.133, 0.133, 0.2, 0.067, 0.067, 0.133],
+ "Q": [0.2, 0.333, 0.267, 0.267, 0.067, 0.6, 0.4, 0.133, 0.267, 0.067, 0.133, 0.333, 0.267, 0.067, 0.2, 0.267, 0.2, 0.133, 0.2, 0.133, 0.267, 0.467, 0.2],
+ "E": [0.2, 0.267, 0.267, 0.4, 0.0, 0.4, 0.6, 0.133, 0.267, 0.067, 0.067, 0.333, 0.133, 0.067, 0.2, 0.267, 0.2, 0.067, 0.133, 0.133, 0.333, 0.533, 0.2],
+ "G": [0.267, 0.133, 0.267, 0.2, 0.067, 0.133, 0.133, 0.667, 0.133, 0.0, 0.0, 0.133, 0.067, 0.067, 0.133, 0.267, 0.133, 0.133, 0.067, 0.067, 0.2, 0.133, 0.2],
+ "H": [0.133, 0.267, 0.333, 0.2, 0.067, 0.267, 0.267, 0.133, 0.8, 0.067, 0.067, 0.2, 0.133, 0.2, 0.133, 0.2, 0.133, 0.133, 0.4, 0.067, 0.267, 0.267, 0.2],
+ "I": [0.2, 0.067, 0.067, 0.067, 0.2, 0.067, 0.067, 0.0, 0.067, 0.533, 0.4, 0.067, 0.333, 0.267, 0.067, 0.133, 0.2, 0.067, 0.2, 0.467, 0.067, 0.067, 0.2],
+ "L": [0.2, 0.133, 0.067, 0.0, 0.2, 0.133, 0.067, 0.0, 0.067, 0.4, 0.533, 0.133, 0.4, 0.267, 0.067, 0.133, 0.2, 0.133, 0.2, 0.333, 0.0, 0.067, 0.2],
+ "K": [0.2, 0.4, 0.267, 0.2, 0.067, 0.333, 0.333, 0.133, 0.2, 0.067, 0.133, 0.6, 0.2, 0.067, 0.2, 0.267, 0.2, 0.067, 0.133, 0.133, 0.267, 0.333, 0.2],
+ "M": [0.2, 0.2, 0.133, 0.067, 0.2, 0.267, 0.133, 0.067, 0.133, 0.333, 0.4, 0.2, 0.6, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.333, 0.067, 0.2, 0.2],
+ "F": [0.133, 0.067, 0.067, 0.067, 0.133, 0.067, 0.067, 0.067, 0.2, 0.267, 0.267, 0.067, 0.267, 0.667, 0.0, 0.133, 0.133, 0.333, 0.467, 0.2, 0.067, 0.067, 0.2],
+ "P": [0.2, 0.133, 0.133, 0.2, 0.067, 0.2, 0.2, 0.133, 0.133, 0.067, 0.067, 0.2, 0.133, 0.0, 0.733, 0.2, 0.2, 0.0, 0.067, 0.133, 0.133, 0.2, 0.133],
+ "S": [0.333, 0.2, 0.333, 0.267, 0.2, 0.267, 0.267, 0.267, 0.2, 0.133, 0.133, 0.267, 0.2, 0.133, 0.2, 0.533, 0.333, 0.067, 0.133, 0.133, 0.267, 0.267, 0.267],
+ "T": [0.267, 0.2, 0.267, 0.2, 0.2, 0.2, 0.2, 0.133, 0.133, 0.2, 0.2, 0.2, 0.2, 0.133, 0.2, 0.333, 0.6, 0.133, 0.133, 0.267, 0.2, 0.2, 0.267],
+ "W": [0.067, 0.067, 0.0, 0.0, 0.133, 0.133, 0.067, 0.133, 0.133, 0.067, 0.133, 0.067, 0.2, 0.333, 0.0, 0.067, 0.133, 1.0, 0.4, 0.067, 0.0, 0.067, 0.133],
+ "Y": [0.133, 0.133, 0.133, 0.067, 0.133, 0.2, 0.133, 0.067, 0.4, 0.2, 0.2, 0.133, 0.2, 0.467, 0.067, 0.133, 0.133, 0.4, 0.733, 0.2, 0.067, 0.133, 0.2],
+ "V": [0.267, 0.067, 0.067, 0.067, 0.2, 0.133, 0.133, 0.067, 0.067, 0.467, 0.333, 0.133, 0.333, 0.2, 0.133, 0.133, 0.267, 0.067, 0.2, 0.533, 0.067, 0.133, 0.2],
+ "B": [0.133, 0.2, 0.467, 0.533, 0.067, 0.267, 0.333, 0.2, 0.267, 0.067, 0.0, 0.267, 0.067, 0.067, 0.133, 0.267, 0.2, 0.0, 0.067, 0.067, 0.533, 0.333, 0.2],
+ "Z": [0.2, 0.267, 0.267, 0.333, 0.067, 0.467, 0.533, 0.133, 0.267, 0.067, 0.067, 0.333, 0.2, 0.067, 0.2, 0.267, 0.2, 0.067, 0.133, 0.133, 0.333, 0.533, 0.2],
+ "X": [0.267, 0.2, 0.2, 0.2, 0.133, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.133, 0.267, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.2]
+
+}
 # Create a reverse mapping from a BLOSUM62 vector to an amino acid character.
 # The score lists are converted to tuples so they can be used as dictionary keys.
 MASK_TOKEN = -1.0
@@ -65,7 +117,7 @@ AMINO_ACID_MAP = {tuple(v): k for k, v in BLOSUM62.items()}
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 AA_TO_INT = {a: i for i, a in enumerate(AA)}
-UNK_IDX_OHE = PAD_INDEX_OHE = len(AA) # 20 total chars for OHE
+PAD_INDEX_OHE = len(AA) # 20 total chars for OHE
 
 # Create a mapping from Amino Acid to an integer index
 AA_BLOSUM = "ARNDCQEGHILKMFPSTWYVBZX"
@@ -74,17 +126,16 @@ PAD_INDEX_62 = len(AA_BLOSUM) # The new padding index is 23
 
 # Create a constant TensorFlow tensor to act as a lookup table
 BLOSUM62_VECTORS = np.array([BLOSUM62[aa] for aa in AA_BLOSUM] + [[0.0] * 23], dtype=np.float32)
-BLOSUM62_TABLE = tf.constant(BLOSUM62_VECTORS)
 
 def seq_to_onehot(sequence: str, max_seq_len: int) -> np.ndarray:
     """Convert peptide sequence to one-hot encoding"""
     arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32) # initialize padding with 0
     for j, aa in enumerate(sequence.upper()[:max_seq_len]):
-        arr[j, AA_TO_INT.get(aa, UNK_IDX_OHE)] = 1.0
+        arr[j, AA_TO_INT.get(aa, PAD_INDEX_OHE)] = 1.0
         # print number of UNKs in the sequence
     # num_unks = np.sum(arr[:, UNK_IDX_OHE])
     # zero out gaps
-    arr[:, AA_TO_INT['-']] = PAD_VALUE  # Set gaps to PAD_VALUE
+    arr[:, PAD_INDEX_OHE] = PAD_VALUE  # Set gaps to PAD_VALUE
     # if num_unks > 0:
     #     print(f"Warning: {num_unks} unknown amino acids in sequence '{sequence}'")
     return arr
@@ -153,7 +204,7 @@ def seq_to_blossom62(sequence: str, max_seq_len: int) -> np.ndarray:
     arr = np.full((max_seq_len, num_features), PAD_VALUE, dtype=np.float32)
     # Use the vector for '-' (unknown) as the default for any character
     # not found in the BLOSUM62 dictionary, including gaps ('-').
-    default_vector = BLOSUM62['-']
+    default_vector = BLOSUM62['X']
     # Iterate over the sequence up to the maximum length.
     for i, aa in enumerate(sequence.upper()[:max_seq_len]):
         # Retrieve the BLOSUM62 vector for the current amino acid.
@@ -207,391 +258,77 @@ def seq_to_ohe_indices(seq, max_seq_len):
     return indices
 
 
-def OHE_to_seq(ohe: np.ndarray, gap: bool = False) -> list:
+def get_embed_key(key: str, emb_dict: Dict[str, str]) -> str:  # why ndarray?
     """
-    Convert a one-hot encoded matrix back to a peptide sequence.
-    # (B, max_pep_len, 21) -> (B, max_pep_len)
-    Args:
-        ohe: One-hot encoded matrix of shape (B, N, 21).
-    Returns:
-        sequence: Peptide sequence as a string. (B,)
+    Get the embedding key for a given allele key.
+    If the key is not found in the embedding dictionary, return None.
+    # find the matching emb key in the emb_dict.
+    Sometimes the emb key is longer than the allele key, so we need to check if the key is a substring of the emb key.
     """
-    sequence = []
-    for i in range(ohe.shape[0]):  # Iterate over batch dimension
-        seq = []
-        for j in range(ohe.shape[1]):  # Iterate over sequence length
-            if gap and np.all(ohe[i, j] == 0):
-                seq.append('-')
-            else:
-                aa_index = np.argmax(ohe[i, j])  # Get index of the max value in one-hot encoding
-                if aa_index < len(AA):  # Check if it's a valid amino acid index
-                    seq.append(AA[aa_index])
-                else:
-                    seq.append('X')  # Use 'X' for unknown amino acids
-        sequence.append(''.join(seq))  # Join the list into a string
-    return sequence  # Return list of sequences
+    # Use a generator expression for efficient lookup
+    return next((emb_key for emb_key in emb_dict if emb_key.upper().startswith(key.upper())), None)
 
 
-def OHE_to_seq_single(ohe: np.ndarray, gap=True) -> str:
+def get_seq(key: str, seq_dict: Dict[str, str]) -> str:
     """
-    Convert a one-hot encoded matrix back to a peptide sequence.
-    Args:
-        ohe: One-hot encoded matrix of shape (N, 21).
-        gap: Whether to treat all-zeroed rows as gaps ('-'). # should be true in most cases
-    Returns:
-        sequence: Peptide sequence as a string.
+    Get the sequence for a given allele key.
+    If the key is not found in the sequence dictionary, return None.
     """
-    seq = []
-    for j in range(ohe.shape[0]):  # Iterate over sequence length
-        if gap and np.all(ohe[j] == 0):
-            seq.append('-')
-        else:
-            aa_index = np.argmax(ohe[j])  # Get index of the max value in one-hot encoding
-            seq.append(AA[aa_index])
-    return ''.join(seq)  # Join the list into a string
+    return next((seq for seq_key, seq in seq_dict.items() if seq_key.upper().startswith(key.upper())), None)
 
-def peptides_to_onehot_kmer_windows(seq, max_seq_len, k=9, pad_token=-1.0) -> np.ndarray:
+
+def clean_key(allele_key: str) -> str:
     """
-    Converts a peptide sequence into a sliding window of k-mers, one-hot encoded.
-    Output shape: (RF, k, 21), where RF = max_seq_len - k + 1
+    Clean allele keys by removing special characters and converting to uppercase.
+    This is useful for matching keys in embedding dictionaries.
     """
-    RF = max_seq_len - k + 1
-    RFs = np.zeros((RF, k, 21), dtype=np.float32)
-    for window in range(RF):
-        if window + k <= len(seq):
-            kmer = seq[window:window + k]
-            for i, aa in enumerate(kmer):
-                idx = AA_TO_INT.get(aa, pad_token)
-                RFs[window, i, idx] = 1.0
-            # Pad remaining positions in k-mer if sequence is too short
-            for i in range(len(kmer), k):
-                RFs[window, i, pad_token] = 1.0
-        else:
-            # Entire k-mer is padding if out of sequence
-            RFs[window, :, pad_token] = 1.0
-    return np.array(RFs)
+    if allele_key is None:
+        return "None"
+    mapping = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})
+    return allele_key.translate(mapping).upper()
 
-class OHEKmerWindows(tf.keras.layers.Layer):
-    """
-    A TensorFlow layer that converts a batch of one-hot encoded sequences
-    into one-hot encoded k-mer windows.
 
-    This layer takes a 3D tensor of one-hot encoded sequences and produces a
-    4D tensor of one-hot encoded sliding windows. It is a more direct alternative
-    to the string-based version when data is already pre-processed.
-    """
-    def __init__(self, max_seq_len: int, k: int = 9, alphabet_size: int = 21, name='ohe_kmer_windows'):
-        """
-        Initializes the layer.
+def get_mhc_seq_class2(key, embed_map, seq_map):
+    # print(f"Processing key: {key}")  # Debugging line
+    if key is None: return ''
+    key_parts = key.split('_')
+    # print(f"Key parts: {key_parts}")  # Debugging line
+    if len(key_parts) >= 2:
+        key1 = get_embed_key(key_parts[0], embed_map)
+        key2 = get_embed_key(key_parts[1], embed_map)
+        if embed_map.get(key1, None) is None or embed_map.get(key2, None) is None:
+            print(
+                f"Warning: Embedding not found for embd_key 1: '{key1}' 2: '{key2}' in input:'{key_parts[0]}', '{key_parts[1]}'")
+        # print(f"Key1: {key1}, Key2: {key2}")  # Debugging line
+        seq1 = get_seq(key_parts[0], seq_map) if key1 else ''
+        seq2 = get_seq(key_parts[1], seq_map) if key2 else ''
+        # print(f"Seq1: {seq1}, Seq2: {seq2}")  # Debugging line
+        return seq1 + seq2
+    else:
+        raise ValueError(f"Unexpected MHC class II key format: '{key}'")
 
-        Args:
-            max_seq_len (int): The length of the input sequences.
-            k (int, optional): The size of the k-mer window. Defaults to 9.
-            alphabet_size (int, optional): The depth of the one-hot encoding
-                                         (e.g., 21 for amino acids + unk). Defaults to 21.
-        """
-        super(OHEKmerWindows).__init__(name=name)
-        self.max_seq_len = max_seq_len
-        self.k = k
-        self.alphabet_size = alphabet_size
-        self.rf = max_seq_len - k + 1  # Number of receptive fields (windows)
 
-    def call(self, inputs: tf.Tensor) -> tf.Tensor:
-        """
-        Processes the input tensor of one-hot encoded sequences.
+def get_embed_key_class2(key, embed_map):
+    if key is None: return None
+    key_parts = key.split('_')
+    if len(key_parts) >= 2:
+        key1 = get_embed_key(key_parts[0], embed_map)
+        key2 = get_embed_key(key_parts[1], embed_map)
+        if embed_map.get(key1, None) is None or embed_map.get(key2, None) is None:
+            print(
+                f"Warning: Embedding not found for embd_key 1: '{key1}' 2: '{key2}' in input:'{key_parts[0]}', '{key_parts[1]}'")
+        return "_".join(filter(None, [key1, key2]))
+    else:
+        raise ValueError(f"Unexpected MHC class II key format: '{key}'")
 
-        Args:
-            inputs (tf.Tensor): A 3D tensor of one-hot encoded sequences.
-                                Shape: (batch_size, max_seq_len, alphabet_size)
-
-        Returns:
-            tf.Tensor: The one-hot encoded k-mer windows.
-                       Shape: (batch_size, self.rf, self.k, self.alphabet_size)
-        """
-        # --- Input Validation (Optional but Recommended) ---
-        input_shape = tf.shape(inputs)
-        tf.debugging.assert_equal(input_shape[1], self.max_seq_len,
-            message=f"Input sequence length must be {self.max_seq_len}")
-        tf.debugging.assert_equal(input_shape[2], self.alphabet_size,
-            message=f"Input alphabet size must be {self.alphabet_size}")
-
-        # 1. Reshape the input to be compatible with `extract_patches`
-        # We treat the sequence as a 1D "image" with `alphabet_size` channels.
-        # Shape: (batch, max_seq_len, alphabet_size) -> (batch, max_seq_len, 1, alphabet_size)
-        images = tf.expand_dims(inputs, axis=2)
-
-        # 2. Extract sliding windows (patches) of size k
-        # We slide a window of size `k` along the `max_seq_len` dimension.
-        patches = tf.image.extract_patches(
-            images=images,
-            sizes=[1, self.k, 1, 1],      # Window size: (batch, height, width, channels)
-            strides=[1, 1, 1, 1],    # Slide one step at a time
-            rates=[1, 1, 1, 1],
-            padding='VALID'          # 'VALID' ensures we only take full windows
-        )
-        # The output shape of extract_patches is (batch, num_windows_h, num_windows_w, k * 1 * alphabet_size)
-        # In our case: (batch_size, self.rf, 1, k * self.alphabet_size)
-
-        # 3. Reshape the patches into the desired final format
-        # Shape: (batch_size, self.rf, 1, k * alphabet_size) -> (batch_size, self.rf, k, alphabet_size)
-        kmer_windows = tf.reshape(
-            patches,
-            [-1, self.rf, self.k, self.alphabet_size]
-        )
-
-        return kmer_windows
-
-    def get_config(self):
-        """Enables layer serialization."""
-        config = super().get_config()
-        config.update({
-            "max_seq_len": self.max_seq_len,
-            "k": self.k,
-            "alphabet_size": self.alphabet_size,
-        })
-        return config
-
-# ----------------------- Mixed precision helpers -----------------------
+### TensorFlow Layers and Functions
 @tf.function
 def _neg_inf(dtype: tf.dtypes.DType) -> tf.Tensor:
-    """Return a large negative constant suited for masking in given dtype."""
+    """Return a large negative constant suited for masking in given dtype.
+    required for mixed precision training."""
     if dtype == tf.float16 or dtype == tf.bfloat16:
         return tf.constant(-1e4, dtype=dtype)
     return tf.constant(-1e9, dtype=dtype)
-
-# Custom Attention Layer
-@tf.keras.utils.register_keras_serializable(package='Custom', name='AttentionLayer')
-class AttentionLayer(keras.layers.Layer):
-    """
-    Custom multi-head attention layer supporting self- and cross-attention.
-
-    Args:
-        query_dim (int): Input feature dimension for query.
-        context_dim (int): Input feature dimension for context (key and value).
-        output_dim (int): Output feature dimension.
-        type (str): 'self' or 'cross'.
-        heads (int): Number of attention heads.
-        resnet (bool): Whether to use residual connection.
-        return_att_weights (bool): Whether to return attention weights.
-        name (str): Layer name.
-        epsilon (float): Epsilon for layer normalization.
-        gate (bool): Whether to use gating mechanism.
-        mask_token (float): Value for masked tokens.
-        pad_token (float): Value for padded tokens.
-    """
-    def __init__(self, query_dim, context_dim, output_dim, type, heads=4,
-                 resnet=True, return_att_weights=False, name='attention',
-                 epsilon=1e-6, gate=True, mask_token=-1., pad_token=-2.):
-        super().__init__(name=name)
-        assert isinstance(query_dim, int) and isinstance(context_dim, int) and isinstance(output_dim, int)
-        assert type in ['self', 'cross']
-        if resnet:
-            assert query_dim == output_dim
-        self.query_dim = query_dim
-        self.context_dim = context_dim
-        self.output_dim = output_dim
-        self.type = type
-        self.heads = heads
-        self.resnet = resnet
-        self.return_att_weights = return_att_weights
-        self.epsilon = epsilon
-        self.gate = gate
-        self.mask_token = mask_token
-        self.pad_token = pad_token
-        self.att_dim = output_dim // heads  # Attention dimension per head
-
-    def build(self, input_shape):
-        # Projection weights (will be float32 variables under mixed policy)
-        self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
-                                      initializer='random_normal', trainable=True, name=f'q_proj_{self.name}')
-        self.k_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
-                                      initializer='random_normal', trainable=True, name=f'k_proj_{self.name}')
-        self.v_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
-                                      initializer='random_normal', trainable=True, name=f'v_proj_{self.name}')
-        if self.gate:
-            self.g = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
-                                     initializer='random_uniform', trainable=True, name=f'gate_{self.name}')
-        self.norm = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_{self.name}')
-        if self.type == 'cross':
-            self.norm_context = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_context_{self.name}')
-        self.norm_out = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln_out_{self.name}')
-        self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
-                                     initializer='random_normal', trainable=True, name=f'outw_{self.name}')
-        self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
-                                     trainable=True, name=f'outb_{self.name}')
-        # keep scale in compute dtype
-        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.keras.mixed_precision.global_policy().compute_dtype))
-
-    @tf.function
-    def call(self, x, mask, context=None, context_mask=None):
-        """
-        Args:
-            x: Tensor of shape (B, N, query_dim) for query.
-            mask: Tensor of shape (B, N).
-            context: Tensor of shape (B, M, context_dim) for key/value in cross-attention.
-            context_mask: Tensor of shape (B, M) for context.
-        """
-        mask = tf.cast(mask, self.compute_dtype)
-        if self.type == 'self':
-            context = x
-            context_mask = mask
-            q_input = k_input = v_input = self.norm(x)
-            mask_q = mask_k = tf.where(mask == self.pad_token, 0., 1.)
-        else:
-            assert context is not None and context_mask is not None
-            q_input = self.norm(x)
-            k_input = v_input = self.norm_context(context)
-            mask_q = tf.where(mask == self.pad_token, 0., 1.)
-            mask_k = tf.where(tf.cast(context_mask, self.compute_dtype) == self.pad_token, 0., 1.)
-
-        # Project query, key, value
-        q = tf.einsum('bnd,hde->bhne', tf.cast(q_input, self.compute_dtype), tf.cast(self.q_proj, self.compute_dtype))
-        k = tf.einsum('bmd,hde->bhme', tf.cast(k_input, self.compute_dtype), tf.cast(self.k_proj, self.compute_dtype))
-        v = tf.einsum('bmd,hde->bhme', tf.cast(v_input, self.compute_dtype), tf.cast(self.v_proj, self.compute_dtype))
-
-        # Compute attention scores
-        att = tf.einsum('bhne,bhme->bhnm', q, k) * tf.cast(self.scale, self.compute_dtype)
-        mask_q_exp = tf.expand_dims(mask_q, axis=1)
-        mask_k_exp = tf.expand_dims(mask_k, axis=1)
-        attention_mask = tf.einsum('bqn,bkm->bqnm', mask_q_exp, mask_k_exp)
-        attention_mask = tf.broadcast_to(attention_mask, tf.shape(att))
-        att += (1.0 - attention_mask) * _neg_inf(att.dtype)
-        att = tf.nn.softmax(att, axis=-1) * attention_mask
-
-        # Compute output
-        out = tf.einsum('bhnm,bhme->bhne', att, v)
-        if self.gate:
-            g = tf.einsum('bnd,hde->bhne', tf.cast(q_input, self.compute_dtype), tf.cast(self.g, self.compute_dtype))
-            g = tf.nn.sigmoid(g)
-            out *= g
-
-        out = tf.transpose(out, [0, 2, 1, 3])
-        out = tf.reshape(out, [tf.shape(x)[0], tf.shape(x)[1], self.heads * self.att_dim])
-        out = tf.matmul(out, tf.cast(self.out_w, self.compute_dtype)) + tf.cast(self.out_b, self.compute_dtype)
-
-        if self.resnet:
-            out += tf.cast(x, self.compute_dtype)
-
-        out = self.norm_out(out)
-        mask_exp = tf.expand_dims(mask_q, axis=-1)
-        out *= mask_exp
-
-        return (out, att) if self.return_att_weights else out
-
-
-# class SubtractAttentionLayer(keras.layers.Layer):
-#     """
-#     Multi-head self-attention for the subtraction tensor  (B, M, P·D).
-#
-#     Inputs
-#     ──────
-#         x_sub          : (B, M, P*D)
-#         combined_mask  : (B, M, P*D)   (True = valid, False = padding)
-#
-#     All other arguments / behaviour are identical to the original
-#     `AttentionLayer` (projection sizes, heads, residual, gating, …).
-#     """
-#     def __init__(self,
-#                  feature_dim,          # == P*D   (input & output dim)
-#                  heads=4,
-#                  resnet=True,
-#                  return_att_weights=False,
-#                  name="sub_attention",
-#                  epsilon=1e-6,
-#                  gate=True):
-#         super().__init__(name=name)
-#
-#         assert feature_dim % heads == 0, "feature_dim must be divisible by heads"
-#         self.feature_dim = feature_dim
-#         self.output_dim  = feature_dim
-#         self.heads       = heads
-#         self.resnet      = resnet
-#         self.return_att  = return_att_weights
-#         self.epsilon     = epsilon
-#         self.gate        = gate
-#         self.att_dim     = feature_dim // heads
-#         self.scale       = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.keras.mixed_precision.global_policy().compute_dtype))
-#
-#     # ------------------------------------------------------------------
-#     # build
-#     # ------------------------------------------------------------------
-#     def build(self, _):
-#         hd, fd = self.heads, self.feature_dim
-#
-#         self.q_proj = self.add_weight(name="q_proj", shape=(hd, fd, self.att_dim), initializer="random_normal")
-#         self.k_proj = self.add_weight(name="k_proj", shape=(hd, fd, self.att_dim), initializer="random_normal")
-#         self.v_proj = self.add_weight(name="v_proj", shape=(hd, fd, self.att_dim), initializer="random_normal")
-#
-#         if self.gate:
-#             self.g = self.add_weight(name="gate", shape=(hd, fd, self.att_dim), initializer="random_uniform")
-#
-#         self.ln_in   = layers.LayerNormalization(epsilon=self.epsilon, name="ln_in")
-#         self.ln_out  = layers.LayerNormalization(epsilon=self.epsilon, name="ln_out")
-#         if self.resnet:
-#             self.ln_res = layers.LayerNormalization(epsilon=self.epsilon, name="ln_res")
-#
-#         self.out_w = self.add_weight(name="out_w", shape=(hd * self.att_dim, fd), initializer="random_normal")
-#         self.out_b = self.add_weight(name="out_b", shape=(fd,), initializer="zeros")
-#
-#     # ------------------------------------------------------------------
-#     # forward
-#     # ------------------------------------------------------------------
-#     def call(self, x_sub, combined_mask):
-#         """
-#         x_sub         : (B, M, P*D)
-#         combined_mask : (B, M, P*D)  (bool)
-#         """
-#         B = tf.shape(x_sub)[0]
-#         M = tf.shape(x_sub)[1]
-#
-#         # ── token-level mask (B,M) – “is *any* feature in this row valid?” ──
-#         token_mask = tf.reduce_any(combined_mask, axis=-1)
-#         token_mask_f = tf.cast(token_mask, self.compute_dtype) # 1/0
-#
-#         # ── layer-norm on valid data only (invalid features are already 0) ──
-#         x_norm = self.ln_in(x_sub)
-#
-#         # ── project Q K V ──────────────────────────────────────────────
-#         #    x_norm : (B, M, F) ;  proj  : (H, F, d)  →  (B, H, M, d)
-#         q = tf.einsum('bmd,hdf->bhmf', tf.cast(x_norm, self.compute_dtype), tf.cast(self.q_proj, self.compute_dtype))
-#         k = tf.einsum('bmd,hdf->bhmf', tf.cast(x_norm, self.compute_dtype), tf.cast(self.k_proj, self.compute_dtype))
-#         v = tf.einsum('bmd,hdf->bhmf', tf.cast(x_norm, self.compute_dtype), tf.cast(self.v_proj, self.compute_dtype))
-#
-#         # ── scaled dot-product attention ───────────────────────────────
-#         att = tf.einsum('bhmf,bhnf->bhmn', q, k) * tf.cast(self.scale, self.compute_dtype) # (B,H,M,M)
-#         # build broadcast mask  (B,H,M,M)
-#         mask_q = tf.expand_dims(token_mask_f, axis=1)  # (B,1,M)
-#         mask_k = tf.expand_dims(token_mask_f, axis=1)  # (B,1,M)
-#         att_mask = tf.einsum('bqm,bkn->bqmn', mask_q, mask_k)  # (B,1,M,M)
-#         att_mask = tf.broadcast_to(att_mask, tf.shape(att))
-#
-#         att += (1.0 - att_mask) * _neg_inf(att.dtype)
-#         att = tf.nn.softmax(att, axis=-1) * att_mask  # masked softmax
-#
-#         # ── attention output ───────────────────────────────────────────
-#         out = tf.einsum('bhmn,bhnf->bhmf', att, v)  # (B,H,M,d)
-#
-#         # optional gating
-#         if self.gate:
-#             g = tf.einsum('bmd,hdf->bhmf', tf.cast(x_norm, self.compute_dtype), tf.cast(self.g, self.compute_dtype))
-#             out *= tf.nn.sigmoid(g)
-#
-#         # ── merge heads ────────────────────────────────────────────────
-#         out = tf.transpose(out, [0, 2, 1, 3])  # (B,M,H,d)
-#         out = tf.reshape(out, [B, M, self.heads * self.att_dim])  # (B,M,F)
-#         out = tf.matmul(out, tf.cast(self.out_w, self.compute_dtype)) + tf.cast(self.out_b, self.compute_dtype)
-#
-#         # residual + norms
-#         if self.resnet:
-#             out = self.ln_res(out + x_sub)
-#         out = self.ln_out(out)
-#
-#         # finally zero-out padded tokens again (safety)
-#         out *= token_mask_f[..., tf.newaxis]
-#
-#         if self.return_att:
-#             return out, att
-#         return out
 
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='MaskedEmbedding')
 class MaskedEmbedding(keras.layers.Layer):
@@ -628,13 +365,11 @@ class PositionalEncoding(keras.layers.Layer):
     """
     Sinusoidal Positional Encoding layer that applies encodings
     only to non-masked tokens.
-
     Args:
         embed_dim (int): Dimension of embeddings (must match input last dim).
         max_len (int): Maximum sequence length expected (used to precompute encodings).
     """
-
-    def __init__(self, embed_dim, pos_range=100, mask_token=-1., pad_token=-2., name='positional_encoding'):
+    def __init__(self, embed_dim, pos_range=100, mask_token=-1., pad_token=-2., name='positional_encoding', **kwargs):
         super().__init__(name=name)
         self.embed_dim = embed_dim
         self.pos_range = pos_range
@@ -648,17 +383,14 @@ class PositionalEncoding(keras.layers.Layer):
         # angle_rates = 1 / tf.pow(300.0, (2 * (i // 2)) / tf.cast(self.embed_dim, GLOBAL_DTYPE))
         angle_rates = tf.pow(300.0, -(2.0 * tf.floor(i // 2)) / tf.cast(self.embed_dim, tf.float32))
         angle_rads = pos * angle_rates  # (pos_range, embed_dim)
-
         # Apply sin to even indices, cos to odd indices
         sines = tf.sin(angle_rads[:, 0::2])
         cosines = tf.cos(angle_rads[:, 1::2])
-
         pos_encoding = tf.concat([sines, cosines], axis=-1)  # (max_len, embed_dim)
         pos_encoding = pos_encoding[tf.newaxis, ...]  # (1, max_len, embed_dim)
         # store in compute dtype to reduce casts
         self.pos_encoding = tf.cast(pos_encoding, dtype=self.compute_dtype)
 
-    @tf.function(reduce_retracing=True)
     def call(self, x, mask):
         """
         Args:
@@ -672,10 +404,7 @@ class PositionalEncoding(keras.layers.Layer):
         mask = tf.cast(mask[:, :, tf.newaxis], x.dtype)  # (B, N, 1)
         mask = tf.where(mask == self.pad_token, tf.cast(0.0, x.dtype), tf.cast(1.0, x.dtype))
         pe = tf.cast(pe, x.dtype) * mask  # zero out positions where mask is 0
-
         return x + pe
-
-
 
 @tf.function
 def select_indices(ind, n, m_range):
@@ -728,7 +457,7 @@ def select_indices(ind, n, m_range):
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='AnchorPositionExtractor')
 class AnchorPositionExtractor(keras.layers.Layer):
     def __init__(self, num_anchors, dist_thr, initial_temperature=1.0, name='anchor_extractor', project=True,
-                 mask_token=-1., pad_token=-2., return_att_weights=False):
+                 mask_token=-1., pad_token=-2., return_att_weights=False, **kwargs):
         super().__init__()
         assert isinstance(dist_thr, list) and len(dist_thr) == 2
         assert num_anchors > 0
@@ -837,10 +566,9 @@ class AnchorPositionExtractor(keras.layers.Layer):
 
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='concat_mask')
 class ConcatMask(keras.layers.Layer):
-    def __init__(self, name='concat_mask'):
+    def __init__(self, name='concat_mask', **kwargs):
         super().__init__(name=name)
 
-    @tf.function(reduce_retracing=True)
     def call(self, mask1, mask2):
         """
         Args:
@@ -856,14 +584,14 @@ class ConcatMask(keras.layers.Layer):
 
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='split_layer')
 class SplitLayer(keras.layers.Layer):
-    def __init__(self, split_size, name='split_layer'):
+    def __init__(self, split_size, name='split_layer', **kwargs):
         """
         :param split_size: a float of ints that sum up your input dimension
         :param name: str
         """
         super().__init__(name=name)
         self.split_size = split_size
-    @tf.function(reduce_retracing=True)
+
     def call(self, x):
         """
         Args:
@@ -874,61 +602,7 @@ class SplitLayer(keras.layers.Layer):
         return tf.split(x, num_or_size_splits=self.split_size, axis=1)  # Split along the second dimension
 
 
-def determine_conv_params(input_dim, output_dim, max_kernel_size=5, max_strides=2):
-    """
-    Determine kernel size and strides for a single Conv1D layer.
 
-    Args:
-        input_dim (int): Input sequence length.
-        output_dim (int): Desired output sequence length.
-        max_kernel_size (int): Maximum allowed kernel size.
-        max_strides (int): Maximum allowed strides.
-
-    Returns:
-        tuple: (kernel_size, strides) if found, else None.
-    """
-    candidates = []
-    for strides in range(1, max_strides + 1):
-        for kernel_size in range(1, max_kernel_size + 1):
-            if (input_dim - kernel_size) // strides + 1 == output_dim:
-                candidates.append((kernel_size, strides))
-    if candidates:
-        candidates.sort(key=lambda x: (x[1], x[0]))  # Prefer smaller strides, then kernel size
-        return candidates[0]
-    return None
-
-
-def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_strides=20):
-    """
-    Determine kernel sizes and strides for four sequential Conv1D layers.
-
-    Args:
-        initial_input_dim (int): Initial input sequence length.
-        output_dims (list of int): List of four output sequence lengths after each layer.
-        max_kernel_size (int): Maximum allowed kernel size.
-        max_strides (int): Maximum allowed strides.
-
-    Returns:
-        dict: Dictionary with keys "k1", "s1", ..., "k4", "s4", or None if no valid parameters.
-    """
-    if len(output_dims) != 4:
-        raise ValueError("output_dims must contain exactly four integers.")
-
-    ks_dict = {}
-    current_dim = initial_input_dim
-
-    for i, output_dim in enumerate(output_dims, start=1):
-        result = determine_conv_params(current_dim, output_dim, max_kernel_size, max_strides)
-        if result is not None:
-            kernel_size, strides = result
-            ks_dict[f"k{i}"] = kernel_size
-            ks_dict[f"s{i}"] = strides
-            current_dim = output_dim  # Update input for next layer
-        else:
-            print(f"No valid parameters found for layer {i}: {current_dim} → {output_dim}")
-            return None
-
-    return ks_dict
 
 
 @tf.function(reduce_retracing=True)
@@ -997,7 +671,6 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     Custom self-attention layer that supports 2D masks.
     """
-
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
                  return_att_weights=False, name='SelfAttentionWith2DMask',
                  epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True):
@@ -1124,245 +797,6 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         return final_mask
 
 
-# class MaskedCategoricalCrossentropyLoss(layers.Layer):
-#     """    # Define losses
-#     # 1. reconstruction loss for barcode and MHC separately normalized by sequence length
-#     # 2. reconstruction loss of masked peptide and MHC positions
-#     # 3. (optional) reward function for attention weights with respect to anchor rules (eg. attention hotspots must be at least 2 positions apart)
-#     """
-#
-#     def __init__(self, name=None, **kwargs):
-#         super(MaskedCategoricalCrossentropyLoss, self).__init__(name=name, **kwargs)
-#
-#     def call(self, inputs):
-#         y_pred, y_true, mask = inputs
-#         loss_per_position = tf.keras.losses.categorical_crossentropy(y_true, y_pred, from_logits=False, axis=-1)
-#         masked_loss = loss_per_position * mask
-#         total_loss = tf.reduce_sum(masked_loss) / tf.reduce_sum(mask)
-#         self.add_loss(total_loss)
-#         return y_pred
-
-# python
-@tf.keras.utils.register_keras_serializable(package='custom_layers', name='AddGaussianNoise')
-class AddGaussianNoise(layers.Layer):
-    def __init__(self, std=0.1, **kw): super().__init__(**kw); self.std = std
-
-    @tf.function(reduce_retracing=True)
-    def call(self, x, training=None):
-        if training:
-            noise = tf.random.normal(tf.shape(x), stddev=tf.cast(self.std, x.dtype), dtype=x.dtype)
-            return x + noise
-        return x
-
-
-def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10):
-    # Generate synthetic data
-    # Position-specific amino acid frequencies for peptides
-    # Simplified frequencies where certain positions prefer specific amino acids
-    pep_pos_freq = {
-        0: {"A": 0.3, "G": 0.2, "M": 0.2},  # Position 1 prefers A, G, M
-        1: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 2 prefers hydrophobic
-        2: {"D": 0.2, "E": 0.2, "N": 0.2},  # Position 3 prefers charged/polar
-        3: {"S": 0.3, "T": 0.2, "Q": 0.2},  # Position 4 prefers polar
-        4: {"R": 0.3, "K": 0.2, "H": 0.2},  # Position 5 prefers basic
-        5: {"F": 0.3, "Y": 0.2, "W": 0.2},  # Position 6 prefers aromatic
-        6: {"C": 0.3, "P": 0.2, "A": 0.2},  # Position 7 prefers small residues
-        7: {"G": 0.3, "D": 0.2, "E": 0.2},  # Position 8 prefers small/charged
-        8: {"L": 0.3, "V": 0.2, "I": 0.2},  # Position 9 prefers hydrophobic
-    }
-    # Default distribution for other positions
-    default_aa_freq = {aa: 1 / len(AA) for aa in AA}
-
-    # Generate peptides with position-specific preferences
-    pep_lengths = np.random.choice([8, 9, 10, 11, 12], size=batch_size,
-                                   p=[0.1, 0.5, 0.2, 0.1, 0.1])  # More realistic length distribution
-    pep_seqs = []
-    for length in pep_lengths:
-        seq = []
-        for pos in range(length):
-            # Use position-specific frequencies if available, otherwise default
-            freq = pep_pos_freq.get(pos, default_aa_freq)
-            # Convert frequencies to probability array
-            aa_list = list(AA)
-            probs = [freq.get(aa, 0.01) for aa in aa_list]
-            probs = np.array(probs) / sum(probs)  # Normalize
-            seq.append(np.random.choice(aa_list, p=probs))
-        pep_seqs.append(''.join(seq))
-
-    # Convert peptide sequences to one-hot encoding
-    pep_OHE = np.array([seq_to_onehot(seq, max_pep_len) for seq in pep_seqs], dtype=np.float32)
-    mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
-    for i, length in enumerate(pep_lengths):
-        mask_pep[i, :length] = 1.0
-        # mask gaps with pad token
-        for pos in range(length):
-            if pep_seqs[i][pos] == '-':
-                mask_pep[i, pos] = PAD_TOKEN
-
-    # MHC alleles typically have conserved regions
-    mhc_pos_freq = {
-        0: {"G": 0.5, "D": 0.3},  # First position often G or D
-        1: {"S": 0.4, "H": 0.3, "F": 0.2},
-        2: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 3 prefers small residues
-        3: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 4 prefers basic residues
-        4: {"L": 0.3, "I": 0.3, "V": 0.2},  # Position 5 prefers hydrophobic residues
-        5: {"E": 0.4, "D": 0.3, "N": 0.2},  # Position 6 prefers charged residues
-        6: {"C": 0.3, "P": 0.3, "A": 0.2},  # Position 7 prefers small residues
-        7: {"Y": 0.4, "W": 0.3, "F": 0.2},  # Position 8 prefers aromatic residues
-        8: {"G": 0.3, "D": 0.3, "E": 0.2},  # Position 9 prefers small/charged residues
-        9: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 10 prefers hydrophobic residues
-        10: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 11 prefers basic residues
-        11: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 12 prefers small residues
-        12: {"S": 0.4, "H": 0.3, "F": 0.2},  # Position 13 prefers polar residues
-        13: {"G": 0.5, "D": 0.3},  # Position 14 often G or D
-        14: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 15 prefers small residues
-        15: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 16 prefers basic residues
-        16: {"L": 0.3, "I": 0.3, "V": 0.2},  # Position 17 prefers hydrophobic residues
-        17: {"E": 0.4, "D": 0.3, "N": 0.2},  # Position 18 prefers charged residues
-        18: {"C": 0.3, "P": 0.3, "A": 0.2},  # Position 19 prefers small residues
-        19: {"Y": 0.4, "W": 0.3, "F": 0.2},  # Position 20 prefers aromatic residues
-        20: {"G": 0.3, "D": 0.3, "E": 0.2},  # Position 21 prefers small/charged residues
-        21: {"-": 0.3, "V": 0.3, "I": 0.2},
-        22: {"-": 0.4, "K": 0.3, "Q": 0.2},
-        23: {"-": 0.3, "A": 0.3, "T": 0.2},  # Position 24 prefers small residues
-        24: {"-": 0.4, "S": 0.3, "H": 0.2},  # Position 25 prefers polar residues
-        25: {"-": 0.5, "F": 0.3},  # Position 26 often F
-        26: {"-": 0.3, "G": 0.3, "D": 0.2},  # Position 27 prefers small/charged residues
-        # Add more positions as needed
-    }
-
-    # Generate MHC sequences with more realistic properties
-    mhc_lengths = np.random.randint(max_mhc_len - 5, max_mhc_len, size=batch_size)  # Less variation in length
-    mhc_seqs = []
-    for length in mhc_lengths:
-        seq = []
-        for pos in range(length):
-            freq = mhc_pos_freq.get(pos, default_aa_freq)
-            aa_list = list(AA)
-            probs = [freq.get(aa, 0.01) for aa in aa_list]
-            probs = np.array(probs) / sum(probs)
-            seq.append(np.random.choice(aa_list, p=probs))
-        mhc_seqs.append(''.join(seq))
-
-    # Generate MHC embeddings (simulating ESM or similar)
-    mhc_EMB = np.random.randn(batch_size, max_mhc_len, 1152).astype(np.float32)
-    mhc_OHE = np.array([seq_to_onehot(seq, max_mhc_len) for seq in mhc_seqs], dtype=np.float32)
-    print(mhc_OHE.shape)
-
-    # Create masks for MHC sequences
-    mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
-    for i, length in enumerate(mhc_lengths):
-        mask_mhc[i, :length] = 1.0
-        mhc_EMB[i, length:, :] = PAD_VALUE  # set padding positions
-        for pos in range(length):
-            if mhc_seqs[i][pos] == '-':
-                mask_mhc[i, pos] = PAD_TOKEN
-
-    # Generate MHC IDs (could represent allele types)
-    mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
-
-    # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
-    mask_pep[(mask_pep != PAD_TOKEN) & (np.random.rand(batch_size, max_pep_len) < 0.15)] = MASK_TOKEN
-    mask_mhc[(mask_mhc != PAD_TOKEN) & (np.random.rand(batch_size, max_mhc_len) < 0.15)] = MASK_TOKEN
-
-    # convert all inputs tensors
-    # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=GLOBAL_DTYPE)
-    # mask_pep = tf.convert_to_tensor(mask_pep, dtype=GLOBAL_DTYPE)
-    # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=GLOBAL_DTYPE)
-    # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=GLOBAL_DTYPE)
-    # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=GLOBAL_DTYPE)
-
-    # Cov layers
-    ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20,
-                                max_kernel_size=60)
-    if ks_dict is None:
-        raise ValueError("Could not determine valid kernel sizes and strides for MHC Conv layers.")
-
-    return pep_OHE, mask_pep, mhc_EMB, mask_mhc, mhc_OHE, mhc_ids, ks_dict
-
-
-# class MaskedCategoricalCELossLayer(keras.layers.Layer):
-#     def __init__(self, pad_token=-2, mask_token=-1, name="masked_ce_loss", **kwargs):
-#         super().__init__(name=name, **kwargs)
-#         self.pad_token = pad_token
-#         self.mask_token = mask_token
-#
-#     def call(self, inputs):
-#         """
-#         inputs: list or tuple of (y_true, y_pred, mask)
-#         y_true … (B,L,21)  one-hot
-#         y_pred … (B,L,21)  softmax
-#         mask   … (B,L)     integer mask (1 = valid, pad_token = ignore, etc.)
-#         """
-#         y_true, y_pred, mask = inputs
-#
-#         loss_per_position = tf.keras.losses.categorical_crossentropy(
-#             y_true, y_pred, from_logits=False, axis=-1
-#         )
-#         # Convert pad/mask tokens to zeros
-#         mask = tf.where(
-#             tf.logical_or(tf.equal(mask, self.pad_token), tf.equal(mask, self.mask_token)),
-#             0.0,
-#             1.0
-#         )
-#         masked_loss = loss_per_position * mask
-#         total_loss = tf.reduce_sum(masked_loss) / tf.reduce_sum(mask + 1e-8)  # avoid /0
-#         y_out = tf.expand_dims(tf.cast(mask, GLOBAL_DTYPE), -1) * y_pred  # apply mask to predictions
-#         self.add_loss(total_loss)
-#         return y_out  # passthrough for prediction
-
-
-# class MaskPaddingLayer(layers.Layer):
-#     """
-#     Layer that sets the last index to 1.0
-#     mask: (B, N) tensor with -2.0 as padding token
-#     tensor: (B, N, D) tensor to be masked
-#     set the D[-1] to 1.0 if the mask is -2.0
-#     """
-#
-#     def __init__(self, pad_token=-2.0, **kwargs):
-#         super().__init__(**kwargs)
-#         self.pad_token = pad_token
-#
-#     def call(self, inputs):
-#         tensor, mask = inputs
-#         mask_exp = tf.equal(mask, self.pad_token)
-#         mask_exp = tf.expand_dims(mask_exp, axis=-1)
-#         # Create a tensor of zeros except for the last feature, which is 1.0 where mask is True
-#         update = tf.one_hot(tf.shape(tensor)[-1] - 1, tf.shape(tensor)[-1], on_value=1.0, off_value=0.0)
-#         update = tf.reshape(update, (1, 1, -1))
-#         update = tf.cast(update, tensor.dtype)
-#         update = tf.tile(update, [tf.shape(tensor)[0], tf.shape(tensor)[1], 1])
-#         result = tf.where(mask_exp, update, tensor)
-#         return result
-#
-#     def get_config(self):
-#         config = super().get_config()
-#         config.update({"pad_token": self.pad_token})
-#         return config
-
-
-# class SamplingMuMean(keras.layers.Layer):
-#     '''
-#     Reparameterization Trick
-#     '''
-#
-#     def __init__(self, latent_dim, **kwargs):
-#         super(SamplingMuMean, self).__init__(**kwargs)
-#         self.latent_dim = latent_dim
-#
-#     def call(self, inputs):
-#         '''
-#         Args:
-#             inputs - A tuple containing (mean, variance)
-#             output - A vector of shape (batch_size, latent_dim)
-#         '''
-#         mean, log_var = inputs
-#         batch = tf.shape(mean)[0]
-#         sample = tf.random.normal([batch, self.latent_dim]) * tf.exp(log_var / 2) + mean
-#
-#         return sample
-
 @tf.keras.utils.register_keras_serializable(package='Custom', name='SubtractLayer')
 class SubtractLayer(keras.layers.Layer):
     """
@@ -1415,70 +849,259 @@ class SubtractLayer(keras.layers.Layer):
         return masked_result
 
 
-def get_embed_key(key: str, emb_dict: Dict[str, str]) -> str:  # why ndarray?
-    """
-    Get the embedding key for a given allele key.
-    If the key is not found in the embedding dictionary, return None.
-    # find the matching emb key in the emb_dict.
-    Sometimes the emb key is longer than the allele key, so we need to check if the key is a substring of the emb key.
-    """
-    # Use a generator expression for efficient lookup
-    return next((emb_key for emb_key in emb_dict if emb_key.upper().startswith(key.upper())), None)
+@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalMeanPooling1D')
+class GlobalMeanPooling1D(layers.Layer):
+    """Global mean pooling layer."""
+
+    def __init__(self, axis=-1, name="global_mean_pooling_", **kwargs):
+        super(GlobalMeanPooling1D, self).__init__(name=name)
+        self.axis = axis
+
+    def call(self, input_tensor):
+        return tf.math.reduce_mean(input_tensor, axis=self.axis, keepdims=False)
 
 
-def get_seq(key: str, seq_dict: Dict[str, str]) -> str:
-    """
-    Get the sequence for a given allele key.
-    If the key is not found in the sequence dictionary, return None.
-    """
-    return next((seq for seq_key, seq in seq_dict.items() if seq_key.upper().startswith(key.upper())), None)
+@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalSTDPooling1D')
+class GlobalSTDPooling1D(layers.Layer):
+    """Global Standard Deviation Pooling layer."""
+
+    def __init__(self, axis=1, name='global_std_pooling', **kwargs):
+        super(GlobalSTDPooling1D, self).__init__(name=name)
+        self.axis = axis
+
+    def call(self, input_tensor):
+        pooled_std = tf.math.reduce_std(input_tensor, axis=self.axis, keepdims=False, name=None)
+        return pooled_std + 1e-9
 
 
-def clean_key(allele_key: str) -> str:
+@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalMaxPooling1D')
+class GlobalMaxPooling1D(layers.Layer):
+    """Global max pooling layer."""
+
+    def __init__(self, axis=-1, name="global_max_pooling_", **kwargs):
+        super(GlobalMaxPooling1D, self).__init__(name=name)
+        self.axis = axis
+
+    def call(self, input_tensor):
+        return tf.math.reduce_max(input_tensor, axis=self.axis, keepdims=False)
+
+@tf.keras.utils.register_keras_serializable(package='Custom', name='BinaryMCC')
+class BinaryMCC(tf.keras.metrics.Metric):
     """
-    Clean allele keys by removing special characters and converting to uppercase.
-    This is useful for matching keys in embedding dictionaries.
+    Matthews Correlation Coefficient for binary classification.
+
+    Simple implementation using the direct formula:
+    MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
+
+    Range: -1 (worst) to +1 (perfect), 0 = random
     """
-    if allele_key is None:
-        return "None"
-    mapping = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})
-    return allele_key.translate(mapping).upper()
+
+    def __init__(self, name='binary_mcc', threshold=0.5, **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.threshold = threshold
+        self.tp = self.add_weight(name='tp', initializer='zeros')
+        self.tn = self.add_weight(name='tn', initializer='zeros')
+        self.fp = self.add_weight(name='fp', initializer='zeros')
+        self.fn = self.add_weight(name='fn', initializer='zeros')
+
+    @tf.function(reduce_retracing=True)
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        # Convert to binary
+        y_pred_binary = tf.cast(y_pred >= self.threshold, tf.float32)
+        y_true_binary = tf.cast(y_true, tf.float32)
+
+        # Calculate TP, TN, FP, FN
+        tp = tf.reduce_sum(y_true_binary * y_pred_binary)
+        tn = tf.reduce_sum((1 - y_true_binary) * (1 - y_pred_binary))
+        fp = tf.reduce_sum((1 - y_true_binary) * y_pred_binary)
+        fn = tf.reduce_sum(y_true_binary * (1 - y_pred_binary))
+
+        # Update running totals
+        self.tp.assign_add(tp)
+        self.tn.assign_add(tn)
+        self.fp.assign_add(fp)
+        self.fn.assign_add(fn)
+
+    @tf.function(reduce_retracing=True)
+    def result(self):
+        # MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
+        numerator = self.tp * self.tn - self.fp * self.fn
+        denominator = tf.sqrt(
+            (self.tp + self.fp) * (self.tp + self.fn) *
+            (self.tn + self.fp) * (self.tn + self.fn)
+        )
+
+        # Handle division by zero
+        return tf.where(
+            tf.equal(denominator, 0.0),
+            tf.constant(0.0, dtype=self.dtype),
+            numerator / denominator
+        )
+
+    def reset_state(self):
+        self.tp.assign(0.0)
+        self.tn.assign(0.0)
+        self.fp.assign(0.0)
+        self.fn.assign(0.0)
+
+@tf.keras.utils.register_keras_serializable(package='Custom', name='AsymmetricPenaltyBinaryCrossentropy')
+class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
+    """
+    Asymmetric Penalty Binary Cross-Entropy Loss
+    Features:
+    - Minimum at smoothed label: p = 1-ε (true=1), p = ε (true=0)
+    - Steeper penalty toward opposing class
+    - Gentler penalty toward actual class
+    Args:
+        label_smoothing: Smoothing parameter ε (0.05-0.15 recommended)
+        asymmetry_strength: Controls penalty asymmetry (0.3-0.8 recommended)
+    """
+
+    def __init__(self, label_smoothing=0.1, asymmetry_strength=0.5,
+                 name='asymmetric_penalty_binary_crossentropy', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.label_smoothing = label_smoothing
+        self.asymmetry_strength = asymmetry_strength
+
+    @tf.function(reduce_retracing=True)
+    def call(self, y_true, y_pred):
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
+
+        # Base: Standard label smoothing (ensures minimum at correct location)
+        y_smooth = y_true * (1 - self.label_smoothing) + (1 - y_true) * self.label_smoothing
+        base_loss = -tf.reduce_mean(y_smooth * tf.math.log(y_pred) + (1 - y_smooth) * tf.math.log(1 - y_pred))
+
+        # Calculate optimal prediction points
+        optimal_true1 = 1 - self.label_smoothing  # 0.9 when ε=0.1
+        optimal_true0 = self.label_smoothing      # 0.1 when ε=0.1
+
+        # Distance from optimal points
+        dist_from_optimal_true1 = tf.abs(y_pred - optimal_true1)
+        dist_from_optimal_true0 = tf.abs(y_pred - optimal_true0)
+
+        # Asymmetric penalties
+        # For true=1: Stronger penalty when moving toward 0 (opposing class)
+        penalty_true1 = y_true * tf.where(
+            y_pred < optimal_true1,  # Moving toward opposing class
+            self.asymmetry_strength * dist_from_optimal_true1**2,      # Strong penalty
+            self.asymmetry_strength * 0.3 * dist_from_optimal_true1**2  # Weak penalty
+        )
+
+        # For true=0: Stronger penalty when moving toward 1 (opposing class)
+        penalty_true0 = (1 - y_true) * tf.where(
+            y_pred > optimal_true0,  # Moving toward opposing class
+            self.asymmetry_strength * dist_from_optimal_true0**2,      # Strong penalty
+            self.asymmetry_strength * 0.3 * dist_from_optimal_true0**2  # Weak penalty
+        )
+
+        total_loss = base_loss + tf.reduce_mean(penalty_true1 + penalty_true0)
+        return total_loss
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'label_smoothing': self.label_smoothing,
+            'asymmetry_strength': self.asymmetry_strength
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
-def get_mhc_seq_class2(key, embed_map, seq_map):
-    # print(f"Processing key: {key}")  # Debugging line
-    if key is None: return ''
-    key_parts = key.split('_')
-    # print(f"Key parts: {key_parts}")  # Debugging line
-    if len(key_parts) >= 2:
-        key1 = get_embed_key(key_parts[0], embed_map)
-        key2 = get_embed_key(key_parts[1], embed_map)
-        if embed_map.get(key1, None) is None or embed_map.get(key2, None) is None:
-            print(
-                f"Warning: Embedding not found for embd_key 1: '{key1}' 2: '{key2}' in input:'{key_parts[0]}', '{key_parts[1]}'")
-        # print(f"Key1: {key1}, Key2: {key2}")  # Debugging line
-        seq1 = get_seq(key_parts[0], seq_map) if key1 else ''
-        seq2 = get_seq(key_parts[1], seq_map) if key2 else ''
-        # print(f"Seq1: {seq1}, Seq2: {seq2}")  # Debugging line
-        return seq1 + seq2
+# Training utilities
+def load_embedding_db(npz_path: str):
+    """Load embedding database with memory mapping."""
+    try:
+        # Try loading without explicit allow_pickle (defaults to True)
+        return np.load(npz_path, mmap_mode="r")
+    except ValueError as e:
+        if "allow_pickle" in str(e):
+            # If pickle error, try with explicit allow_pickle=True
+            print(f"Warning: NPZ file contains pickled data, loading with allow_pickle=True")
+            return np.load(npz_path, mmap_mode="r", allow_pickle=True)
+        else:
+            raise e
+
+def min_max_norm(emb, mhc_class=1):
+    """min max of ESM3-open embeddings 25.09.2025"""
+    if mhc_class == 2:
+        min = -14144.0
+        max = 1456.0
     else:
-        raise ValueError(f"Unexpected MHC class II key format: '{key}'")
+        min = -15360.0
+        max = 1440.0
+    # normalize embedding
+    emb_norm = 2 * (emb - min) / (max- min) - 1
+    return emb_norm
 
+def log_norm_zscore(emb, eps=1e-9):
+    """z-score normalization after log-transform"""
+    emb_shifted = emb - emb.min() + eps
+    emb_log = np.log1p(emb_shifted)
+    mean, std = emb_log.mean(), emb_log.std()
+    emb_norm = (emb_log - mean) / std
+    return emb_norm
 
-def get_embed_key_class2(key, embed_map):
-    if key is None: return None
-    key_parts = key.split('_')
-    if len(key_parts) >= 2:
-        key1 = get_embed_key(key_parts[0], embed_map)
-        key2 = get_embed_key(key_parts[1], embed_map)
-        if embed_map.get(key1, None) is None or embed_map.get(key2, None) is None:
-            print(
-                f"Warning: Embedding not found for embd_key 1: '{key1}' 2: '{key2}' in input:'{key_parts[0]}', '{key_parts[1]}'")
-        return "_".join(filter(None, [key1, key2]))
+def _preprocess_df_chunk(args):
+    """Top-level helper for multiprocessing chunk processing."""
+    chunk, seq_map, embed_map, mhc_class = args
+    chunk = chunk.copy()
+
+    # Replicate original logic
+    chunk['_cleaned_key'] = chunk.apply(
+        lambda r: r.get('mhc_embedding_key', r['allele'].replace(' ', '').replace('*', '').replace(':', '')),
+        axis=1
+    )
+    chunk['_emb_key'] = chunk['_cleaned_key'].apply(lambda k: get_embed_key(clean_key(k), embed_map))
+
+    if mhc_class == 2:
+        def _get_mhc_seq_class2(key):
+            parts = key.split('_')
+            return seq_map.get(get_embed_key(clean_key(parts[0]), seq_map), '') + \
+                   seq_map.get(get_embed_key(clean_key(parts[1]), seq_map), '') if len(parts) >= 2 else ''
+
+        chunk['_mhc_seq'] = chunk['_cleaned_key'].apply(_get_mhc_seq_class2)
     else:
-        raise ValueError(f"Unexpected MHC class II key format: '{key}'")
+        chunk['_mhc_seq'] = chunk['_emb_key'].apply(lambda k: seq_map.get(get_embed_key(clean_key(k), seq_map), ''))
 
+    return chunk
 
+def load_metadata(tfrecord_dir):
+    """Load metadata from tfrecords directory"""
+    metadata_path = os.path.join(tfrecord_dir, 'metadata.json')
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    return metadata
+
+def load_embedding_table(lookup_path, metadata):
+    """Load MHC embedding lookup table with correct dtype."""
+    with np.load(lookup_path) as data:
+        num_embeddings = len(data.files)
+        # FIX: Use float32 to avoid potential precision loss from float16.
+        table = np.zeros((num_embeddings, metadata['MAX_MHC_LEN'], metadata['ESM_DIM']), dtype=np.float32)
+        for i in range(num_embeddings):
+            table[i] = data[str(i)]
+    return tf.constant(table, dtype=tf.float32)
+
+def normalize_embedding_tf(emb, method="clip_norm1000"):
+    """TensorFlow implementation of the normalization logic."""
+    if method == "clip_norm1000":
+        emb_norm = tf.clip_by_value(emb, -1000.0, 1000.0)
+        return 20.0 * (emb_norm - (-1000.0)) / (1000.0 - (-1000.0)) - 10.0
+    elif method == "robust_zscore":
+        # Per-sample normalization (better for ESM embeddings)
+        mean = tf.reduce_mean(emb, axis=-1, keepdims=True)
+        std = tf.math.reduce_std(emb, axis=-1, keepdims=True)
+        emb_norm = (emb - mean) / (std + 1e-8)
+        emb_norm = tf.clip_by_value(emb_norm, -5.0, 5.0)
+        return emb_norm
+    else:
+        return emb  # No normalization
+
+# Utility functions for handling embeddings and sequences
 def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
     # Parse PDB file
     parser = PDBParser(QUIET=True)
@@ -1507,8 +1130,6 @@ def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbo
 
 
 # res = process_pdb_distance_matrix('../pdbs/MHCI_ref_4U6Y.pdb', 9, "FLNKDLEVDGHFVTM", 'C', 1.5)
-
-
 # # How to use
 # thr = 9
 # chain = 'A'
@@ -1642,20 +1263,6 @@ def cluster_aa_sequences(
     df_out = df.copy()
     df_out["cluster"] = clusters
     return df_out, Z
-
-
-# # Example usage
-# if __name__ == "__main__":
-#     # Cluster into *exactly* 4 clusters and show a dendrogram
-#     df_clusters, Z = cluster_aa_sequences(
-#         "allele_stats_class2_with_seq.csv",
-#         k=8,
-#         linkage_method="average",
-#         gap_mode="ignore_gaps",
-#         plot=True,
-#     )
-#
-#     print(df_clusters[["allele", "cluster"]].head())
 
 
 def create_k_fold_leave_one_cluster_out_stratified_cv(
@@ -1831,114 +1438,59 @@ def create_k_fold_leave_one_cluster_out_stratified_cv(
 
     return folds
 
-@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalMeanPooling1D')
-class GlobalMeanPooling1D(layers.Layer):
+
+def apply_dynamic_masking(features, emd_mask_d2=True):
     """
-    Global mean pooling layer.
-    Computes the mean across the last axis (features).
+    Applies random masking for training augmentation inside the tf.data pipeline.
+    This version is corrected to match the original DataGenerator logic.
     """
+    # Peptide Masking
+    valid_pep_positions = tf.where(tf.equal(features["pep_mask"], NORM_TOKEN))
+    num_valid_pep = tf.shape(valid_pep_positions)[0]
+    # At least 2 positions, or 15% of the valid sequence length
+    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.15, tf.int32))
+    shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
+    if tf.shape(shuffled_pep_indices)[0] > 0:
+        # Update the mask to MASK_TOKEN (-1.0)
+        features["pep_mask"] = tf.tensor_scatter_nd_update(features["pep_mask"], shuffled_pep_indices,
+                                                           tf.repeat(MASK_TOKEN, num_to_mask_pep))
+        # Zero out the feature values for the masked positions
+        feat_dtype = features["pep_blossom62"].dtype
+        mask_updates_pep = tf.fill([num_to_mask_pep, tf.shape(features["pep_blossom62"])[-1]],
+                                   tf.cast(MASK_VALUE, feat_dtype))
+        features["pep_blossom62"] = tf.tensor_scatter_nd_update(features["pep_blossom62"], shuffled_pep_indices,
+                                                                mask_updates_pep)
+    # MHC Masking
+    valid_mhc_positions = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
+    num_valid_mhc = tf.shape(valid_mhc_positions)[0]
+    # At least 5 positions, or 15% of the valid sequence length
+    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.15, tf.int32))
+    shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
+    if tf.shape(shuffled_mhc_indices)[0] > 0:
+        # Update the mask to MASK_TOKEN (-1.0)
+        features["mhc_mask"] = tf.tensor_scatter_nd_update(features["mhc_mask"], shuffled_mhc_indices,
+                                                           tf.repeat(MASK_TOKEN, num_to_mask_mhc))
+        # Zero out the feature values for the masked positions
+        mhc_dtype = features["mhc_emb"].dtype
+        mask_updates_mhc = tf.fill([num_to_mask_mhc, tf.shape(features["mhc_emb"])[-1]], tf.cast(MASK_VALUE, mhc_dtype))
+        features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], shuffled_mhc_indices, mask_updates_mhc)
 
-    def __init__(self, axis=-1, name="global_mean_pooling_"):
-        super(GlobalMeanPooling1D, self).__init__(name=name)
-        self.name = name
-        self.axis = axis
-
-    @tf.function(reduce_retracing=True)
-    def call(self, input_tensor):
-        """
-        Computes the global mean pooling over the input tensor.
-        :param input_tensor:
-        :return:
-        """
-        # inputs: (B, N, D)
-        mean = tf.math.reduce_mean(
-            input_tensor, axis=self.axis, keepdims=False
-        )
-        return mean  # (B, D)
-
-@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalSTDPooling1D')
-class GlobalSTDPooling1D(layers.Layer):
-    """
-    Global Standard Deviation Pooling layer that computes the standard deviation
-    across the sequence dimension for each feature.
-    Args:
-        name (str): Layer name.
-    """
-
-    def __init__(self, axis=1, name='global_std_pooling'):
-        super(GlobalSTDPooling1D, self).__init__(name=name)
-        self.axis = axis
-
-    @tf.function(reduce_retracing=True)
-    def call(self, input_tensor):
-        """
-        Args:
-            inputs: Input tensor of shape (B, N, D).
-        Returns:
-            Tensor of shape (B, N) containing the standard deviation across D.
-        """
-        pooled_std = tf.math.reduce_std(
-            input_tensor, axis=self.axis, keepdims=False, name=None
-        )
-        return pooled_std + 1e-9  # avoid 0.0
-
-@tf.keras.utils.register_keras_serializable(package='Custom', name='GlobalMaxPooling1D')
-class GlobalMaxPooling1D(layers.Layer):
-    """
-    Global max pooling layer.
-    Computes the max across the last axis (features).
-    """
-
-    def __init__(self, axis=-1, name="global_max_pooling_"):
-        super(GlobalMaxPooling1D, self).__init__(name=name)
-        self.name = name
-        self.axis = axis
-
-    @tf.function(reduce_retracing=True)
-    def call(self, input_tensor):
-        """
-        Computes the global max pooling over the input tensor.
-        :param input_tensor:
-        :return:
-        """
-        # inputs: (B, N, D)
-        max_pool = tf.math.reduce_max(
-            input_tensor, axis=self.axis, keepdims=False
-        )
-        return max_pool  # (B, D)
-
-
-# class GumbelSoftmax(keras.layers.Layer):
-#     """
-#     Gumbel-Softmax activation layer.
-#
-#     Args:
-#         temperature (float): Temperature parameter for Gumbel-Softmax.
-#     """
-#
-#     def __init__(self, temperature=0.2, name="gumble_softmax_layer"):
-#         super(GumbelSoftmax, self).__init__(name=name)
-#         self.temperature = temperature
-#
-#     def call(self, logits, training=None):
-#         """
-#         Applies Gumbel-Softmax.
-#
-#         Args:
-#             logits: Input tensor of shape (B, N).
-#             training: Whether the layer is in training mode (not used here but required by Layer API).
-#
-#         Returns:
-#             Tensor of shape (B, N) with Gumbel-Softmax applied.
-#         """
-#         # Sample Gumbel noise
-#         # Use tf.random.uniform for TensorFlow compatibility
-#         U = tf.random.uniform(tf.shape(logits), minval=0, maxval=1)
-#         gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20)  # Add small epsilon for numerical stability
-#
-#         # Apply Gumbel-Softmax formula
-#         y = tf.exp((logits + gumbel_noise) / self.temperature)
-#         return y / tf.reduce_sum(y, axis=-1, keepdims=True)
+    # Dimension-level masking for MHC embeddings
+    if emd_mask_d2:
+        # Find positions that are STILL valid (not padded and not positionally masked)
+        remaining_valid_mhc = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
+        if tf.shape(remaining_valid_mhc)[0] > 0:
+            # Get the embeddings at these remaining valid positions
+            valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
+            # Create a random mask for the feature dimensions
+            dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
+                0.15, features["mhc_emb"].dtype)
+            # Apply the mask (multiply by 0 where True, 1 where False)
+            masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
+            # Scatter the modified embeddings back into the original tensor
+            features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], remaining_valid_mhc,
+                                                              masked_embeddings)
+    return features
 
 
 # Reduced alphabet mapping based on MMseqs2
@@ -2219,127 +1771,234 @@ def binary_focal_loss(y_true,
     focal_loss = alpha_factor * modulating_factor * bce
     return focal_loss
 
-@tf.keras.utils.register_keras_serializable(package='Custom', name='BinaryMCC')
-class BinaryMCC(tf.keras.metrics.Metric):
+
+
+def determine_conv_params(input_dim, output_dim, max_kernel_size=5, max_strides=2):
     """
-    Matthews Correlation Coefficient for binary classification.
+    Determine kernel size and strides for a single Conv1D layer.
 
-    Simple implementation using the direct formula:
-    MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
-
-    Range: -1 (worst) to +1 (perfect), 0 = random
-    """
-
-    def __init__(self, name='binary_mcc', threshold=0.5, **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.threshold = threshold
-        self.tp = self.add_weight(name='tp', initializer='zeros')
-        self.tn = self.add_weight(name='tn', initializer='zeros')
-        self.fp = self.add_weight(name='fp', initializer='zeros')
-        self.fn = self.add_weight(name='fn', initializer='zeros')
-
-    @tf.function(reduce_retracing=True)
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        # Convert to binary
-        y_pred_binary = tf.cast(y_pred >= self.threshold, tf.float32)
-        y_true_binary = tf.cast(y_true, tf.float32)
-
-        # Calculate TP, TN, FP, FN
-        tp = tf.reduce_sum(y_true_binary * y_pred_binary)
-        tn = tf.reduce_sum((1 - y_true_binary) * (1 - y_pred_binary))
-        fp = tf.reduce_sum((1 - y_true_binary) * y_pred_binary)
-        fn = tf.reduce_sum(y_true_binary * (1 - y_pred_binary))
-
-        # Update running totals
-        self.tp.assign_add(tp)
-        self.tn.assign_add(tn)
-        self.fp.assign_add(fp)
-        self.fn.assign_add(fn)
-
-    @tf.function(reduce_retracing=True)
-    def result(self):
-        # MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
-        numerator = self.tp * self.tn - self.fp * self.fn
-        denominator = tf.sqrt(
-            (self.tp + self.fp) * (self.tp + self.fn) *
-            (self.tn + self.fp) * (self.tn + self.fn)
-        )
-
-        # Handle division by zero
-        return tf.where(
-            tf.equal(denominator, 0.0),
-            tf.constant(0.0, dtype=self.dtype),
-            numerator / denominator
-        )
-
-    def reset_state(self):
-        self.tp.assign(0.0)
-        self.tn.assign(0.0)
-        self.fp.assign(0.0)
-        self.fn.assign(0.0)
-
-@tf.keras.utils.register_keras_serializable(package='Custom', name='AsymmetricPenaltyBinaryCrossentropy')
-class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
-    """
-    Asymmetric Penalty Binary Cross-Entropy Loss
-    Features:
-    - Minimum at smoothed label: p = 1-ε (true=1), p = ε (true=0)
-    - Steeper penalty toward opposing class
-    - Gentler penalty toward actual class
     Args:
-        label_smoothing: Smoothing parameter ε (0.05-0.15 recommended)
-        asymmetry_strength: Controls penalty asymmetry (0.3-0.8 recommended)
+        input_dim (int): Input sequence length.
+        output_dim (int): Desired output sequence length.
+        max_kernel_size (int): Maximum allowed kernel size.
+        max_strides (int): Maximum allowed strides.
+
+    Returns:
+        tuple: (kernel_size, strides) if found, else None.
     """
+    candidates = []
+    for strides in range(1, max_strides + 1):
+        for kernel_size in range(1, max_kernel_size + 1):
+            if (input_dim - kernel_size) // strides + 1 == output_dim:
+                candidates.append((kernel_size, strides))
+    if candidates:
+        candidates.sort(key=lambda x: (x[1], x[0]))  # Prefer smaller strides, then kernel size
+        return candidates[0]
+    return None
 
-    def __init__(self, label_smoothing=0.1, asymmetry_strength=0.5,
-                 name='asymmetric_penalty_binary_crossentropy', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.label_smoothing = label_smoothing
-        self.asymmetry_strength = asymmetry_strength
+def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_strides=20):
+    """
+    Determine kernel sizes and strides for four sequential Conv1D layers.
 
-    @tf.function(reduce_retracing=True)
-    def call(self, y_true, y_pred):
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
+    Args:
+        initial_input_dim (int): Initial input sequence length.
+        output_dims (list of int): List of four output sequence lengths after each layer.
+        max_kernel_size (int): Maximum allowed kernel size.
+        max_strides (int): Maximum allowed strides.
 
-        # Base: Standard label smoothing (ensures minimum at correct location)
-        y_smooth = y_true * (1 - self.label_smoothing) + (1 - y_true) * self.label_smoothing
-        base_loss = -tf.reduce_mean(y_smooth * tf.math.log(y_pred) + (1 - y_smooth) * tf.math.log(1 - y_pred))
+    Returns:
+        dict: Dictionary with keys "k1", "s1", ..., "k4", "s4", or None if no valid parameters.
+    """
+    if len(output_dims) != 4:
+        raise ValueError("output_dims must contain exactly four integers.")
 
-        # Calculate optimal prediction points
-        optimal_true1 = 1 - self.label_smoothing  # 0.9 when ε=0.1
-        optimal_true0 = self.label_smoothing      # 0.1 when ε=0.1
+    ks_dict = {}
+    current_dim = initial_input_dim
 
-        # Distance from optimal points
-        dist_from_optimal_true1 = tf.abs(y_pred - optimal_true1)
-        dist_from_optimal_true0 = tf.abs(y_pred - optimal_true0)
+    for i, output_dim in enumerate(output_dims, start=1):
+        result = determine_conv_params(current_dim, output_dim, max_kernel_size, max_strides)
+        if result is not None:
+            kernel_size, strides = result
+            ks_dict[f"k{i}"] = kernel_size
+            ks_dict[f"s{i}"] = strides
+            current_dim = output_dim  # Update input for next layer
+        else:
+            print(f"No valid parameters found for layer {i}: {current_dim} → {output_dim}")
+            return None
 
-        # Asymmetric penalties
-        # For true=1: Stronger penalty when moving toward 0 (opposing class)
-        penalty_true1 = y_true * tf.where(
-            y_pred < optimal_true1,  # Moving toward opposing class
-            self.asymmetry_strength * dist_from_optimal_true1**2,      # Strong penalty
-            self.asymmetry_strength * 0.3 * dist_from_optimal_true1**2  # Weak penalty
-        )
+    return ks_dict
 
-        # For true=0: Stronger penalty when moving toward 1 (opposing class)
-        penalty_true0 = (1 - y_true) * tf.where(
-            y_pred > optimal_true0,  # Moving toward opposing class
-            self.asymmetry_strength * dist_from_optimal_true0**2,      # Strong penalty
-            self.asymmetry_strength * 0.3 * dist_from_optimal_true0**2  # Weak penalty
-        )
+    # class MaskedCategoricalCrossentropyLoss(layers.Layer):
+    #     """    # Define losses
+    #     # 1. reconstruction loss for barcode and MHC separately normalized by sequence length
+    #     # 2. reconstruction loss of masked peptide and MHC positions
+    #     # 3. (optional) reward function for attention weights with respect to anchor rules (eg. attention hotspots must be at least 2 positions apart)
+    #     """
+    #
+    #     def __init__(self, name=None, **kwargs):
+    #         super(MaskedCategoricalCrossentropyLoss, self).__init__(name=name, **kwargs)
+    #
+    #     def call(self, inputs):
+    #         y_pred, y_true, mask = inputs
+    #         loss_per_position = tf.keras.losses.categorical_crossentropy(y_true, y_pred, from_logits=False, axis=-1)
+    #         masked_loss = loss_per_position * mask
+    #         total_loss = tf.reduce_sum(masked_loss) / tf.reduce_sum(mask)
+    #         self.add_loss(total_loss)
+    #         return y_pred
 
-        total_loss = base_loss + tf.reduce_mean(penalty_true1 + penalty_true0)
-        return total_loss
+    # def generate_synthetic_pMHC_data(batch_size=100, max_pep_len=20, max_mhc_len=10):
+    #     # Generate synthetic data
+    #     # Position-specific amino acid frequencies for peptides
+    #     # Simplified frequencies where certain positions prefer specific amino acids
+    #     pep_pos_freq = {
+    #         0: {"A": 0.3, "G": 0.2, "M": 0.2},  # Position 1 prefers A, G, M
+    #         1: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 2 prefers hydrophobic
+    #         2: {"D": 0.2, "E": 0.2, "N": 0.2},  # Position 3 prefers charged/polar
+    #         3: {"S": 0.3, "T": 0.2, "Q": 0.2},  # Position 4 prefers polar
+    #         4: {"R": 0.3, "K": 0.2, "H": 0.2},  # Position 5 prefers basic
+    #         5: {"F": 0.3, "Y": 0.2, "W": 0.2},  # Position 6 prefers aromatic
+    #         6: {"C": 0.3, "P": 0.2, "A": 0.2},  # Position 7 prefers small residues
+    #         7: {"G": 0.3, "D": 0.2, "E": 0.2},  # Position 8 prefers small/charged
+    #         8: {"L": 0.3, "V": 0.2, "I": 0.2},  # Position 9 prefers hydrophobic
+    #     }
+    #     # Default distribution for other positions
+    #     default_aa_freq = {aa: 1 / len(AA) for aa in AA}
+    #
+    #     # Generate peptides with position-specific preferences
+    #     pep_lengths = np.random.choice([8, 9, 10, 11, 12], size=batch_size,
+    #                                    p=[0.1, 0.5, 0.2, 0.1, 0.1])  # More realistic length distribution
+    #     pep_seqs = []
+    #     for length in pep_lengths:
+    #         seq = []
+    #         for pos in range(length):
+    #             # Use position-specific frequencies if available, otherwise default
+    #             freq = pep_pos_freq.get(pos, default_aa_freq)
+    #             # Convert frequencies to probability array
+    #             aa_list = list(AA)
+    #             probs = [freq.get(aa, 0.01) for aa in aa_list]
+    #             probs = np.array(probs) / sum(probs)  # Normalize
+    #             seq.append(np.random.choice(aa_list, p=probs))
+    #         pep_seqs.append(''.join(seq))
+    #
+    #     # Convert peptide sequences to one-hot encoding
+    #     pep_OHE = np.array([seq_to_onehot(seq, max_pep_len) for seq in pep_seqs], dtype=np.float32)
+    #     mask_pep = np.full((batch_size, max_pep_len), PAD_TOKEN, dtype=np.float32)
+    #     for i, length in enumerate(pep_lengths):
+    #         mask_pep[i, :length] = 1.0
+    #         # mask gaps with pad token
+    #         for pos in range(length):
+    #             if pep_seqs[i][pos] == '-':
+    #                 mask_pep[i, pos] = PAD_TOKEN
+    #
+    #     # MHC alleles typically have conserved regions
+    #     mhc_pos_freq = {
+    #         0: {"G": 0.5, "D": 0.3},  # First position often G or D
+    #         1: {"S": 0.4, "H": 0.3, "F": 0.2},
+    #         2: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 3 prefers small residues
+    #         3: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 4 prefers basic residues
+    #         4: {"L": 0.3, "I": 0.3, "V": 0.2},  # Position 5 prefers hydrophobic residues
+    #         5: {"E": 0.4, "D": 0.3, "N": 0.2},  # Position 6 prefers charged residues
+    #         6: {"C": 0.3, "P": 0.3, "A": 0.2},  # Position 7 prefers small residues
+    #         7: {"Y": 0.4, "W": 0.3, "F": 0.2},  # Position 8 prefers aromatic residues
+    #         8: {"G": 0.3, "D": 0.3, "E": 0.2},  # Position 9 prefers small/charged residues
+    #         9: {"L": 0.3, "V": 0.3, "I": 0.2},  # Position 10 prefers hydrophobic residues
+    #         10: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 11 prefers basic residues
+    #         11: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 12 prefers small residues
+    #         12: {"S": 0.4, "H": 0.3, "F": 0.2},  # Position 13 prefers polar residues
+    #         13: {"G": 0.5, "D": 0.3},  # Position 14 often G or D
+    #         14: {"A": 0.3, "T": 0.3, "N": 0.2},  # Position 15 prefers small residues
+    #         15: {"R": 0.4, "K": 0.3, "Q": 0.2},  # Position 16 prefers basic residues
+    #         16: {"L": 0.3, "I": 0.3, "V": 0.2},  # Position 17 prefers hydrophobic residues
+    #         17: {"E": 0.4, "D": 0.3, "N": 0.2},  # Position 18 prefers charged residues
+    #         18: {"C": 0.3, "P": 0.3, "A": 0.2},  # Position 19 prefers small residues
+    #         19: {"Y": 0.4, "W": 0.3, "F": 0.2},  # Position 20 prefers aromatic residues
+    #         20: {"G": 0.3, "D": 0.3, "E": 0.2},  # Position 21 prefers small/charged residues
+    #         21: {"-": 0.3, "V": 0.3, "I": 0.2},
+    #         22: {"-": 0.4, "K": 0.3, "Q": 0.2},
+    #         23: {"-": 0.3, "A": 0.3, "T": 0.2},  # Position 24 prefers small residues
+    #         24: {"-": 0.4, "S": 0.3, "H": 0.2},  # Position 25 prefers polar residues
+    #         25: {"-": 0.5, "F": 0.3},  # Position 26 often F
+    #         26: {"-": 0.3, "G": 0.3, "D": 0.2},  # Position 27 prefers small/charged residues
+    #         # Add more positions as needed
+    #     }
+    #
+    #     # Generate MHC sequences with more realistic properties
+    #     mhc_lengths = np.random.randint(max_mhc_len - 5, max_mhc_len, size=batch_size)  # Less variation in length
+    #     mhc_seqs = []
+    #     for length in mhc_lengths:
+    #         seq = []
+    #         for pos in range(length):
+    #             freq = mhc_pos_freq.get(pos, default_aa_freq)
+    #             aa_list = list(AA)
+    #             probs = [freq.get(aa, 0.01) for aa in aa_list]
+    #             probs = np.array(probs) / sum(probs)
+    #             seq.append(np.random.choice(aa_list, p=probs))
+    #         mhc_seqs.append(''.join(seq))
+    #
+    #     # Generate MHC embeddings (simulating ESM or similar)
+    #     mhc_EMB = np.random.randn(batch_size, max_mhc_len, 1152).astype(np.float32)
+    #     mhc_OHE = np.array([seq_to_onehot(seq, max_mhc_len) for seq in mhc_seqs], dtype=np.float32)
+    #     print(mhc_OHE.shape)
+    #
+    #     # Create masks for MHC sequences
+    #     mask_mhc = np.full((batch_size, max_mhc_len), PAD_TOKEN, dtype=np.float32)
+    #     for i, length in enumerate(mhc_lengths):
+    #         mask_mhc[i, :length] = 1.0
+    #         mhc_EMB[i, length:, :] = PAD_VALUE  # set padding positions
+    #         for pos in range(length):
+    #             if mhc_seqs[i][pos] == '-':
+    #                 mask_mhc[i, pos] = PAD_TOKEN
+    #
+    #     # Generate MHC IDs (could represent allele types)
+    #     mhc_ids = np.random.randint(0, 100, size=(batch_size, max_mhc_len), dtype=np.int32)
+    #
+    #     # # mask 0.15 of the peptide positions update the mask with MASK_TOKEN and zero out the corresponding positions in the OHE
+    #     mask_pep[(mask_pep != PAD_TOKEN) & (np.random.rand(batch_size, max_pep_len) < 0.15)] = MASK_TOKEN
+    #     mask_mhc[(mask_mhc != PAD_TOKEN) & (np.random.rand(batch_size, max_mhc_len) < 0.15)] = MASK_TOKEN
+    #
+    #     # convert all inputs tensors
+    #     # pep_OHE = tf.convert_to_tensor(pep_OHE, dtype=GLOBAL_DTYPE)
+    #     # mask_pep = tf.convert_to_tensor(mask_pep, dtype=GLOBAL_DTYPE)
+    #     # mhc_EMB = tf.convert_to_tensor(mhc_EMB, dtype=GLOBAL_DTYPE)
+    #     # mask_mhc = tf.convert_to_tensor(mask_mhc, dtype=GLOBAL_DTYPE)
+    #     # mhc_OHE = tf.convert_to_tensor(mhc_OHE, dtype=GLOBAL_DTYPE)
+    #
+    #     # Cov layers
+    #     ks_dict = determine_ks_dict(initial_input_dim=max_mhc_len, output_dims=[16, 14, 12, 11], max_strides=20,
+    #                                 max_kernel_size=60)
+    #     if ks_dict is None:
+    #         raise ValueError("Could not determine valid kernel sizes and strides for MHC Conv layers.")
+    #
+    #     return pep_OHE, mask_pep, mhc_EMB, mask_mhc, mhc_OHE, mhc_ids, ks_dict
 
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'label_smoothing': self.label_smoothing,
-            'asymmetry_strength': self.asymmetry_strength
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
+    # class GumbelSoftmax(keras.layers.Layer):
+    #     """
+    #     Gumbel-Softmax activation layer.
+    #
+    #     Args:
+    #         temperature (float): Temperature parameter for Gumbel-Softmax.
+    #     """
+    #
+    #     def __init__(self, temperature=0.2, name="gumble_softmax_layer"):
+    #         super(GumbelSoftmax, self).__init__(name=name)
+    #         self.temperature = temperature
+    #
+    #     def call(self, logits, training=None):
+    #         """
+    #         Applies Gumbel-Softmax.
+    #
+    #         Args:
+    #             logits: Input tensor of shape (B, N).
+    #             training: Whether the layer is in training mode (not used here but required by Layer API).
+    #
+    #         Returns:
+    #             Tensor of shape (B, N) with Gumbel-Softmax applied.
+    #         """
+    #         # Sample Gumbel noise
+    #         # Use tf.random.uniform for TensorFlow compatibility
+    #         U = tf.random.uniform(tf.shape(logits), minval=0, maxval=1)
+    #         gumbel_noise = -tf.math.log(-tf.math.log(U + 1e-20) + 1e-20)  # Add small epsilon for numerical stability
+    #
+    #         # Apply Gumbel-Softmax formula
+    #         y = tf.exp((logits + gumbel_noise) / self.temperature)
+    #         return y / tf.reduce_sum(y, axis=-1, keepdims=True)
