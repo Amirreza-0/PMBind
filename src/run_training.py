@@ -635,9 +635,17 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
             for bench_name, bench_gen, bench_metrics in zip(bench_names, bench_generators, bench_metrics_list):
                 for metric in bench_metrics.values():
                     metric.reset_state()
+
+                pbar_bench = tqdm(range(len(bench_gen)), desc=f"Epoch {epoch + 1}/{epochs} - {bench_name}", total=len(bench_gen))
                 for batch_idx in range(len(bench_gen)):
                     batch_data = bench_gen[batch_idx]
                     val_step_optimized(batch_data, model, binary_loss_fn, bench_metrics, run_config=run_config)
+                    pbar_bench.set_postfix({
+                        f"{bench_name}_Loss": f"{bench_metrics['loss'].result():.4f}",
+                        f"{bench_name}_AUC": f"{bench_metrics['auc'].result():.4f}",
+                        f"{bench_name}_ACC": f"{bench_metrics['acc'].result():.4f}",
+                        f"{bench_name}_MCC": f"{bench_metrics['mcc'].result():.4f}",
+                    })
                 bench_results = {key: value.result().numpy() for key, value in bench_metrics.items()}
                 for key, value in bench_results.items():
                     history[f"{bench_name}_{key}"].append(value)
