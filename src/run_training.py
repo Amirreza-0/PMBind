@@ -598,9 +598,6 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
     print(f"Validation steps per epoch: {val_steps}")
     print(f"Batch size: {batch_size}")
 
-    history = {f"{key}": [] for key in train_metrics.keys()}
-    history.update({f"val_{key}": [] for key in val_metrics.keys()})
-
     print("\nStarting training with TFRecord pipeline and dynamic masking...")
     for epoch in range(epochs):
         for metric in train_metrics.values(): metric.reset_state()
@@ -629,20 +626,21 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
                 "Val_Loss": f"{val_metrics['loss'].result():.4f}", "Val_AUC": f"{val_metrics['auc'].result():.4f}",
                 "Val_ACC": f"{val_metrics['acc'].result():.4f}", "Val_MCC": f"{val_metrics['mcc'].result():.4f}",
             })
-            # Benchmark evaluation
-            if bench_generators:
-                bench_names = ['bench1', 'bench2', 'bench3']
-                bench_metrics_list = [bench1_metrics, bench2_metrics, bench3_metrics]
 
-                for bench_name, bench_gen, bench_metrics in zip(bench_names, bench_generators, bench_metrics_list):
-                    for metric in bench_metrics.values():
-                        metric.reset_state()
-                    for batch_idx in range(len(bench_gen)):
-                        batch_data = bench_gen[batch_idx]
-                        val_step_optimized(batch_data, model, binary_loss_fn, bench_metrics, run_config=run_config)
-                    bench_results = {key: value.result().numpy() for key, value in bench_metrics.items()}
-                    for key, value in bench_results.items():
-                        history[f"{bench_name}_{key}"].append(value)
+        # Benchmark evaluation (after validation completes)
+        if bench_generators:
+            bench_names = ['bench1', 'bench2', 'bench3']
+            bench_metrics_list = [bench1_metrics, bench2_metrics, bench3_metrics]
+
+            for bench_name, bench_gen, bench_metrics in zip(bench_names, bench_generators, bench_metrics_list):
+                for metric in bench_metrics.values():
+                    metric.reset_state()
+                for batch_idx in range(len(bench_gen)):
+                    batch_data = bench_gen[batch_idx]
+                    val_step_optimized(batch_data, model, binary_loss_fn, bench_metrics, run_config=run_config)
+                bench_results = {key: value.result().numpy() for key, value in bench_metrics.items()}
+                for key, value in bench_results.items():
+                    history[f"{bench_name}_{key}"].append(value)
 
         train_results = {key: value.result().numpy() for key, value in train_metrics.items()}
         val_results = {key: value.result().numpy() for key, value in val_metrics.items()}
