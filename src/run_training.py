@@ -536,13 +536,13 @@ def create_datasets(run_config=None):
     train_dataset_tf = create_dataset_from_files(train_files, run_config["BATCH_SIZE"], shuffle=True, apply_masking=True)
     print(f"Training TFRecord files: {train_files}")
 
-    return train_dataset_tf, bench_generator1, bench_generator2, bench_generator3, val_df, val_generator, class_weights_dict
+    return train_dataset_tf, val_df, val_generator, class_weights_dict, (bench_generator1, bench_generator2, bench_generator3)
 ### ──────────────────────────────────────────────────────────────────────
 
 
 ### Main training loop
 ### ----------------------------------------------------------------------
-def train(train_dataset_tf, val_df, val_generator=None, MODEL_SAVE_PATH="best_model.keras",
+def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, MODEL_SAVE_PATH="best_model.keras",
           run_config=None, epochs=20, batch_size=32, patience=5, class_weights_dict=None):
     if run_config is None:
         raise ValueError("RUN_CONFIG must be provided.")
@@ -623,12 +623,26 @@ def train(train_dataset_tf, val_df, val_generator=None, MODEL_SAVE_PATH="best_mo
         for batch_idx in pbar_val:
             batch_data = val_generator[batch_idx]
             val_total_loss, val_pep_loss, val_mhc_loss, val_class_loss, _ = val_step_optimized(
-                batch_data, model, binary_loss_fn, val_metrics
+                batch_data, model, binary_loss_fn, val_metrics, run_config=run_config
             )
             pbar_val.set_postfix({
                 "Val_Loss": f"{val_metrics['loss'].result():.4f}", "Val_AUC": f"{val_metrics['auc'].result():.4f}",
                 "Val_ACC": f"{val_metrics['acc'].result():.4f}", "Val_MCC": f"{val_metrics['mcc'].result():.4f}",
             })
+            # Benchmark evaluation
+            if bench_generators:
+                bench_names = ['bench1', 'bench2', 'bench3']
+                bench_metrics_list = [bench1_metrics, bench2_metrics, bench3_metrics]
+
+                for bench_name, bench_gen, bench_metrics in zip(bench_names, bench_generators, bench_metrics_list):
+                    for metric in bench_metrics.values():
+                        metric.reset_state()
+                    for batch_idx in range(len(bench_gen)):
+                        batch_data = bench_gen[batch_idx]
+                        val_step_optimized(batch_data, model, binary_loss_fn, bench_metrics, run_config=run_config)
+                    bench_results = {key: value.result().numpy() for key, value in bench_metrics.items()}
+                    for key, value in bench_results.items():
+                        history[f"{bench_name}_{key}"].append(value)
 
         train_results = {key: value.result().numpy() for key, value in train_metrics.items()}
         val_results = {key: value.result().numpy() for key, value in val_metrics.items()}
@@ -703,9 +717,9 @@ def init_run_logger(log_dir, run_name):
 def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
-        "MHC_CLASS": 1, "EPOCHS": 120, "BATCH_SIZE": 4096, "LEARNING_RATE": 1e-4, "PATIENCE": 15,
-        "EMBED_DIM": 32, "HEADS": 8, "NOISE_STD": 0.1, "L2_REG": 0.003,
-        "CLS_LOSS_WEIGHT": 1.0, "PEP_LOSS_WEIGHT": 0.005, "MHC_LOSS_WEIGHT": 0.03, "DROPOUT_RATE": 0.3,
+        "MHC_CLASS": 1, "EPOCHS": 120, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3, "PATIENCE": 15,
+        "EMBED_DIM": 32, "HEADS": 8, "NOISE_STD": 0.1, "L2_REG": 0.003, "EMBEDDING_NORM": "robust_zscore", # robust_zscore, clip_norm1000, None
+        "CLS_LOSS_WEIGHT": 1.0, "PEP_LOSS_WEIGHT": 0.01, "MHC_LOSS_WEIGHT": 0.01, "DROPOUT_RATE": 0.18,
         "description": "tfrecord base"
     }
 
@@ -729,7 +743,7 @@ def main(args):
         print("Please run the `create_tfrecords.py` script first.")
         sys.exit(1)
 
-    train_dataset_tf, bench_generator1, bench_generator2, bench_generator3, val_df, val_generator, class_weights_dict = create_datasets(RUN_CONFIG)
+    train_dataset_tf, val_df, val_generator, class_weights_dict, bench_generators = create_datasets(RUN_CONFIG)
 
     train(
         MODEL_SAVE_PATH=os.path.join(out_dir, "best_model.keras"),
@@ -737,10 +751,11 @@ def main(args):
         train_dataset_tf=train_dataset_tf,
         val_df=val_df,
         val_generator=val_generator,
+        bench_generators=bench_generators,
         epochs=RUN_CONFIG["EPOCHS"],
         batch_size=RUN_CONFIG["BATCH_SIZE"],
         patience=RUN_CONFIG["PATIENCE"],
-        class_weights_dict=class_weights_dict
+        class_weights_dict=class_weights_dict,
     )
     if 'log_file' in locals() and not log_file.closed:
         print("[logger] Closing log file.")
