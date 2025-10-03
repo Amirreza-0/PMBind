@@ -655,6 +655,15 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
         for key, value in train_results.items(): history[key].append(value)
         for key, value in val_results.items(): history[f"val_{key}"].append(value)
 
+        # Save history to disk after each epoch
+        model_dir = os.path.dirname(MODEL_SAVE_PATH)
+        if not model_dir:
+            model_dir = "."
+        os.makedirs(model_dir, exist_ok=True)
+        history_path = os.path.join(model_dir, os.path.splitext(os.path.basename(MODEL_SAVE_PATH))[0] + "_history.json")
+        with open(history_path, "w") as f:
+            json.dump(history, f, indent=4)
+
         print(f"Epoch {epoch + 1}/{epochs} - "
               f"Loss: {train_results['loss']:.4f} - AUC: {train_results['auc']:.4f} - ACC: {train_results['acc']:.4f} - MCC: {train_results['mcc']:.4f} - "
               f"Val Loss: {val_results['loss']:.4f} - Val AUC: {val_results['auc']:.4f} - Val ACC: {val_results['acc']:.4f} - Val MCC: {val_results['mcc']:.4f}")
