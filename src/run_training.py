@@ -595,6 +595,10 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
     # model summary
     model.summary()
 
+    if args.resume_from:
+        print(f"Resuming training from checkpoint: {args.resume_from}")
+        model.load_weights(args.resume_from)
+
     best_val_auc = 0.0
     patience_counter = 0
 
@@ -646,7 +650,7 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
                     metric.reset_state()
 
                 pbar_bench = tqdm(range(len(bench_gen)), desc=f"Epoch {epoch + 1}/{epochs} - {bench_name}", total=len(bench_gen))
-                for batch_idx in range(len(bench_gen)):
+                for batch_idx in pbar_bench:
                     batch_data = bench_gen[batch_idx]
                     val_step_optimized(batch_data, model, binary_loss_fn, bench_metrics, run_config=run_config)
                     pbar_bench.set_postfix({
@@ -700,8 +704,15 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
         model_dir = "."
     os.makedirs(model_dir, exist_ok=True)
     history_path = os.path.join(model_dir, os.path.splitext(os.path.basename(MODEL_SAVE_PATH))[0] + "_history.json")
-    with open(history_path, "w") as f:
-        json.dump(history, f)
+    if os.path.exists(history_path):
+        with open(history_path, "r") as f:
+            existing_history = json.load(f)
+        existing_history.update(history)
+        with open(history_path, "w") as f:
+            json.dump(existing_history, f, indent=4)
+    else:
+        with open(history_path, "w") as f:
+            json.dump(history, f)
     visualize_training_history(history, os.path.dirname(MODEL_SAVE_PATH))
 
 
