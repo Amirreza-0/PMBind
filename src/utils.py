@@ -916,6 +916,170 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         return final_mask
 
 
+@tf.keras.utils.register_keras_serializable(package='custom_layers', name='SelfAttentionWith2DMask')
+class SelfAttentionWith2DMask2(keras.layers.Layer):
+    """
+    Custom self-attention layer that supports 2D masks with dropout.
+    """
+    def __init__(self, query_dim, context_dim, output_dim, heads=4,
+                 return_att_weights=False, name='SelfAttentionWith2DMask',
+                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, 
+                 apply_rope=True, attention_dropout=0.0, output_dropout=0.0):
+        super().__init__(name=name)
+        self.query_dim = query_dim
+        self.context_dim = context_dim
+        self.output_dim = output_dim
+        self.heads = heads
+        self.return_att_weights = return_att_weights
+        self.epsilon = epsilon
+        self.mask_token = mask_token
+        self.pad_token = pad_token
+        self.att_dim = output_dim // heads  # Attention dimension per head
+        self.self_attn_mhc = self_attn_mhc
+        self.apply_rope = apply_rope  # flag for rotary positional embedding
+        self.attention_dropout_rate = attention_dropout
+        self.output_dropout_rate = output_dropout
+
+    def build(self, input_shape):
+        # Validate input dim matches provided dims (since a single x is used for q/k/v)
+        in_dim = int(input_shape[-1])
+        if in_dim != self.query_dim or in_dim != self.context_dim:
+            raise ValueError(
+                f"Input dim {in_dim} must match query_dim {self.query_dim} and context_dim {self.context_dim}.")
+
+        # Projection weights
+        self.norm1 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln1_{self.name}')
+        self.q_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'q_proj_{self.name}')
+        self.k_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'k_proj_{self.name}')
+        self.v_proj = self.add_weight(shape=(self.heads, self.context_dim, self.att_dim),
+                                      initializer='random_normal', trainable=True, name=f'v_proj_{self.name}')
+        self.g_proj = self.add_weight(shape=(self.heads, self.query_dim, self.att_dim),
+                                      initializer='random_uniform', trainable=True, name=f'g_proj_{self.name}')
+        self.norm2 = layers.LayerNormalization(epsilon=self.epsilon, name=f'ln2_{self.name}')
+
+        self.out_w = self.add_weight(shape=(self.heads * self.att_dim, self.output_dim),
+                                     initializer='random_normal', trainable=True, name=f'outw_{self.name}')
+        self.out_b = self.add_weight(shape=(self.output_dim,), initializer='zeros',
+                                     trainable=True, name=f'outb_{self.name}')
+        self.scale = 1.0 / tf.math.sqrt(tf.cast(self.att_dim, tf.keras.mixed_precision.global_policy().compute_dtype))
+
+        # Dropout layers
+        self.attention_dropout = layers.Dropout(rate=self.attention_dropout_rate, name=f'att_dropout_{self.name}')
+        self.output_dropout = layers.Dropout(rate=self.output_dropout_rate, name=f'out_dropout_{self.name}')
+
+        if self.apply_rope:
+            if (self.att_dim % 2) != 0:
+                raise ValueError(f"RotaryEmbedding requires even att_dim, got {self.att_dim}.")
+            # q/k have shape (B, H, S, D): sequence_axis=2, feature_axis=-1
+            self.rope = RotaryEmbedding(sequence_axis=2, feature_axis=-1, name=f'rope_{self.name}')
+
+        super().build(input_shape)
+
+    @tf.function(reduce_retracing=True)
+    def call(self, x_pmhc, p_mask, m_mask, training=None):
+        """
+        Args:
+            x_pmhc: Tensor of shape (B, N+M, query_dim) for query.
+            p_mask: Tensor of shape (B, N) for peptide mask.
+            m_mask: Tensor of shape (B, M) for mhc mask.
+            training: Boolean or None, whether the layer is in training mode.
+        Returns:
+            Tensor of shape (B, N+M, output_dim)
+        """
+        x_pmhc = self.norm1(x_pmhc)  # Normalize input
+        p_mask = tf.cast(p_mask, self.compute_dtype)
+        m_mask = tf.cast(m_mask, self.compute_dtype)
+        p_mask = tf.where(p_mask == self.pad_token, x=0., y=1.)  # (B, N)
+        m_mask = tf.where(m_mask == self.pad_token, x=0., y=1.)  # (B, M)
+
+        q = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc , self.compute_dtype), tf.cast(self.q_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.k_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.v_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        g = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.g_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+
+        if self.apply_rope:
+            q = self.rope(q)
+            k = self.rope(k)
+
+        att = tf.einsum('bhxe,bhye->bhxy', q, k) * tf.cast(self.scale, self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
+        # Create 2D mask
+        mask_2d = self.mask_2d(p_mask, m_mask)
+        mask_2d = tf.cast(mask_2d, self.compute_dtype)  # (B, N+M, N+M)
+        mask_2d_neg = (1.0 - mask_2d) * _neg_inf(att.dtype)  # Apply mask to attention scores
+        att = tf.nn.softmax(att + tf.expand_dims(mask_2d_neg, axis=1), axis=-1)  # Apply softmax to attention scores
+        
+        # Apply attention dropout
+        att = self.attention_dropout(att, training=training)
+        
+        att *= tf.expand_dims(mask_2d,
+                              axis=1)  # remove the impact of row wise attention of padded tokens. since all are 1e-9
+        out = tf.matmul(att, v)  # (B, H, N+M, N+M) * (B, H, N+M, D) -> (B, H, N+M, D)
+        out *= tf.nn.sigmoid(g)  # Apply gating mechanism
+        out = tf.transpose(out, [0, 2, 1, 3])
+        out = tf.reshape(out, [tf.shape(x_pmhc)[0], tf.shape(x_pmhc)[1], self.heads * self.att_dim])
+        out = tf.matmul(out, tf.cast(self.out_w, self.compute_dtype)) + tf.cast(self.out_b, self.compute_dtype)
+        out = self.norm2(out)
+        
+        # Apply output dropout
+        out = self.output_dropout(out, training=training)
+        
+        if self.return_att_weights:
+            return out, att
+        else:
+            return out
+
+    def mask_2d(self, p_mask, m_mask):
+        p_mask = tf.cast(p_mask, self.compute_dtype)
+        m_mask = tf.cast(m_mask, self.compute_dtype)
+        p_mask = tf.expand_dims(p_mask, axis=-1)
+        m_mask = tf.expand_dims(m_mask, axis=-1)  # (B, N, 1), (B, M, 1)
+        # zero square masks
+        self_peptide_mask = tf.zeros_like(p_mask, dtype=self.compute_dtype)  # (B, N, 1)
+        self_peptide_mask_2d = tf.broadcast_to(self_peptide_mask, (
+            tf.shape(p_mask)[0], tf.shape(p_mask)[1], tf.shape(p_mask)[1]))  # (B, N, N)
+        if self.self_attn_mhc:
+            self_mhc_mask = m_mask
+        else:
+            self_mhc_mask = tf.zeros_like(m_mask, dtype=self.compute_dtype)
+        self_mhc_mask_2d = tf.broadcast_to(self_mhc_mask, (
+            tf.shape(m_mask)[0], tf.shape(m_mask)[1], tf.shape(m_mask)[1]))  # (B, M, M)
+        # one and zero masks
+        pep_mhc_mask_secondpart = tf.broadcast_to(p_mask, (tf.shape(p_mask)[0], tf.shape(p_mask)[1],
+                                                           tf.shape(m_mask)[-1]))  # (B, N, M)
+        pep_mhc_mask_secondpart = pep_mhc_mask_secondpart * tf.transpose(m_mask,
+                                                                         perm=[0, 2, 1])  # (B,N,M)*(B,1,M)=(B, N, M)
+        mhc_pep_mask_secondpart = tf.broadcast_to(m_mask, (tf.shape(m_mask)[0], tf.shape(m_mask)[1],
+                                                           tf.shape(p_mask)[-1]))  # (B, M, N)
+        mhc_pep_mask_secondpart = mhc_pep_mask_secondpart * tf.transpose(p_mask,
+                                                                         perm=[0, 2, 1])  # (B,M,N)*(B,1,N)=(B, M, N)
+        # combined masks (B,N+M,N+M)
+        combined_mask_1 = tf.concat([self_peptide_mask_2d, pep_mhc_mask_secondpart], axis=2)  # (B, N, N+M)
+        combined_mask_2 = tf.concat([mhc_pep_mask_secondpart, self_mhc_mask_2d], axis=2)  # (B, M, N+M)
+        final_mask = tf.concat([combined_mask_1, combined_mask_2], axis=1)  # (B, N+M, N+M)
+        final_mask_t = tf.transpose(final_mask, perm=[0, 2, 1])  # (B,... same)
+        final_mask = tf.multiply(final_mask, final_mask_t)
+        return final_mask
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'query_dim': self.query_dim,
+            'context_dim': self.context_dim,
+            'output_dim': self.output_dim,
+            'heads': self.heads,
+            'return_att_weights': self.return_att_weights,
+            'epsilon': self.epsilon,
+            'mask_token': self.mask_token,
+            'pad_token': self.pad_token,
+            'self_attn_mhc': self.self_attn_mhc,
+            'apply_rope': self.apply_rope,
+            'attention_dropout': self.attention_dropout_rate,
+            'output_dropout': self.output_dropout_rate,
+        })
+        return config
+
 @tf.keras.utils.register_keras_serializable(package='Custom', name='SubtractLayer')
 class SubtractLayer(keras.layers.Layer):
     """
