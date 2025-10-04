@@ -33,11 +33,15 @@ def compress_npz(npz_path):
 
     # Pool statistics per token
     print("Pooling statistics...")
-    arr_mean = np.mean(arr_emb_s, axis=-1, keepdims=True)
-    arr_std  = np.std(arr_emb_s, axis=-1, keepdims=True)
     arr_min  = np.min(arr_emb_s, axis=-1, keepdims=True)
     arr_max  = np.max(arr_emb_s, axis=-1, keepdims=True)
-    arr_concat = np.concatenate([arr_mean, arr_std, arr_min, arr_max], axis=-1)  # (B, seq, 4)
+    arr_q25   = np.percentile(arr_emb_s, 25, axis=-1, keepdims=True)
+    arr_q50   = np.percentile(arr_emb_s, 50, axis=-1, keepdims=True) # Median
+    arr_q75   = np.percentile(arr_emb_s, 75, axis=-1, keepdims=True)
+    arr_skew  = np.mean((arr_emb_s - arr_q50)**3, axis=-1, keepdims=True) / (np.std(arr_emb_s, axis=-1, keepdims=True)**3 + 1e-10)
+    arr_outlier = np.mean((arr_emb_s < arr_q25 - 1.5 * (arr_q75 - arr_q25)) | (arr_emb_s > arr_q75 + 1.5 * (arr_q75 - arr_q25)), axis=-1, keepdims=True)
+    # Concatenate pooled statistics
+    arr_concat = np.concatenate([arr_min, arr_q25, arr_q50, arr_q75, arr_max, arr_skew, arr_outlier], axis=-1)  # (B, seq, 7)
     # Rebuild dict, aligned with keys
     EMB_DB_pooled = {k: arr_concat[i] for i, k in enumerate(EMB_DB.files)}
 
