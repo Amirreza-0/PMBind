@@ -55,6 +55,7 @@ print("Paths loaded.")
 
 ## --- Globals ---
 MHC_CLASS = 1
+EMB_NORM_METHOD = "robust_zscore"  # clip_norm1000, None
 
 ## --- Constant lookup table for on-the-fly feature creation ---
 _blosum_vectors = [np.asarray(BLOSUM62[aa], dtype=np.float32) for aa in AA_BLOSUM]
@@ -73,7 +74,7 @@ print(f"Loaded raw MHC embedding table: {MHC_EMBEDDING_TABLE_RAW.shape}")
 
 # Normalize the entire lookup table before starting the training.
 print("Normalizing the MHC embedding lookup table...")
-MHC_EMBEDDING_TABLE = normalize_embedding_tf(MHC_EMBEDDING_TABLE_RAW, method=None)
+MHC_EMBEDDING_TABLE = normalize_embedding_tf(MHC_EMBEDDING_TABLE_RAW, method=EMB_NORM_METHOD)
 print(f"Normalized MHC embedding table created.")
 print(f"Min value in normalized table: {tf.reduce_min(MHC_EMBEDDING_TABLE):.2f}")
 print(f"Max value in normalized table: {tf.reduce_max(MHC_EMBEDDING_TABLE):.2f}")
@@ -491,7 +492,9 @@ def create_datasets(run_config=None):
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
         batch_size=128,
-        apply_masking=False  # No masking for validation
+        apply_masking=False, # No masking for validation
+        class_weights_dict=class_weights_dict,
+        normalization_method=EMB_NORM_METHOD
     )
     # Bench datasets for live performance tracking during training
     # IEDB bench1
@@ -504,7 +507,9 @@ def create_datasets(run_config=None):
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
         batch_size=128,
-        apply_masking=False
+        apply_masking=False,
+        normalization_method=EMB_NORM_METHOD,
+        class_weights_dict=class_weights_dict
     )
     # IEDB bench2
     print("creating bench2 dataset...")
@@ -516,7 +521,9 @@ def create_datasets(run_config=None):
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
         batch_size=128,
-        apply_masking=False
+        apply_masking=False,
+        normalization_method=EMB_NORM_METHOD,
+        class_weights_dict=class_weights_dict
     )
     # independent test set
     print("creating bench3 dataset...")
@@ -528,7 +535,9 @@ def create_datasets(run_config=None):
         max_pep_len=MAX_PEP_LEN,
         max_mhc_len=MAX_MHC_LEN,
         batch_size=128,
-        apply_masking=False
+        apply_masking=False,
+        normalization_method=EMB_NORM_METHOD,
+        class_weights_dict=class_weights_dict
     )
 
     # Create datasets
@@ -646,12 +655,12 @@ def train(train_dataset_tf, val_df, val_generator=None, bench_generators=None, M
                         f"{bench_name}_ACC": f"{bench_metrics['acc'].result():.4f}",
                         f"{bench_name}_MCC": f"{bench_metrics['mcc'].result():.4f}",
                     })
-                bench_results = {key: value.result().numpy() for key, value in bench_metrics.items()}
+                bench_results = {key: float(value.result().numpy()) for key, value in bench_metrics.items()}
                 for key, value in bench_results.items():
                     history[f"{bench_name}_{key}"].append(value)
 
-        train_results = {key: value.result().numpy() for key, value in train_metrics.items()}
-        val_results = {key: value.result().numpy() for key, value in val_metrics.items()}
+        train_results = {key: float(value.result().numpy()) for key, value in train_metrics.items()}
+        val_results = {key: float(value.result().numpy()) for key, value in val_metrics.items()}
         for key, value in train_results.items(): history[key].append(value)
         for key, value in val_results.items(): history[f"val_{key}"].append(value)
 
@@ -733,7 +742,7 @@ def main(args):
     """Main function to run the training pipeline."""
     RUN_CONFIG = {
         "MHC_CLASS": 1, "EPOCHS": 120, "BATCH_SIZE": 1024, "LEARNING_RATE": 1e-3, "PATIENCE": 15,
-        "EMBED_DIM": 32, "HEADS": 8, "NOISE_STD": 0.1, "L2_REG": 0.003, "EMBEDDING_NORM": "robust_zscore", # robust_zscore, clip_norm1000, None
+        "EMBED_DIM": 32, "HEADS": 8, "NOISE_STD": 0.1, "L2_REG": 0.003, "EMBEDDING_NORM": EMB_NORM_METHOD, # robust_zscore, clip_norm1000, None
         "CLS_LOSS_WEIGHT": 1.0, "PEP_LOSS_WEIGHT": 0.01, "MHC_LOSS_WEIGHT": 0.01, "DROPOUT_RATE": 0.18,
         "description": "tfrecord base"
     }
