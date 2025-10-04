@@ -4,7 +4,7 @@ models.py
 -------------------------
 
 End-to-end peptide × MHC cross-attention reconstruction model.
-This multi-task, semi-supervised architecture jointly learns a binary binding label (classification) and per-residue reconstruction for both peptide and MHC. A shared transformer-style encoder with a custom 2D-masked cross-attention produces a latent sequence that supports clustering and downstream analyses; the model exposes attention weights and pooled latent vectors for explainability, visualization, and unsupervised / semi-supervised clustering of binding modes.
+This multi-task model architecture jointly learns a binary binding label (classification) and per-residue reconstruction for both peptide and MHC. A shared transformer-style encoder with a custom 2D-masked cross-attention produces a latent sequence that supports clustering and downstream analyses; the model exposes attention weights and pooled latent vectors for explainability, visualization, and unsupervised / classification guided clustering of pMHCs..
 
 Author: Amirreza Aleyasin 2025-10-02
 """
@@ -18,7 +18,8 @@ from utils import (
     MaskedEmbedding,
     GlobalMeanPooling1D,
     GlobalSTDPooling1D,
-    SelfAttentionWith2DMask
+    SelfAttentionWith2DMask,
+    SelfAttentionWith2DMask2
 )
 
 
@@ -36,8 +37,7 @@ def pmbind_multitask(max_pep_len: int,
                         l2_reg: float = 0.01,
                         ESM_dim: int = 1536):
     """
-    A multi-task model for semi-supervised pMHC analysis, updated to use
-    the custom SelfAttentionWith2DMask layer.
+    A multi-task model for pMHC reconstruction and binding prediction.
     """
     # -------------------------------------------------------------------
     # INPUTS
@@ -149,24 +149,22 @@ def pmbind_multitask(max_pep_len: int,
 
     return pMHC_multitask_model
 
-#%%
 # Slightly deeper model
 
 def pmbind_multitask_plus(max_pep_len: int,
                           max_mhc_len: int,
                           emb_dim: int = 32,
-                          heads: int = 2,
+                          heads: int = 8,
                           transformer_layers: int = 2,
                           mask_token: float = MASK_TOKEN,
                           pad_token: float = PAD_TOKEN,
                           noise_std: float = 0.1,
                           latent_dim: int = 128,
-                          drop_out_rate: float = 0.2,
-                          l2_reg: float = 0.01,
+                          drop_out_rate: float = 0.18,
+                          l2_reg: float = 0.03,
                           ESM_dim: int = 1536):
     """
-    A multi-task model for semi-supervised pMHC analysis, updated to use
-    the custom SelfAttentionWith2DMask layer.
+    A multi-task model for pMHC reconstruction and binding prediction, deeper version.
     """
     # -------------------------------------------------------------------
     # INPUTS
@@ -201,7 +199,7 @@ def pmbind_multitask_plus(max_pep_len: int,
     pmhc_concat = layers.Concatenate(axis=1, name="pmhc_concat")([pep, mhc])
 
     # pmhc self-attention with 2D mask
-    pmhc_interaction, pmhc_attn_weights = SelfAttentionWith2DMask(
+    pmhc_interaction, pmhc_attn_weights = SelfAttentionWith2DMask2(
         query_dim=emb_dim,
         context_dim=emb_dim,
         output_dim=emb_dim,
@@ -209,7 +207,9 @@ def pmbind_multitask_plus(max_pep_len: int,
         return_att_weights=True,
         self_attn_mhc=False,  # Prevent both peptide and MHC self-attention in this layer
         apply_rope=True,
-        name="pmhc_2d_masked_attention"
+        name="pmhc_2d_masked_attention",
+        attention_dropout=drop_out_rate/2,
+        output_dropout=drop_out_rate/2
     )(pmhc_concat, pep_mask_in, mhc_mask_in)
 
     # The final output of the encoder is our shared latent sequence
