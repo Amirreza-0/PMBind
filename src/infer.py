@@ -27,7 +27,7 @@ from sklearn.metrics import (confusion_matrix, ConfusionMatrixDisplay, roc_auc_s
 
 # Local imports (ensure these utility scripts are in the same directory or Python path)
 from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
-                   clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA, OHE_to_seq_single,
+                   clean_key, seq_to_blossom62, BLOSUM62, PAD_INDEX, AA, OHE_to_seq_single,
                    masked_categorical_crossentropy, split_y_true_y_pred, get_mhc_seq_class2, load_metadata)
 from models import pmbind_multitask as pmbind
 from visualizations import (_analyze_latents, visualize_attention_weights,
