@@ -3,9 +3,8 @@
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 import os
-from utils import AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask, \
-    MaskedEmbedding
 import uuid
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
@@ -14,11 +13,9 @@ from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
 from kneed import KneeLocator
 import matplotlib.colors as mcolors
-from utils import reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython
-import os
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
+from utils import (AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask,
+                   MaskedEmbedding, reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython)
 
 
 def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
@@ -256,8 +253,6 @@ def visualize_cross_attention_weights(cross_attn_scores, peptide_seq, mhc_seq):
 # if __name__ == "__main__":
 #     visualize_tf_model()
 #     print("Model visualization saved as 'h5/model_architecture_decoder.png'")
-import numpy as np
-import matplotlib.pyplot as plt
 
 
 def plot_1d_heatmap(data, cmap='viridis', title='1D Heatmap', xlabel='', ylabel=''):
@@ -1073,3 +1068,399 @@ def visualize_inference_results(df_processed, true_labels, predictions, out_dir,
     plt.close()
 
     print(f"✓ Inference visualizations saved to {out_dir}")
+
+
+def visualize_per_allele_auc(df, true_labels, predictions, out_dir, dataset_name,
+                              allele_col='allele', min_samples=10, top_n=None):
+    """
+    Compute and visualize per-allele AUC scores.
+
+    Parameters:
+        df: DataFrame containing allele information
+        true_labels: True binary labels (array-like)
+        predictions: Predicted probabilities (array-like)
+        out_dir: Output directory to save plots
+        dataset_name: Name of the dataset
+        allele_col: Column name containing allele information
+        min_samples: Minimum number of samples required per allele to compute AUC
+        top_n: If specified, only show top N alleles by sample count
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Add predictions and true labels to dataframe
+    df_copy = df.copy()
+    df_copy['true_label'] = true_labels
+    df_copy['prediction'] = predictions
+
+    # Compute AUC per allele
+    allele_metrics = []
+    for allele in df_copy[allele_col].unique():
+        allele_mask = df_copy[allele_col] == allele
+        allele_true = df_copy.loc[allele_mask, 'true_label']
+        allele_pred = df_copy.loc[allele_mask, 'prediction']
+
+        n_samples = len(allele_true)
+
+        # Skip alleles with insufficient samples or only one class
+        if n_samples < min_samples:
+            continue
+        if len(allele_true.unique()) < 2:
+            continue
+
+        try:
+            fpr, tpr, _ = roc_curve(allele_true, allele_pred)
+            allele_auc = auc(fpr, tpr)
+
+            allele_metrics.append({
+                'allele': allele,
+                'auc': allele_auc,
+                'n_samples': n_samples,
+                'n_positive': allele_true.sum(),
+                'n_negative': (1 - allele_true).sum()
+            })
+        except Exception as e:
+            print(f"Warning: Could not compute AUC for allele {allele}: {e}")
+            continue
+
+    # Create DataFrame and sort by AUC
+    metrics_df = pd.DataFrame(allele_metrics)
+    if len(metrics_df) == 0:
+        print(f"Warning: No alleles with sufficient samples to compute AUC")
+        return
+
+    metrics_df = metrics_df.sort_values('auc', ascending=False)
+
+    # Filter to top N if specified
+    if top_n is not None:
+        metrics_df = metrics_df.nlargest(top_n, 'n_samples')
+
+    # Plot 1: Bar chart of per-allele AUC
+    plt.figure(figsize=(max(12, len(metrics_df) * 0.4), 8))
+    colors = plt.cm.RdYlGn(metrics_df['auc'].values)
+    bars = plt.bar(range(len(metrics_df)), metrics_df['auc'], color=colors)
+
+    plt.axhline(y=0.5, color='red', linestyle='--', linewidth=2, label='Random (AUC=0.5)')
+    plt.axhline(y=metrics_df['auc'].mean(), color='blue', linestyle='--',
+                linewidth=2, label=f'Mean AUC={metrics_df["auc"].mean():.3f}')
+
+    plt.xlabel('Allele', fontsize=12)
+    plt.ylabel('AUC', fontsize=12)
+    plt.title(f'Per-Allele AUC - {dataset_name}\n({len(metrics_df)} alleles with ≥{min_samples} samples)',
+              fontsize=14, fontweight='bold')
+    plt.xticks(range(len(metrics_df)), metrics_df['allele'], rotation=90, ha='right')
+    plt.ylim([0, 1.05])
+    plt.legend(loc='lower right')
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'per_allele_auc_{dataset_name}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Plot 2: Scatter plot of AUC vs sample count
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(metrics_df['n_samples'], metrics_df['auc'],
+                         c=metrics_df['auc'], cmap='RdYlGn',
+                         s=100, alpha=0.6, edgecolors='black', linewidth=1)
+    plt.colorbar(scatter, label='AUC')
+
+    # Annotate outliers (very high or very low AUC)
+    for idx, row in metrics_df.iterrows():
+        if row['auc'] > 0.9 or row['auc'] < 0.6:
+            plt.annotate(row['allele'], (row['n_samples'], row['auc']),
+                        fontsize=8, alpha=0.7, xytext=(5, 5),
+                        textcoords='offset points')
+
+    plt.axhline(y=0.5, color='red', linestyle='--', linewidth=2, alpha=0.5, label='Random')
+    plt.xlabel('Number of Samples', fontsize=12)
+    plt.ylabel('AUC', fontsize=12)
+    plt.title(f'Per-Allele AUC vs Sample Count - {dataset_name}', fontsize=14, fontweight='bold')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'per_allele_auc_vs_samples_{dataset_name}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Plot 3: Distribution of AUC scores
+    plt.figure(figsize=(10, 6))
+    plt.hist(metrics_df['auc'], bins=20, edgecolor='black', alpha=0.7, color='skyblue')
+    plt.axvline(x=0.5, color='red', linestyle='--', linewidth=2, label='Random (AUC=0.5)')
+    plt.axvline(x=metrics_df['auc'].mean(), color='blue', linestyle='--',
+                linewidth=2, label=f'Mean AUC={metrics_df["auc"].mean():.3f}')
+    plt.axvline(x=metrics_df['auc'].median(), color='green', linestyle='--',
+                linewidth=2, label=f'Median AUC={metrics_df["auc"].median():.3f}')
+    plt.xlabel('AUC', fontsize=12)
+    plt.ylabel('Number of Alleles', fontsize=12)
+    plt.title(f'Distribution of Per-Allele AUC - {dataset_name}', fontsize=14, fontweight='bold')
+    plt.legend()
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'per_allele_auc_distribution_{dataset_name}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Save metrics to CSV
+    metrics_df.to_csv(os.path.join(out_dir, f'per_allele_metrics_{dataset_name}.csv'), index=False)
+
+    print(f"✓ Per-allele AUC visualizations saved to {out_dir}")
+    print(f"  - {len(metrics_df)} alleles analyzed")
+    print(f"  - Mean AUC: {metrics_df['auc'].mean():.3f} ± {metrics_df['auc'].std():.3f}")
+    print(f"  - Median AUC: {metrics_df['auc'].median():.3f}")
+    print(f"  - Best allele: {metrics_df.iloc[0]['allele']} (AUC={metrics_df.iloc[0]['auc']:.3f})")
+    print(f"  - Worst allele: {metrics_df.iloc[-1]['allele']} (AUC={metrics_df.iloc[-1]['auc']:.3f})")
+
+
+def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mhc_seq,
+                                                     max_pep_len, max_mhc_len, out_dir,
+                                                     sample_idx=0, pooling='max',
+                                                     top_k_anchors=3, top_k_pockets=10):
+    """
+    Use max pooling on attention weights to identify:
+    1. Peptide anchor positions (positions with high MHC->peptide attention)
+    2. MHC binding pocket regions (positions with high peptide->MHC attention)
+
+    Args:
+        attn_weights: Tensor of shape (B, heads, P+M, P+M) with attention scores.
+        peptide_seq: Peptide sequence string.
+        mhc_seq: MHC sequence string.
+        max_pep_len: Maximum peptide length.
+        max_mhc_len: Maximum MHC length.
+        out_dir: Output directory to save plots.
+        sample_idx: Index of sample to analyze (default: 0).
+        pooling: Pooling method ('max', 'mean', or 'both').
+        top_k_anchors: Number of top anchor positions to highlight.
+        top_k_pockets: Number of top binding pocket positions to highlight.
+
+    Returns:
+        dict: Contains anchor positions and binding pocket positions with scores.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Convert to numpy
+    try:
+        attn_weights = attn_weights.numpy()
+    except:
+        pass
+
+    # Get attention weights for the specified sample
+    sample_attn = attn_weights[sample_idx]  # Shape: (heads, P+M, P+M)
+
+    # Get actual sequence lengths
+    pep_len = min(len(peptide_seq), max_pep_len)
+    mhc_len = min(len(mhc_seq), max_mhc_len)
+
+    # Extract only the relevant parts (no padding)
+    relevant_attn = sample_attn[:, :pep_len+mhc_len, :pep_len+mhc_len]
+
+    # Extract cross-attention matrices
+    # MHC attending to peptide: rows are MHC positions, columns are peptide positions
+    mhc_to_pep = relevant_attn[:, pep_len:pep_len+mhc_len, :pep_len]  # (heads, mhc_len, pep_len)
+
+    # Peptide attending to MHC: rows are peptide positions, columns are MHC positions
+    pep_to_mhc = relevant_attn[:, :pep_len, pep_len:pep_len+mhc_len]  # (heads, pep_len, mhc_len)
+
+    # === PEPTIDE ANCHOR POSITIONS ===
+    # For each peptide position, aggregate attention from all MHC positions across heads
+    if pooling in ['max', 'both']:
+        # Max pooling across MHC positions, then across heads
+        anchor_scores_max = np.max(np.max(mhc_to_pep, axis=1), axis=0)  # (pep_len,)
+
+    if pooling in ['mean', 'both']:
+        # Mean pooling across MHC positions, then across heads
+        anchor_scores_mean = np.mean(np.mean(mhc_to_pep, axis=1), axis=0)  # (pep_len,)
+
+    # Use the appropriate scores
+    if pooling == 'max':
+        anchor_scores = anchor_scores_max
+    elif pooling == 'mean':
+        anchor_scores = anchor_scores_mean
+    else:  # both - use max for primary analysis
+        anchor_scores = anchor_scores_max
+
+    # Get top anchor positions
+    top_anchor_indices = np.argsort(anchor_scores)[-top_k_anchors:][::-1]
+    anchor_results = [
+        {'position': int(idx), 'amino_acid': peptide_seq[idx],
+         'score': float(anchor_scores[idx]), 'position_1indexed': int(idx + 1)}
+        for idx in top_anchor_indices
+    ]
+
+    # === MHC BINDING POCKET POSITIONS ===
+    # For each MHC position, aggregate attention from all peptide positions across heads
+    if pooling in ['max', 'both']:
+        pocket_scores_max = np.max(np.max(pep_to_mhc, axis=1), axis=0)  # (mhc_len,)
+
+    if pooling in ['mean', 'both']:
+        pocket_scores_mean = np.mean(np.mean(pep_to_mhc, axis=1), axis=0)  # (mhc_len,)
+
+    # Use the appropriate scores
+    if pooling == 'max':
+        pocket_scores = pocket_scores_max
+    elif pooling == 'mean':
+        pocket_scores = pocket_scores_mean
+    else:  # both
+        pocket_scores = pocket_scores_max
+
+    # Get top binding pocket positions
+    top_pocket_indices = np.argsort(pocket_scores)[-top_k_pockets:][::-1]
+    pocket_results = [
+        {'position': int(idx), 'amino_acid': mhc_seq[idx],
+         'score': float(pocket_scores[idx]), 'position_1indexed': int(idx + 1)}
+        for idx in top_pocket_indices
+    ]
+
+    # === VISUALIZATION 1: Peptide Anchor Positions Bar Chart ===
+    fig, ax = plt.subplots(figsize=(max(10, pep_len * 0.5), 6))
+    positions = np.arange(pep_len)
+    colors = ['red' if i in top_anchor_indices else 'skyblue' for i in range(pep_len)]
+
+    bars = ax.bar(positions, anchor_scores, color=colors, edgecolor='black', linewidth=1)
+
+    # Highlight top anchors
+    for idx in top_anchor_indices:
+        ax.text(idx, anchor_scores[idx], f'{peptide_seq[idx]}\n{anchor_scores[idx]:.3f}',
+               ha='center', va='bottom', fontweight='bold', fontsize=10)
+
+    ax.set_xlabel('Peptide Position', fontsize=12)
+    ax.set_ylabel(f'Attention Score ({pooling} pooling)', fontsize=12)
+    ax.set_title(f'Peptide Anchor Positions (Sample {sample_idx})\nTop {top_k_anchors} highlighted in red',
+                fontsize=14, fontweight='bold')
+    ax.set_xticks(positions)
+    ax.set_xticklabels([f'{i+1}\n{peptide_seq[i]}' for i in range(pep_len)], fontsize=9)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'peptide_anchor_positions_sample_{sample_idx}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # === VISUALIZATION 2: MHC Binding Pocket Positions Bar Chart ===
+    fig, ax = plt.subplots(figsize=(max(14, mhc_len * 0.3), 6))
+    positions = np.arange(mhc_len)
+    colors = ['red' if i in top_pocket_indices else 'lightcoral' for i in range(mhc_len)]
+
+    bars = ax.bar(positions, pocket_scores, color=colors, edgecolor='black', linewidth=0.5)
+
+    # Highlight top pockets
+    for idx in top_pocket_indices:
+        ax.text(idx, pocket_scores[idx], f'{mhc_seq[idx]}',
+               ha='center', va='bottom', fontweight='bold', fontsize=8, rotation=0)
+
+    ax.set_xlabel('MHC Position', fontsize=12)
+    ax.set_ylabel(f'Attention Score ({pooling} pooling)', fontsize=12)
+    ax.set_title(f'MHC Binding Pocket Regions (Sample {sample_idx})\nTop {top_k_pockets} highlighted in red',
+                fontsize=14, fontweight='bold')
+    ax.set_xticks(positions[::5])  # Show every 5th position to avoid crowding
+    ax.set_xticklabels([f'{i+1}' for i in range(0, mhc_len, 5)], fontsize=9)
+    ax.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'mhc_binding_pockets_sample_{sample_idx}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # === VISUALIZATION 3: Combined heatmap with both pooling methods (if both) ===
+    if pooling == 'both':
+        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+
+        # Peptide anchors - max pooling
+        axes[0, 0].bar(range(pep_len), anchor_scores_max,
+                      color=['red' if i in top_anchor_indices else 'skyblue' for i in range(pep_len)])
+        axes[0, 0].set_title('Peptide Anchors (Max Pooling)', fontweight='bold')
+        axes[0, 0].set_xlabel('Peptide Position')
+        axes[0, 0].set_ylabel('Max Attention Score')
+        axes[0, 0].set_xticks(range(pep_len))
+        axes[0, 0].set_xticklabels([f'{i+1}\n{peptide_seq[i]}' for i in range(pep_len)], fontsize=8)
+        axes[0, 0].grid(axis='y', alpha=0.3)
+
+        # Peptide anchors - mean pooling
+        top_anchor_indices_mean = np.argsort(anchor_scores_mean)[-top_k_anchors:][::-1]
+        axes[0, 1].bar(range(pep_len), anchor_scores_mean,
+                      color=['orange' if i in top_anchor_indices_mean else 'lightblue' for i in range(pep_len)])
+        axes[0, 1].set_title('Peptide Anchors (Mean Pooling)', fontweight='bold')
+        axes[0, 1].set_xlabel('Peptide Position')
+        axes[0, 1].set_ylabel('Mean Attention Score')
+        axes[0, 1].set_xticks(range(pep_len))
+        axes[0, 1].set_xticklabels([f'{i+1}\n{peptide_seq[i]}' for i in range(pep_len)], fontsize=8)
+        axes[0, 1].grid(axis='y', alpha=0.3)
+
+        # MHC pockets - max pooling
+        axes[1, 0].bar(range(mhc_len), pocket_scores_max,
+                      color=['red' if i in top_pocket_indices else 'lightcoral' for i in range(mhc_len)])
+        axes[1, 0].set_title('MHC Binding Pockets (Max Pooling)', fontweight='bold')
+        axes[1, 0].set_xlabel('MHC Position')
+        axes[1, 0].set_ylabel('Max Attention Score')
+        axes[1, 0].set_xticks(range(0, mhc_len, 5))
+        axes[1, 0].set_xticklabels([f'{i+1}' for i in range(0, mhc_len, 5)], fontsize=8)
+        axes[1, 0].grid(axis='y', alpha=0.3)
+
+        # MHC pockets - mean pooling
+        top_pocket_indices_mean = np.argsort(pocket_scores_mean)[-top_k_pockets:][::-1]
+        axes[1, 1].bar(range(mhc_len), pocket_scores_mean,
+                      color=['orange' if i in top_pocket_indices_mean else 'peachpuff' for i in range(mhc_len)])
+        axes[1, 1].set_title('MHC Binding Pockets (Mean Pooling)', fontweight='bold')
+        axes[1, 1].set_xlabel('MHC Position')
+        axes[1, 1].set_ylabel('Mean Attention Score')
+        axes[1, 1].set_xticks(range(0, mhc_len, 5))
+        axes[1, 1].set_xticklabels([f'{i+1}' for i in range(0, mhc_len, 5)], fontsize=8)
+        axes[1, 1].grid(axis='y', alpha=0.3)
+
+        plt.suptitle(f'Anchor & Binding Pocket Analysis - Max vs Mean Pooling (Sample {sample_idx})',
+                    fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f'anchor_pocket_comparison_sample_{sample_idx}.png'),
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # === VISUALIZATION 4: 2D Heatmap of Peptide-MHC Cross-Attention with Anchor/Pocket Highlights ===
+    # Average attention across heads for clearer visualization
+    avg_pep_to_mhc = np.mean(pep_to_mhc, axis=0)  # (pep_len, mhc_len)
+
+    fig, ax = plt.subplots(figsize=(max(12, mhc_len * 0.4), max(8, pep_len * 0.6)))
+
+    # Create heatmap
+    im = ax.imshow(avg_pep_to_mhc, aspect='auto', cmap='viridis', interpolation='nearest')
+
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Attention Score', fontsize=12)
+
+    # Mark top peptide anchor positions with red lines
+    for idx in top_anchor_indices:
+        ax.axhline(y=idx, color='red', linewidth=2, linestyle='--', alpha=0.7)
+
+    # Mark top MHC binding pocket positions with red lines
+    for idx in top_pocket_indices:
+        ax.axvline(x=idx, color='yellow', linewidth=2, linestyle='--', alpha=0.7)
+
+    # Labels
+    ax.set_xlabel('MHC Position', fontsize=12)
+    ax.set_ylabel('Peptide Position', fontsize=12)
+    ax.set_title(f'Peptide→MHC Cross-Attention with Anchor & Pocket Highlights (Sample {sample_idx})\n' +
+                f'Red lines: Top {top_k_anchors} peptide anchors | Yellow lines: Top {top_k_pockets} MHC pockets',
+                fontsize=14, fontweight='bold')
+
+    # Set ticks
+    ax.set_xticks(range(0, mhc_len, max(1, mhc_len // 20)))
+    ax.set_yticks(range(pep_len))
+    ax.set_xticklabels([f'{i+1}' for i in range(0, mhc_len, max(1, mhc_len // 20))], fontsize=9)
+    ax.set_yticklabels([f'P{i+1}:{peptide_seq[i]}' for i in range(pep_len)], fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'cross_attention_with_highlights_sample_{sample_idx}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Print summary
+    print(f"\n✓ Anchor and binding pocket analysis complete for sample {sample_idx}")
+    print(f"\nTop {top_k_anchors} Peptide Anchor Positions:")
+    for result in anchor_results:
+        print(f"  Position {result['position_1indexed']}: {result['amino_acid']} (score: {result['score']:.4f})")
+
+    print(f"\nTop {top_k_pockets} MHC Binding Pocket Positions:")
+    for result in pocket_results:
+        print(f"  Position {result['position_1indexed']}: {result['amino_acid']} (score: {result['score']:.4f})")
+
+    return {
+        'anchor_positions': anchor_results,
+        'binding_pockets': pocket_results,
+        'anchor_scores_all': anchor_scores.tolist(),
+        'pocket_scores_all': pocket_scores.tolist()
+    }

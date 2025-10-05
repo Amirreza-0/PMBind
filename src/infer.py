@@ -28,9 +28,10 @@ from sklearn.metrics import (confusion_matrix, ConfusionMatrixDisplay, roc_auc_s
 # Local imports (ensure these utility scripts are in the same directory or Python path)
 from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOKEN, PAD_VALUE, MASK_VALUE,
                    clean_key, seq_to_blossom62, BLOSUM62, AMINO_ACID_VOCAB, PAD_INDEX, AA, OHE_to_seq_single,
-                   masked_categorical_crossentropy, split_y_true_y_pred, get_mhc_seq_class2)
-from models import pmbind_multitask_modified as pmbind
-from visualizations import _analyze_latents, visualize_attention_weights
+                   masked_categorical_crossentropy, split_y_true_y_pred, get_mhc_seq_class2, load_metadata)
+from models import pmbind_multitask as pmbind
+from visualizations import (_analyze_latents, visualize_attention_weights,
+                            visualize_per_allele_auc, visualize_anchor_positions_and_binding_pockets)
 
 # --- Globals & Configuration ---
 EMB_DB: np.lib.npyio.NpzFile | None = None
@@ -207,6 +208,20 @@ def generate_attention_visualizations(model, df, seq_map, embed_map, max_pep_len
                 save_all_heads=True  # Save individual head visualizations
             )
 
+            # Visualize anchor positions and binding pockets using max pooling
+            anchor_pocket_results = visualize_anchor_positions_and_binding_pockets(
+                attn_weights=attn_weights,
+                peptide_seq=pep_seq,
+                mhc_seq=mhc_seq,
+                max_pep_len=max_pep_len,
+                max_mhc_len=max_mhc_len,
+                out_dir=sample_out_dir,
+                sample_idx=0,
+                pooling='both',  # Show both max and mean pooling
+                top_k_anchors=3,
+                top_k_pockets=10
+            )
+
             # Also save sample information
             with open(os.path.join(sample_out_dir, "sample_info.txt"), "w") as f:
                 f.write(f"Sample Index: {sample_idx}\n")
@@ -219,6 +234,15 @@ def generate_attention_visualizations(model, df, seq_map, embed_map, max_pep_len
                     f.write(f"Prediction Score: {sample_row['prediction_score']:.4f}\n")
                 if 'prediction_label' in sample_row:
                     f.write(f"Predicted Label: {sample_row['prediction_label']}\n")
+
+                # Add anchor positions and binding pocket information
+                f.write(f"\n--- Detected Anchor Positions ---\n")
+                for anchor in anchor_pocket_results['anchor_positions']:
+                    f.write(f"  Position {anchor['position_1indexed']}: {anchor['amino_acid']} (score: {anchor['score']:.4f})\n")
+
+                f.write(f"\n--- Detected MHC Binding Pockets ---\n")
+                for pocket in anchor_pocket_results['binding_pockets']:
+                    f.write(f"  Position {pocket['position_1indexed']}: {pocket['amino_acid']} (score: {pocket['score']:.4f})\n")
 
             print(f"✓ Attention visualizations saved for sample {sample_idx}")
         else:
@@ -272,20 +296,73 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
           batch_size=256, source_col=None, allow_cache=False):
     global EMB_DB, MHC_CLASS, ESM_DIM
     os.makedirs(out_dir, exist_ok=True)
+
+    # Load run configuration
     with open(config_path, 'r') as f:
         config = json.load(f)
-    MHC_CLASS, max_pep_len, max_mhc_len, embed_dim, heads = config["MHC_CLASS"], config["MAX_PEP_LEN"], config[
-        "MAX_MHC_LEN"], config["EMBED_DIM"], config["HEADS"]
+
+    # Extract model parameters from config
+    MHC_CLASS = config.get("MHC_CLASS", 1)
+    embed_dim = config.get("EMBED_DIM", 32)
+    heads = config.get("HEADS", 8)
+
+    # Try to load metadata from the trained model's tfrecord directory (if available)
+    # Otherwise, use standard values
+    try:
+        # Get the tfrecord_dir from training_paths.json
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        training_paths_file = os.path.join(script_dir, "training_paths.json")
+        with open(training_paths_file, 'r') as f:
+            training_paths = json.load(f)
+        tfrecord_dir = training_paths.get("tfrecord_dir", "")
+
+        # Convert relative path to absolute
+        if not os.path.isabs(tfrecord_dir):
+            tfrecord_dir = os.path.join(script_dir, tfrecord_dir)
+
+        if os.path.exists(tfrecord_dir):
+            metadata = load_metadata(tfrecord_dir)
+            max_pep_len = metadata.get("MAX_PEP_LEN", 15)
+            max_mhc_len = metadata.get("MAX_MHC_LEN", 400)
+            print(f"Loaded metadata from {tfrecord_dir}: max_pep_len={max_pep_len}, max_mhc_len={max_mhc_len}")
+        else:
+            print(f"WARNING: TFRecord directory not found at {tfrecord_dir}. Using default values.")
+            max_pep_len = 15
+            max_mhc_len = 400
+    except Exception as e:
+        print(f"WARNING: Could not load metadata: {e}. Using default values.")
+        max_pep_len = 15
+        max_mhc_len = 400
+
+    print(f"Model configuration: MHC_CLASS={MHC_CLASS}, max_pep_len={max_pep_len}, max_mhc_len={max_mhc_len}, embed_dim={embed_dim}, heads={heads}")
+
+    # Load embeddings
     EMB_DB = load_embedding_db(embedding_npz_path)
     ESM_DIM = int(next(iter(EMB_DB.values())).shape[1])
+    print(f"Loaded embedding database with ESM_DIM={ESM_DIM}")
+
+    # Load sequence mappings
     seq_map = {clean_key(k): v for k, v in
                pd.read_csv(allele_seq_path, index_col="allele")["mhc_sequence"].to_dict().items()}
     embed_map = pd.read_csv(embedding_key_path, index_col="key")["mhc_sequence"].to_dict()
+
+    # Load and preprocess data
     df = pq.ParquetFile(df_path).read().to_pandas()
+    print(f"Loaded {len(df)} samples from {df_path}")
     print("Preprocessing dataset...")
     df_infer = preprocess_df(df, seq_map, embed_map)
-    model = pmbind(max_pep_len=max_pep_len, max_mhc_len=max_mhc_len, emb_dim=embed_dim, heads=heads, noise_std=0,
-                   drop_out_rate=0.0, latent_dim=embed_dim * 2, ESM_dim=ESM_DIM)
+
+    # Initialize model with parameters matching training
+    model = pmbind(
+        max_pep_len=max_pep_len,
+        max_mhc_len=max_mhc_len,
+        emb_dim=embed_dim,
+        heads=heads,
+        noise_std=0.0,  # No noise during inference
+        drop_out_rate=0.0,  # No dropout during inference
+        l2_reg=config.get("L2_REG", 0.0),  # No regularization needed for inference
+        ESM_dim=ESM_DIM
+    )
     dummy_gen = OptimizedDataGenerator(df_infer.head(1), seq_map, embed_map, max_pep_len, max_mhc_len, 1)
     model(dummy_gen[0], training=False)
     model.load_weights(model_weights_path)
@@ -328,6 +405,20 @@ def infer(model_weights_path, config_path, df_path, out_dir, name,
 
     if "assigned_label" in df_infer.columns:
         visualize_inference_results(df_infer, all_labels, all_predictions, out_dir, name)
+
+        # Generate per-allele AUC visualization
+        print("\n--- Generating per-allele AUC visualizations ---")
+        visualize_per_allele_auc(
+            df=df_infer,
+            true_labels=all_labels,
+            predictions=all_predictions,
+            out_dir=os.path.join(out_dir, "visualizations"),
+            dataset_name=name,
+            allele_col='allele',
+            min_samples=10,
+            top_n=None  # Show all alleles with sufficient samples
+        )
+
         auc = roc_auc_score(all_labels, all_predictions) if len(np.unique(all_labels)) > 1 else -1
         ap = average_precision_score(all_labels, all_predictions)
         cm = confusion_matrix(all_labels, df_infer["prediction_label"])

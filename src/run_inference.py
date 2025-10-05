@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-run_all_folds_inference.py: Orchestrates inference runs for ALL folds.
-- NO command-line arguments are needed.
-- Edit the CONFIG dictionary below to set your paths.
-- The script automatically finds the model directory for each fold.
+run_inference.py: Orchestrates inference runs for trained models.
+- Loads paths from training_paths.json
+- Supports running inference on training, validation, and benchmark datasets
+- Automatically finds model directories and configurations
 """
 import os
 import sys
@@ -13,23 +13,34 @@ import subprocess
 import re
 
 # ==============================================================================
-# --- CONFIGURATION: EDIT THESE PATHS ---
+# --- CONFIGURATION: LOAD FROM training_paths.json ---
 # ==============================================================================
+# Load paths from training_paths.json
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, "training_paths.json")
+
+with open(config_path, "r") as f:
+    PATHS_CONFIG = json.load(f)
+
+# Configuration for inference
 CONFIG = {
-    # Directory containing all your trained model folders (e.g., run_..._fold0, run_..._fold1)
-    "BASE_MODEL_DIR": "/home/amirreza/Desktop/PMBind/results/PMBind_runs_optimized8-1D/",
-    # Base directory where all inference output will be saved.
-    "BASE_OUTPUT_FOLDER": "/media/amirreza/Crucial-500/PMBind_results_MCC7-pershard8-27/",
-    # Root directory of the cross-validation dataset.
-    "DATA_ROOT": "/media/amirreza/Crucial-500/PMDb/cross_validation_dataset/",
-    # Directory containing the ESM embedding files (.npz and .csv).
-    "EMBEDDING_DIR": "/media/amirreza/Crucial-500/ESM/esm3-open/PMGen_whole_seq_/",
-    # Full path to the aligned allele sequence CSV file.
-    "ALLELE_SEQ_PATH": "../data/alleles/aligned_PMGen_class_1.csv",
-    # List of folds to run inference on. range(5) means folds 1, 2, 3, 4, 5
-    "FOLDS_TO_RUN": range(1, 6),
+    # Directory containing all your trained model folders
+    "BASE_MODEL_DIR": "../results/PMBind_runs/",
+    # Base directory where all inference output will be saved
+    "BASE_OUTPUT_FOLDER": "../results/PMBind_inference/",
+    # Paths loaded from training_paths.json
+    "ALLELE_SEQ_PATH": PATHS_CONFIG["allele_seq_path"],
+    "EMBEDDING_KEY_PATH": PATHS_CONFIG["embedding_key_path"],
+    "EMBEDDING_NPZ_PATH": PATHS_CONFIG["embedding_table_path"],
+    "TRAIN_PARQUET_PATH": PATHS_CONFIG["train_parquet_path"],
+    "VAL_PARQUET_PATH": PATHS_CONFIG["val_parquet_path"],
+    "BENCH1_PARQUET_PATH": PATHS_CONFIG["bench1_parquet_path"],
+    "BENCH2_PARQUET_PATH": PATHS_CONFIG["bench2_parquet_path"],
+    "BENCH3_PARQUET_PATH": PATHS_CONFIG["bench3_parquet_path"],
     # MHC Class (1 or 2)
-    "MHC_CLASS": 1
+    "MHC_CLASS": 1,
+    # Batch size for inference
+    "BATCH_SIZE": 256
 }
 
 
@@ -66,32 +77,39 @@ def find_model_dir_for_fold(base_dir, fold_num):
     return None
 
 
-def run_inference_for_fold(model_dir, base_output_folder, fold):
-    """Sets up paths and orchestrates calls to simple_infer.py for a single fold."""
+def run_inference_for_model(model_dir, base_output_folder):
+    """Sets up paths and orchestrates calls to infer.py for a trained model."""
 
-    mhc_class_str = f"mhc{CONFIG['MHC_CLASS']}"
     config_path = os.path.join(model_dir, "run_config.json")
+    # Check for both keras and weights.h5 formats
     model_weights_path = os.path.join(model_dir, "best_model.weights.h5")
+    if not os.path.exists(model_weights_path):
+        model_weights_path = os.path.join(model_dir, "best_model.keras")
 
     if not os.path.exists(model_weights_path):
         print(f"ERROR: Model weights not found at {model_weights_path}. Skipping.")
         return
 
-    fold_dir_base = os.path.join(CONFIG['DATA_ROOT'], mhc_class_str, "cv_folds")
-
+    # Use paths from training_paths.json
     paths = {
-        "train": os.path.join(fold_dir_base, f"fold_{fold:02d}_train.parquet"),
-        "val": os.path.join(fold_dir_base, f"fold_{fold:02d}_val.parquet"),
-        "test": os.path.join(os.path.dirname(fold_dir_base), "test_set_rarest_alleles.parquet"),
-        "tval": os.path.join(os.path.dirname(fold_dir_base), "tval_set_rarest_alleles.parquet"),
-        "embed_npz": os.path.join(CONFIG['EMBEDDING_DIR'], f"{mhc_class_str}_encodings.npz"),
-        "embed_key": os.path.join(CONFIG['EMBEDDING_DIR'], f"{mhc_class_str}_encodings.csv"),
+        "train": CONFIG["TRAIN_PARQUET_PATH"],
+        "val": CONFIG["VAL_PARQUET_PATH"],
+        "bench1": CONFIG["BENCH1_PARQUET_PATH"],
+        "bench2": CONFIG["BENCH2_PARQUET_PATH"],
+        "bench3": CONFIG["BENCH3_PARQUET_PATH"],
+        "embed_npz": CONFIG["EMBEDDING_NPZ_PATH"],
+        "embed_key": CONFIG["EMBEDDING_KEY_PATH"],
+        "allele_seq": CONFIG["ALLELE_SEQ_PATH"],
     }
 
     # --- Run Inference on Standard Datasets ---
-    for dset_name in ["test", "tval", "val", "train"]:
+    for dset_name in ["bench1", "bench2", "bench3", "val", "train"]:
         print(f"\n--- Starting Inference on {dset_name.upper()} Set ---")
         data_path = paths[dset_name]
+
+        if not os.path.exists(data_path):
+            print(f"WARNING: Data file not found at {data_path}. Skipping {dset_name}.")
+            continue
 
         # Create subset for large files
         if dset_name in ["train", "val"]:
@@ -108,72 +126,61 @@ def run_inference_for_fold(model_dir, base_output_folder, fold):
         infer_out_dir = os.path.join(base_output_folder, f"inference_{dset_name}")
 
         cmd = [
-            "python", "infer.py",
+            sys.executable, os.path.join(os.path.dirname(__file__), "infer.py"),
             "--model_weights_path", model_weights_path, "--config_path", config_path,
             "--df_path", data_path, "--out_dir", infer_out_dir, "--name", dset_name,
-            "--allele_seq_path", CONFIG['ALLELE_SEQ_PATH'],
+            "--allele_seq_path", paths["allele_seq"],
             "--embedding_key_path", paths["embed_key"], "--embedding_npz_path", paths["embed_npz"],
+            "--batch_size", str(CONFIG["BATCH_SIZE"])
         ]
+        print(f"Running command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
-
-    # --- Run Joint Inference on Train + Test ---
-    print(f"\n--- Starting Joint Inference on TRAIN+TEST ---")
-    df_train = pd.read_parquet(paths["train"])
-    df_train['source'] = 'train'
-    df_test = pd.read_parquet(paths["test"])
-    df_test['source'] = 'test'
-    df_joint = pd.concat([df_train, df_test], ignore_index=True)
-    joint_data_path = os.path.join(base_output_folder, "joint_train_test_data.parquet")
-    df_joint.to_parquet(joint_data_path)
-
-    joint_infer_out_dir = os.path.join(base_output_folder, "inference_train_test_joint")
-    cmd = [
-        "python", "infer.py",
-        "--model_weights_path", model_weights_path, "--config_path", config_path,
-        "--df_path", joint_data_path, "--out_dir", joint_infer_out_dir, "--name", "train_test_joint",
-        "--allele_seq_path", CONFIG['ALLELE_SEQ_PATH'],
-        "--embedding_key_path", paths["embed_key"], "--embedding_npz_path", paths["embed_npz"],
-    ]
-    subprocess.run(cmd, check=True)
 
 
 if __name__ == "__main__":
-    os.makedirs(CONFIG["BASE_OUTPUT_FOLDER"], exist_ok=True)
+    import argparse
 
-    for fold_number in CONFIG["FOLDS_TO_RUN"]:
-        print(f"\n{'=' * 80}")
-        print(f"STARTING INFERENCE FOR FOLD {fold_number}")
-        print(f"{'=' * 80}")
+    parser = argparse.ArgumentParser(description="Run inference on trained PMBind models")
+    parser.add_argument("--model_dir", type=str, required=True, help="Path to the trained model directory containing run_config.json and best_model weights")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory for inference results (default: BASE_OUTPUT_FOLDER/model_name)")
+    args = parser.parse_args()
 
-        # Find the model directory for the current fold
-        model_directory = find_model_dir_for_fold(CONFIG["BASE_MODEL_DIR"], fold_number)
+    model_dir = os.path.abspath(args.model_dir)
+    if not os.path.exists(model_dir):
+        print(f"ERROR: Model directory not found: {model_dir}")
+        sys.exit(1)
 
-        if not model_directory:
-            print(
-                f"WARNING: Could not find a trained model directory for fold {fold_number} in '{CONFIG['BASE_MODEL_DIR']}'. Skipping.")
-            continue
+    # Get model name from directory
+    model_name = os.path.basename(model_dir)
 
-        print(f"Found model for fold {fold_number} at: {model_directory}")
+    # Setup output directory
+    if args.output_dir:
+        output_folder = os.path.abspath(args.output_dir)
+    else:
+        output_folder = os.path.join(CONFIG["BASE_OUTPUT_FOLDER"], model_name)
 
-        # Setup a specific output directory and log file for this fold
-        fold_output_folder = os.path.join(CONFIG["BASE_OUTPUT_FOLDER"], f"inference_run_fold_{fold_number}")
-        os.makedirs(fold_output_folder, exist_ok=True)
-
-        log_file_path = os.path.join(fold_output_folder, "orchestrator.log")
-        original_stdout = sys.stdout
-
-        try:
-            with open(log_file_path, 'w') as log_file:
-                sys.stdout = Tee(original_stdout, log_file)
-                run_inference_for_fold(
-                    model_dir=model_directory,
-                    base_output_folder=fold_output_folder,
-                    fold=fold_number
-                )
-        finally:
-            sys.stdout = original_stdout
-            print(f"Completed inference for fold {fold_number}. Log saved to {log_file_path}")
+    os.makedirs(output_folder, exist_ok=True)
 
     print(f"\n{'=' * 80}")
-    print("ALL FOLDS PROCESSED.")
+    print(f"STARTING INFERENCE FOR MODEL: {model_name}")
+    print(f"Model directory: {model_dir}")
+    print(f"Output directory: {output_folder}")
     print(f"{'=' * 80}")
+
+    log_file_path = os.path.join(output_folder, "inference.log")
+    original_stdout = sys.stdout
+
+    try:
+        with open(log_file_path, 'w') as log_file:
+            sys.stdout = Tee(original_stdout, log_file)
+            run_inference_for_model(
+                model_dir=model_dir,
+                base_output_folder=output_folder
+            )
+    finally:
+        sys.stdout = original_stdout
+
+    print("\n" + "=" * 80)
+    print("INFERENCE COMPLETE")
+    print(f"Results saved to: {output_folder}")
+    print("=" * 80)
