@@ -776,17 +776,21 @@ def visualize_training_history(history, out_path='h5'):
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle('Training History', fontsize=16)
 
-    epochs = range(1, len(history['train_loss']) + 1)
+    # Determine epoch range from any available metric
+    epoch_key = 'loss' if 'loss' in history else 'auc' if 'auc' in history else list(history.keys())[0]
+    epochs = range(1, len(history[epoch_key]) + 1)
 
     # Plot losses
-    if 'train_loss' in history:
-        axes[0, 0].plot(epochs, history['train_loss'], label='Train Loss', color='blue')
-    if 'cls_loss' in history:
-        axes[0, 0].plot(epochs, history['cls_loss'], label='CLS Loss', color='red')
-    if 'pep_loss' in history:
-        axes[0, 0].plot(epochs, history['pep_loss'], label='PEP Loss', color='green')
-    if 'mhc_loss' in history:
-        axes[0, 0].plot(epochs, history['mhc_loss'], label='MHC Loss', color='orange')
+    if 'loss' in history:
+        axes[0, 0].plot(epochs, history['loss'], label='Train Loss', color='blue')
+    if 'val_loss' in history:
+        axes[0, 0].plot(epochs, history['val_loss'], label='Val Loss', color='orange')
+    if 'class_loss' in history:
+        axes[0, 0].plot(epochs, history['class_loss'], label='CLS Loss', color='red')
+    if 'pep_recon_loss' in history:
+        axes[0, 0].plot(epochs, history['pep_recon_loss'], label='PEP Loss', color='green')
+    if 'mhc_recon_loss' in history:
+        axes[0, 0].plot(epochs, history['mhc_recon_loss'], label='MHC Loss', color='purple')
     axes[0, 0].set_title('Losses')
     axes[0, 0].set_xlabel('Epochs')
     axes[0, 0].set_ylabel('Loss')
@@ -794,12 +798,12 @@ def visualize_training_history(history, out_path='h5'):
     axes[0, 0].grid(True)
 
     # Plot AUC
-    if 'train_auc' in history:
-        axes[0, 1].plot(epochs, history['train_auc'], label='Train AUC', color='blue')
+    if 'auc' in history:
+        axes[0, 1].plot(epochs, history['auc'], label='Train AUC', color='blue')
     if 'val_auc' in history:
         axes[0, 1].plot(epochs, history['val_auc'], label='Val AUC', color='orange')
-    if 'train_mcc' in history:
-        axes[0, 1].plot(epochs, history['train_mcc'], label='Train MCC', color='red')
+    if 'mcc' in history:
+        axes[0, 1].plot(epochs, history['mcc'], label='Train MCC', color='red')
     if 'val_mcc' in history:
         axes[0, 1].plot(epochs, history['val_mcc'], label='Val MCC', color='green')
     axes[0, 1].set_title('AUC-MCC')
@@ -809,8 +813,8 @@ def visualize_training_history(history, out_path='h5'):
     axes[0, 1].grid(True)
 
     # Plot Accuracy
-    if 'train_acc' in history:
-        axes[1, 0].plot(epochs, history['train_acc'], label='Train Acc', color='blue')
+    if 'acc' in history:
+        axes[1, 0].plot(epochs, history['acc'], label='Train Acc', color='blue')
     if 'val_acc' in history:
         axes[1, 0].plot(epochs, history['val_acc'], label='Val Acc', color='orange')
     axes[1, 0].set_title('Accuracy')
@@ -819,9 +823,9 @@ def visualize_training_history(history, out_path='h5'):
     axes[1, 0].legend()
     axes[1, 0].grid(True)
 
-    # If there's val_loss, plot it, else maybe plot something else or leave empty
-    if 'val_cls_loss' in history:
-        axes[1, 1].plot(epochs, history['val_cls_loss'], label='Val CLS Loss', color='red')
+    # Plot benchmark metrics if available
+    if 'val_class_loss' in history:
+        axes[1, 1].plot(epochs, history['val_class_loss'], label='Val CLS Loss', color='red')
     if 'val_pep_loss' in history:
         axes[1, 1].plot(epochs, history['val_pep_loss'], label='Val PEP Loss', color='green')
     if 'val_mhc_loss' in history:
