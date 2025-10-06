@@ -207,7 +207,7 @@ def pmbind_multitask_plus(max_pep_len: int,
         return_att_weights=True,
         self_attn_mhc=False,  # Prevent both peptide and MHC self-attention in this layer
         apply_rope=True,
-        name="pmhc_2d_masked_attention",
+        name="pmhc_2d_masked_attention2",
         attention_dropout=drop_out_rate/2,
         output_dropout=drop_out_rate/2
     )(pmhc_concat, pep_mask_in, mhc_mask_in)

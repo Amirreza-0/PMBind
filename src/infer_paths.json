@@ -1,0 +1,10 @@
+{
+  "allele_seq_path": "../data/alleles/aligned_PMGen_class_1.csv",
+  "embedding_key_path": "/media/amirreza/Crucial-500/ESM/esmc_600m/PMGen_whole_seq/mhc1_encodings.csv",
+  "embedding_table_path": "/media/amirreza/Crucial-500/ESM/esmc_600m/PMGen_whole_seq/mhc1_encodings.npz",
+  "val_parquet_path": "../data/parquets/mhc1/seed_splits/val_seed_999.parquet",
+  "train_parquet_path": "../data/parquets/mhc1/seed_splits/train_seed_999.parquet",
+  "bench1_parquet_path": "../data/parquets/mhc1/seed_splits/test_set2_rare_samples_seed_999.parquet",
+  "bench2_parquet_path": "../data/parquets/mhc1/benchmarks/benchmark_covidtest_data_set.parquet",
+  "bench3_parquet_path": "../data/parquets/mhc1/independent_test/test_set.parquet"
+}

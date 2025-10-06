@@ -27,7 +27,6 @@ from Bio.Align.Applications import MafftCommandline
 from collections import Counter
 from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
-
 # Create a reverse mapping from a BLOSUM62 vector to an amino acid character.
 # The score lists are converted to tuples so they can be used as dictionary keys.
 # Constants
@@ -80,29 +79,52 @@ BLOSUM62 = {
 }
 
 BLOSUM62_N = {
- "A": [0.533, 0.2, 0.133, 0.133, 0.267, 0.2, 0.2, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.133, 0.2, 0.333, 0.267, 0.067, 0.133, 0.267, 0.133, 0.2, 0.267],
- "R": [0.2, 0.6, 0.267, 0.133, 0.067, 0.333, 0.267, 0.133, 0.267, 0.067, 0.133, 0.4, 0.2, 0.067, 0.133, 0.2, 0.2, 0.067, 0.133, 0.067, 0.2, 0.267, 0.2],
- "N": [0.133, 0.267, 0.667, 0.333, 0.067, 0.267, 0.267, 0.267, 0.333, 0.067, 0.067, 0.267, 0.133, 0.067, 0.133, 0.333, 0.267, 0.0, 0.133, 0.067, 0.467, 0.267, 0.2],
- "D": [0.133, 0.133, 0.333, 0.667, 0.067, 0.267, 0.4, 0.2, 0.2, 0.067, 0.0, 0.2, 0.067, 0.067, 0.2, 0.267, 0.2, 0.0, 0.067, 0.067, 0.533, 0.333, 0.2],
- "C": [0.267, 0.067, 0.067, 0.067, 0.867, 0.067, 0.0, 0.067, 0.067, 0.2, 0.2, 0.067, 0.2, 0.133, 0.067, 0.2, 0.2, 0.133, 0.133, 0.2, 0.067, 0.067, 0.133],
- "Q": [0.2, 0.333, 0.267, 0.267, 0.067, 0.6, 0.4, 0.133, 0.267, 0.067, 0.133, 0.333, 0.267, 0.067, 0.2, 0.267, 0.2, 0.133, 0.2, 0.133, 0.267, 0.467, 0.2],
- "E": [0.2, 0.267, 0.267, 0.4, 0.0, 0.4, 0.6, 0.133, 0.267, 0.067, 0.067, 0.333, 0.133, 0.067, 0.2, 0.267, 0.2, 0.067, 0.133, 0.133, 0.333, 0.533, 0.2],
- "G": [0.267, 0.133, 0.267, 0.2, 0.067, 0.133, 0.133, 0.667, 0.133, 0.0, 0.0, 0.133, 0.067, 0.067, 0.133, 0.267, 0.133, 0.133, 0.067, 0.067, 0.2, 0.133, 0.2],
- "H": [0.133, 0.267, 0.333, 0.2, 0.067, 0.267, 0.267, 0.133, 0.8, 0.067, 0.067, 0.2, 0.133, 0.2, 0.133, 0.2, 0.133, 0.133, 0.4, 0.067, 0.267, 0.267, 0.2],
- "I": [0.2, 0.067, 0.067, 0.067, 0.2, 0.067, 0.067, 0.0, 0.067, 0.533, 0.4, 0.067, 0.333, 0.267, 0.067, 0.133, 0.2, 0.067, 0.2, 0.467, 0.067, 0.067, 0.2],
- "L": [0.2, 0.133, 0.067, 0.0, 0.2, 0.133, 0.067, 0.0, 0.067, 0.4, 0.533, 0.133, 0.4, 0.267, 0.067, 0.133, 0.2, 0.133, 0.2, 0.333, 0.0, 0.067, 0.2],
- "K": [0.2, 0.4, 0.267, 0.2, 0.067, 0.333, 0.333, 0.133, 0.2, 0.067, 0.133, 0.6, 0.2, 0.067, 0.2, 0.267, 0.2, 0.067, 0.133, 0.133, 0.267, 0.333, 0.2],
- "M": [0.2, 0.2, 0.133, 0.067, 0.2, 0.267, 0.133, 0.067, 0.133, 0.333, 0.4, 0.2, 0.6, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.333, 0.067, 0.2, 0.2],
- "F": [0.133, 0.067, 0.067, 0.067, 0.133, 0.067, 0.067, 0.067, 0.2, 0.267, 0.267, 0.067, 0.267, 0.667, 0.0, 0.133, 0.133, 0.333, 0.467, 0.2, 0.067, 0.067, 0.2],
- "P": [0.2, 0.133, 0.133, 0.2, 0.067, 0.2, 0.2, 0.133, 0.133, 0.067, 0.067, 0.2, 0.133, 0.0, 0.733, 0.2, 0.2, 0.0, 0.067, 0.133, 0.133, 0.2, 0.133],
- "S": [0.333, 0.2, 0.333, 0.267, 0.2, 0.267, 0.267, 0.267, 0.2, 0.133, 0.133, 0.267, 0.2, 0.133, 0.2, 0.533, 0.333, 0.067, 0.133, 0.133, 0.267, 0.267, 0.267],
- "T": [0.267, 0.2, 0.267, 0.2, 0.2, 0.2, 0.2, 0.133, 0.133, 0.2, 0.2, 0.2, 0.2, 0.133, 0.2, 0.333, 0.6, 0.133, 0.133, 0.267, 0.2, 0.2, 0.267],
- "W": [0.067, 0.067, 0.0, 0.0, 0.133, 0.133, 0.067, 0.133, 0.133, 0.067, 0.133, 0.067, 0.2, 0.333, 0.0, 0.067, 0.133, 1.0, 0.4, 0.067, 0.0, 0.067, 0.133],
- "Y": [0.133, 0.133, 0.133, 0.067, 0.133, 0.2, 0.133, 0.067, 0.4, 0.2, 0.2, 0.133, 0.2, 0.467, 0.067, 0.133, 0.133, 0.4, 0.733, 0.2, 0.067, 0.133, 0.2],
- "V": [0.267, 0.067, 0.067, 0.067, 0.2, 0.133, 0.133, 0.067, 0.067, 0.467, 0.333, 0.133, 0.333, 0.2, 0.133, 0.133, 0.267, 0.067, 0.2, 0.533, 0.067, 0.133, 0.2],
- "B": [0.133, 0.2, 0.467, 0.533, 0.067, 0.267, 0.333, 0.2, 0.267, 0.067, 0.0, 0.267, 0.067, 0.067, 0.133, 0.267, 0.2, 0.0, 0.067, 0.067, 0.533, 0.333, 0.2],
- "Z": [0.2, 0.267, 0.267, 0.333, 0.067, 0.467, 0.533, 0.133, 0.267, 0.067, 0.067, 0.333, 0.2, 0.067, 0.2, 0.267, 0.2, 0.067, 0.133, 0.133, 0.333, 0.533, 0.2],
- "X": [0.267, 0.2, 0.2, 0.2, 0.133, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.133, 0.267, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.2]
+    "A": [0.533, 0.2, 0.133, 0.133, 0.267, 0.2, 0.2, 0.267, 0.133, 0.2, 0.2, 0.2, 0.2, 0.133, 0.2, 0.333, 0.267, 0.067,
+          0.133, 0.267, 0.133, 0.2, 0.267],
+    "R": [0.2, 0.6, 0.267, 0.133, 0.067, 0.333, 0.267, 0.133, 0.267, 0.067, 0.133, 0.4, 0.2, 0.067, 0.133, 0.2, 0.2,
+          0.067, 0.133, 0.067, 0.2, 0.267, 0.2],
+    "N": [0.133, 0.267, 0.667, 0.333, 0.067, 0.267, 0.267, 0.267, 0.333, 0.067, 0.067, 0.267, 0.133, 0.067, 0.133,
+          0.333, 0.267, 0.0, 0.133, 0.067, 0.467, 0.267, 0.2],
+    "D": [0.133, 0.133, 0.333, 0.667, 0.067, 0.267, 0.4, 0.2, 0.2, 0.067, 0.0, 0.2, 0.067, 0.067, 0.2, 0.267, 0.2, 0.0,
+          0.067, 0.067, 0.533, 0.333, 0.2],
+    "C": [0.267, 0.067, 0.067, 0.067, 0.867, 0.067, 0.0, 0.067, 0.067, 0.2, 0.2, 0.067, 0.2, 0.133, 0.067, 0.2, 0.2,
+          0.133, 0.133, 0.2, 0.067, 0.067, 0.133],
+    "Q": [0.2, 0.333, 0.267, 0.267, 0.067, 0.6, 0.4, 0.133, 0.267, 0.067, 0.133, 0.333, 0.267, 0.067, 0.2, 0.267, 0.2,
+          0.133, 0.2, 0.133, 0.267, 0.467, 0.2],
+    "E": [0.2, 0.267, 0.267, 0.4, 0.0, 0.4, 0.6, 0.133, 0.267, 0.067, 0.067, 0.333, 0.133, 0.067, 0.2, 0.267, 0.2,
+          0.067, 0.133, 0.133, 0.333, 0.533, 0.2],
+    "G": [0.267, 0.133, 0.267, 0.2, 0.067, 0.133, 0.133, 0.667, 0.133, 0.0, 0.0, 0.133, 0.067, 0.067, 0.133, 0.267,
+          0.133, 0.133, 0.067, 0.067, 0.2, 0.133, 0.2],
+    "H": [0.133, 0.267, 0.333, 0.2, 0.067, 0.267, 0.267, 0.133, 0.8, 0.067, 0.067, 0.2, 0.133, 0.2, 0.133, 0.2, 0.133,
+          0.133, 0.4, 0.067, 0.267, 0.267, 0.2],
+    "I": [0.2, 0.067, 0.067, 0.067, 0.2, 0.067, 0.067, 0.0, 0.067, 0.533, 0.4, 0.067, 0.333, 0.267, 0.067, 0.133, 0.2,
+          0.067, 0.2, 0.467, 0.067, 0.067, 0.2],
+    "L": [0.2, 0.133, 0.067, 0.0, 0.2, 0.133, 0.067, 0.0, 0.067, 0.4, 0.533, 0.133, 0.4, 0.267, 0.067, 0.133, 0.2,
+          0.133, 0.2, 0.333, 0.0, 0.067, 0.2],
+    "K": [0.2, 0.4, 0.267, 0.2, 0.067, 0.333, 0.333, 0.133, 0.2, 0.067, 0.133, 0.6, 0.2, 0.067, 0.2, 0.267, 0.2, 0.067,
+          0.133, 0.133, 0.267, 0.333, 0.2],
+    "M": [0.2, 0.2, 0.133, 0.067, 0.2, 0.267, 0.133, 0.067, 0.133, 0.333, 0.4, 0.2, 0.6, 0.267, 0.133, 0.2, 0.2, 0.2,
+          0.2, 0.333, 0.067, 0.2, 0.2],
+    "F": [0.133, 0.067, 0.067, 0.067, 0.133, 0.067, 0.067, 0.067, 0.2, 0.267, 0.267, 0.067, 0.267, 0.667, 0.0, 0.133,
+          0.133, 0.333, 0.467, 0.2, 0.067, 0.067, 0.2],
+    "P": [0.2, 0.133, 0.133, 0.2, 0.067, 0.2, 0.2, 0.133, 0.133, 0.067, 0.067, 0.2, 0.133, 0.0, 0.733, 0.2, 0.2, 0.0,
+          0.067, 0.133, 0.133, 0.2, 0.133],
+    "S": [0.333, 0.2, 0.333, 0.267, 0.2, 0.267, 0.267, 0.267, 0.2, 0.133, 0.133, 0.267, 0.2, 0.133, 0.2, 0.533, 0.333,
+          0.067, 0.133, 0.133, 0.267, 0.267, 0.267],
+    "T": [0.267, 0.2, 0.267, 0.2, 0.2, 0.2, 0.2, 0.133, 0.133, 0.2, 0.2, 0.2, 0.2, 0.133, 0.2, 0.333, 0.6, 0.133, 0.133,
+          0.267, 0.2, 0.2, 0.267],
+    "W": [0.067, 0.067, 0.0, 0.0, 0.133, 0.133, 0.067, 0.133, 0.133, 0.067, 0.133, 0.067, 0.2, 0.333, 0.0, 0.067, 0.133,
+          1.0, 0.4, 0.067, 0.0, 0.067, 0.133],
+    "Y": [0.133, 0.133, 0.133, 0.067, 0.133, 0.2, 0.133, 0.067, 0.4, 0.2, 0.2, 0.133, 0.2, 0.467, 0.067, 0.133, 0.133,
+          0.4, 0.733, 0.2, 0.067, 0.133, 0.2],
+    "V": [0.267, 0.067, 0.067, 0.067, 0.2, 0.133, 0.133, 0.067, 0.067, 0.467, 0.333, 0.133, 0.333, 0.2, 0.133, 0.133,
+          0.267, 0.067, 0.2, 0.533, 0.067, 0.133, 0.2],
+    "B": [0.133, 0.2, 0.467, 0.533, 0.067, 0.267, 0.333, 0.2, 0.267, 0.067, 0.0, 0.267, 0.067, 0.067, 0.133, 0.267, 0.2,
+          0.0, 0.067, 0.067, 0.533, 0.333, 0.2],
+    "Z": [0.2, 0.267, 0.267, 0.333, 0.067, 0.467, 0.533, 0.133, 0.267, 0.067, 0.067, 0.333, 0.2, 0.067, 0.2, 0.267, 0.2,
+          0.067, 0.133, 0.133, 0.333, 0.533, 0.2],
+    "X": [0.267, 0.2, 0.2, 0.2, 0.133, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.133, 0.267, 0.267, 0.133, 0.2,
+          0.2, 0.2, 0.2, 0.2]
 
 }
 # Create a reverse mapping from a BLOSUM62 vector to an amino acid character.
@@ -117,19 +139,20 @@ AMINO_ACID_MAP = {tuple(v): k for k, v in BLOSUM62.items()}
 
 AA = "ACDEFGHIKLMNPQRSTVWY"
 AA_TO_INT = {a: i for i, a in enumerate(AA)}
-PAD_INDEX_OHE = len(AA) # 20 total chars for OHE
+PAD_INDEX_OHE = len(AA)  # 20 total chars for OHE
 
 # Create a mapping from Amino Acid to an integer index
 AA_BLOSUM = "ARNDCQEGHILKMFPSTWYVBZX"
 AA_TO_BLOSUM_IDX = {aa: i for i, aa in enumerate(AA_BLOSUM)}
-PAD_INDEX_62 = len(AA_BLOSUM) # The new padding index is 23
+PAD_INDEX_62 = len(AA_BLOSUM)  # The new padding index is 23
 
 # Create a constant TensorFlow tensor to act as a lookup table
 BLOSUM62_VECTORS = np.array([BLOSUM62[aa] for aa in AA_BLOSUM] + [[0.0] * 23], dtype=np.float32)
 
+
 def seq_to_onehot(sequence: str, max_seq_len: int) -> np.ndarray:
     """Convert peptide sequence to one-hot encoding"""
-    arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32) # initialize padding with 0
+    arr = np.full((max_seq_len, 21), PAD_VALUE, dtype=np.float32)  # initialize padding with 0
     for j, aa in enumerate(sequence.upper()[:max_seq_len]):
         arr[j, AA_TO_INT.get(aa, PAD_INDEX_OHE)] = 1.0
         # print number of UNKs in the sequence
@@ -182,6 +205,7 @@ def OHE_to_seq_single(ohe: np.ndarray, gap=False) -> str:
             aa_index = np.argmax(ohe[j])  # Get index of the max value in one-hot encoding
             seq.append(AA[aa_index])
     return ''.join(seq)  # Join the list into a string
+
 
 def seq_to_blossom62(sequence: str, max_seq_len: int) -> np.ndarray:
     """
@@ -321,6 +345,7 @@ def get_embed_key_class2(key, embed_map):
     else:
         raise ValueError(f"Unexpected MHC class II key format: '{key}'")
 
+
 ### TensorFlow Layers and Functions
 @tf.function
 def _neg_inf(dtype: tf.dtypes.DType) -> tf.Tensor:
@@ -329,6 +354,7 @@ def _neg_inf(dtype: tf.dtypes.DType) -> tf.Tensor:
     if dtype == tf.float16 or dtype == tf.bfloat16:
         return tf.constant(-1e4, dtype=dtype)
     return tf.constant(-1e9, dtype=dtype)
+
 
 @tf.keras.utils.register_keras_serializable(package='Custom', name='AttentionLayer')
 class AttentionLayer(keras.layers.Layer):
@@ -349,6 +375,7 @@ class AttentionLayer(keras.layers.Layer):
         mask_token (float): Value for masked tokens.
         pad_token (float): Value for padded tokens.
     """
+
     def __init__(self, query_dim, context_dim, output_dim, type, heads=4,
                  resnet=True, return_att_weights=False, name='attention',
                  epsilon=1e-6, gate=True, mask_token=-1., pad_token=-2.):
@@ -451,7 +478,7 @@ class AttentionLayer(keras.layers.Layer):
 
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='MaskedEmbedding')
 class MaskedEmbedding(keras.layers.Layer):
-    def __init__(self, mask_token=-1., pad_token=-2., name='masked_embedding'):
+    def __init__(self, mask_token=-1., pad_token=-2., name='masked_embedding', **kwargs):
         super().__init__(name=name)
         self.mask_token = mask_token
         self.pad_token = pad_token
@@ -479,6 +506,7 @@ class MaskedEmbedding(keras.layers.Layer):
         })
         return config
 
+
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='PositionalEncoding')
 class PositionalEncoding(keras.layers.Layer):
     """
@@ -488,6 +516,7 @@ class PositionalEncoding(keras.layers.Layer):
         embed_dim (int): Dimension of embeddings (must match input last dim).
         max_len (int): Maximum sequence length expected (used to precompute encodings).
     """
+
     def __init__(self, embed_dim, pos_range=100, mask_token=-1., pad_token=-2., name='positional_encoding', **kwargs):
         super().__init__(name=name)
         self.embed_dim = embed_dim
@@ -524,6 +553,7 @@ class PositionalEncoding(keras.layers.Layer):
         mask = tf.where(mask == self.pad_token, tf.cast(0.0, x.dtype), tf.cast(1.0, x.dtype))
         pe = tf.cast(pe, x.dtype) * mask  # zero out positions where mask is 0
         return x + pe
+
 
 @tf.function
 def select_indices(ind, n, m_range):
@@ -573,6 +603,7 @@ def select_indices(ind, n, m_range):
 
     return tf.map_fn(per_batch_select, ind, dtype=tf.int32)
 
+
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='AnchorPositionExtractor')
 class AnchorPositionExtractor(keras.layers.Layer):
     def __init__(self, num_anchors, dist_thr, initial_temperature=1.0, name='anchor_extractor', project=True,
@@ -615,6 +646,7 @@ class AnchorPositionExtractor(keras.layers.Layer):
             trainable=True,
             name='log_temperature'
         )
+
     @tf.function(reduce_retracing=True)
     def call(self, input, mask):  # (B,N,E) this is peptide embedding and (B,N) for mask
 
@@ -683,6 +715,7 @@ class AnchorPositionExtractor(keras.layers.Layer):
         sorted_selected_output = tf.gather(input, sorted_selected_inds, axis=1, batch_dims=1)  # (B,num_anchors,E)
         return sorted_selected_inds, sorted_selected_weights, sorted_selected_output
 
+
 @tf.keras.utils.register_keras_serializable(package='custom_layers', name='concat_mask')
 class ConcatMask(keras.layers.Layer):
     def __init__(self, name='concat_mask', **kwargs):
@@ -719,9 +752,6 @@ class SplitLayer(keras.layers.Layer):
             List of tensors split along the second dimension.
         """
         return tf.split(x, num_or_size_splits=self.split_size, axis=1)  # Split along the second dimension
-
-
-
 
 
 @tf.function(reduce_retracing=True)
@@ -770,6 +800,7 @@ def masked_categorical_crossentropy(y_true_and_pred, mask, pad_token=-2.0, sampl
     ce_loss = tf.math.divide_no_nan(total_loss, total_weight)
     return tf.cast(ce_loss, tf.float32)
 
+
 @tf.function
 def split_y_true_y_pred(y_true_y_pred):
     """
@@ -790,9 +821,10 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
     """
     Custom self-attention layer that supports 2D masks.
     """
+
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
                  return_att_weights=False, name='SelfAttentionWith2DMask',
-                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True):
+                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, apply_rope=True, **kwargs):
         super().__init__(name=name)
         self.query_dim = query_dim
         self.context_dim = context_dim
@@ -855,16 +887,21 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         p_mask = tf.where(p_mask == self.pad_token, x=0., y=1.)  # (B, N)
         m_mask = tf.where(m_mask == self.pad_token, x=0., y=1.)  # (B, M)
 
-        q = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc , self.compute_dtype), tf.cast(self.q_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        k = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.k_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        v = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.v_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        g = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.g_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        q = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.q_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.k_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.v_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        g = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.g_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
 
         if self.apply_rope:
             q = self.rope(q)
             k = self.rope(k)
 
-        att = tf.einsum('bhxe,bhye->bhxy', q, k) * tf.cast(self.scale, self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
+        att = tf.einsum('bhxe,bhye->bhxy', q, k) * tf.cast(self.scale,
+                                                           self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
         # Create 2D mask
         mask_2d = self.mask_2d(p_mask, m_mask)
         mask_2d = tf.cast(mask_2d, self.compute_dtype)  # (B, N+M, N+M)
@@ -916,15 +953,16 @@ class SelfAttentionWith2DMask(keras.layers.Layer):
         return final_mask
 
 
-@tf.keras.utils.register_keras_serializable(package='custom_layers', name='SelfAttentionWith2DMask')
+@tf.keras.utils.register_keras_serializable(package='custom_layers', name='SelfAttentionWith2DMask2')
 class SelfAttentionWith2DMask2(keras.layers.Layer):
     """
     Custom self-attention layer that supports 2D masks with dropout.
     """
+
     def __init__(self, query_dim, context_dim, output_dim, heads=4,
-                 return_att_weights=False, name='SelfAttentionWith2DMask',
-                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True, 
-                 apply_rope=True, attention_dropout=0.0, output_dropout=0.0):
+                 return_att_weights=False, name='SelfAttentionWith2DMask2',
+                 epsilon=1e-6, mask_token=-1., pad_token=-2., self_attn_mhc=True,
+                 apply_rope=True, attention_dropout=0.0, output_dropout=0.0, **kwargs):
         super().__init__(name=name)
         self.query_dim = query_dim
         self.context_dim = context_dim
@@ -994,25 +1032,30 @@ class SelfAttentionWith2DMask2(keras.layers.Layer):
         p_mask = tf.where(p_mask == self.pad_token, x=0., y=1.)  # (B, N)
         m_mask = tf.where(m_mask == self.pad_token, x=0., y=1.)  # (B, M)
 
-        q = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc , self.compute_dtype), tf.cast(self.q_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        k = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.k_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        v = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.v_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
-        g = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype), tf.cast(self.g_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        q = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.q_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        k = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.k_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        v = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.v_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
+        g = tf.einsum('bxd,hde->bhxe', tf.cast(x_pmhc, self.compute_dtype),
+                      tf.cast(self.g_proj, self.compute_dtype))  # (B, N+M, E) * (H, E, D) -> (B, H, N+M, D)
 
         if self.apply_rope:
             q = self.rope(q)
             k = self.rope(k)
 
-        att = tf.einsum('bhxe,bhye->bhxy', q, k) * tf.cast(self.scale, self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
+        att = tf.einsum('bhxe,bhye->bhxy', q, k) * tf.cast(self.scale,
+                                                           self.compute_dtype)  # (B, H, N+M, D) * (B, H, D, N+M) -> (B, H, N+M, N+M)
         # Create 2D mask
         mask_2d = self.mask_2d(p_mask, m_mask)
         mask_2d = tf.cast(mask_2d, self.compute_dtype)  # (B, N+M, N+M)
         mask_2d_neg = (1.0 - mask_2d) * _neg_inf(att.dtype)  # Apply mask to attention scores
         att = tf.nn.softmax(att + tf.expand_dims(mask_2d_neg, axis=1), axis=-1)  # Apply softmax to attention scores
-        
+
         # Apply attention dropout
         att = self.attention_dropout(att, training=training)
-        
+
         att *= tf.expand_dims(mask_2d,
                               axis=1)  # remove the impact of row wise attention of padded tokens. since all are 1e-9
         out = tf.matmul(att, v)  # (B, H, N+M, N+M) * (B, H, N+M, D) -> (B, H, N+M, D)
@@ -1021,10 +1064,10 @@ class SelfAttentionWith2DMask2(keras.layers.Layer):
         out = tf.reshape(out, [tf.shape(x_pmhc)[0], tf.shape(x_pmhc)[1], self.heads * self.att_dim])
         out = tf.matmul(out, tf.cast(self.out_w, self.compute_dtype)) + tf.cast(self.out_b, self.compute_dtype)
         out = self.norm2(out)
-        
+
         # Apply output dropout
         out = self.output_dropout(out, training=training)
-        
+
         if self.return_att_weights:
             return out, att
         else:
@@ -1080,6 +1123,7 @@ class SelfAttentionWith2DMask2(keras.layers.Layer):
         })
         return config
 
+
 @tf.keras.utils.register_keras_serializable(package='Custom', name='SubtractLayer')
 class SubtractLayer(keras.layers.Layer):
     """
@@ -1122,7 +1166,7 @@ class SubtractLayer(keras.layers.Layer):
         pep_mask_4d = pep_mask[:, tf.newaxis, :, tf.newaxis]  # (B,1,P,1)
         pep_mask_expanded = tf.broadcast_to(pep_mask_4d, (B, M, P, D))  # (B,M,P,D)
         pep_mask_PD = tf.reshape(pep_mask_expanded, (B, M, P_D))  # (B,M,P*D)
-        
+
         # mhc mask: (B,M) -> (B,M,1,1) -> (B,M,P,D) via broadcasting  
         mhc_mask_4d = mhc_mask[:, :, tf.newaxis, tf.newaxis]  # (B,M,1,1)
         mhc_mask_expanded = tf.broadcast_to(mhc_mask_4d, (B, M, P, D))  # (B,M,P,D)
@@ -1167,6 +1211,7 @@ class GlobalMaxPooling1D(layers.Layer):
 
     def call(self, input_tensor):
         return tf.math.reduce_max(input_tensor, axis=self.axis, keepdims=False)
+
 
 @tf.keras.utils.register_keras_serializable(package='Custom', name='BinaryMCC')
 class BinaryMCC(tf.keras.metrics.Metric):
@@ -1227,6 +1272,7 @@ class BinaryMCC(tf.keras.metrics.Metric):
         self.fp.assign(0.0)
         self.fn.assign(0.0)
 
+
 @tf.keras.utils.register_keras_serializable(package='Custom', name='AsymmetricPenaltyBinaryCrossentropy')
 class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
     """
@@ -1257,7 +1303,7 @@ class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
 
         # Calculate optimal prediction points
         optimal_true1 = 1 - self.label_smoothing  # 0.9 when ε=0.1
-        optimal_true0 = self.label_smoothing      # 0.1 when ε=0.1
+        optimal_true0 = self.label_smoothing  # 0.1 when ε=0.1
 
         # Distance from optimal points
         dist_from_optimal_true1 = tf.abs(y_pred - optimal_true1)
@@ -1267,15 +1313,15 @@ class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
         # For true=1: Stronger penalty when moving toward 0 (opposing class)
         penalty_true1 = y_true * tf.where(
             y_pred < optimal_true1,  # Moving toward opposing class
-            self.asymmetry_strength * dist_from_optimal_true1**2,      # Strong penalty
-            self.asymmetry_strength * 0.3 * dist_from_optimal_true1**2  # Weak penalty
+            self.asymmetry_strength * dist_from_optimal_true1 ** 2,  # Strong penalty
+            self.asymmetry_strength * 0.3 * dist_from_optimal_true1 ** 2  # Weak penalty
         )
 
         # For true=0: Stronger penalty when moving toward 1 (opposing class)
         penalty_true0 = (1 - y_true) * tf.where(
             y_pred > optimal_true0,  # Moving toward opposing class
-            self.asymmetry_strength * dist_from_optimal_true0**2,      # Strong penalty
-            self.asymmetry_strength * 0.3 * dist_from_optimal_true0**2  # Weak penalty
+            self.asymmetry_strength * dist_from_optimal_true0 ** 2,  # Strong penalty
+            self.asymmetry_strength * 0.3 * dist_from_optimal_true0 ** 2  # Weak penalty
         )
 
         total_loss = base_loss + tf.reduce_mean(penalty_true1 + penalty_true0)
@@ -1308,6 +1354,7 @@ def load_embedding_db(npz_path: str):
         else:
             raise e
 
+
 def min_max_norm(emb, mhc_class=1):
     """min max of ESM3-open embeddings 25.09.2025"""
     if mhc_class == 2:
@@ -1317,8 +1364,9 @@ def min_max_norm(emb, mhc_class=1):
         min = -15360.0
         max = 1440.0
     # normalize embedding
-    emb_norm = 2 * (emb - min) / (max- min) - 1
+    emb_norm = 2 * (emb - min) / (max - min) - 1
     return emb_norm
+
 
 def log_norm_zscore(emb, eps=1e-9):
     """z-score normalization after log-transform"""
@@ -1327,6 +1375,7 @@ def log_norm_zscore(emb, eps=1e-9):
     mean, std = emb_log.mean(), emb_log.std()
     emb_norm = (emb_log - mean) / std
     return emb_norm
+
 
 def _preprocess_df_chunk(args):
     """Top-level helper for multiprocessing chunk processing."""
@@ -1352,12 +1401,14 @@ def _preprocess_df_chunk(args):
 
     return chunk
 
+
 def load_metadata(tfrecord_dir):
     """Load metadata from tfrecords directory"""
     metadata_path = os.path.join(tfrecord_dir, 'metadata.json')
     with open(metadata_path, 'r') as f:
         metadata = json.load(f)
     return metadata
+
 
 def load_embedding_table(lookup_path, metadata):
     """Load MHC embedding lookup table with correct dtype."""
@@ -1368,6 +1419,7 @@ def load_embedding_table(lookup_path, metadata):
         for i in range(num_embeddings):
             table[i] = data[str(i)]
     return tf.constant(table, dtype=tf.float32)
+
 
 def normalize_embedding_tf(emb, method="clip_norm1000"):
     """TensorFlow implementation of the normalization logic."""
@@ -1383,6 +1435,7 @@ def normalize_embedding_tf(emb, method="clip_norm1000"):
         return emb_norm
     else:
         return emb  # No normalization
+
 
 # Utility functions for handling embeddings and sequences
 def process_pdb_distance_matrix(pdb_path, threshold, peptide, chainid='A', carbon='CB'):
@@ -2019,7 +2072,6 @@ class Sampling(layers.Layer):
         return z, kl_loss
 
 
-
 def binary_focal_loss(y_true,
                       y_pred,
                       gamma=2.0,
@@ -2055,7 +2107,6 @@ def binary_focal_loss(y_true,
     return focal_loss
 
 
-
 def determine_conv_params(input_dim, output_dim, max_kernel_size=5, max_strides=2):
     """
     Determine kernel size and strides for a single Conv1D layer.
@@ -2078,6 +2129,7 @@ def determine_conv_params(input_dim, output_dim, max_kernel_size=5, max_strides=
         candidates.sort(key=lambda x: (x[1], x[0]))  # Prefer smaller strides, then kernel size
         return candidates[0]
     return None
+
 
 def determine_ks_dict(initial_input_dim, output_dims, max_kernel_size=50, max_strides=20):
     """

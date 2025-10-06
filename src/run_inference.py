@@ -17,7 +17,7 @@ import re
 # ==============================================================================
 # Load paths from training_paths.json
 script_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(script_dir, "training_paths.json")
+config_path = os.path.join(script_dir, "infer_paths.json")
 
 with open(config_path, "r") as f:
     PATHS_CONFIG = json.load(f)

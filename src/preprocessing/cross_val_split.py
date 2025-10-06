@@ -14,7 +14,7 @@ from collections import Counter
 pd.options.mode.copy_on_write = True
 KEY_TRANS = str.maketrans({'*': '', ':': '', ' ': '', '/': '_'})  # for vectorized cleaning
 
-MHC_CLASS = 1
+MHC_CLASS = 2
 
 # TODO run this in a for loop and generate sets with different seeds, in each set leave out one random allele.
 def median_down_sampling(df_path, seed):
@@ -44,7 +44,7 @@ def median_down_sampling(df_path, seed):
         neg_df = df[df['assigned_label'] == 0]
         # Group the current negatives to find the median size
         neg_groups = neg_df.groupby('allele')
-        median_count = int(neg_groups.size().mean())
+        median_count = int(neg_groups.size().median())
         print(f"current median: {median_count}")
         # If the median is 0 or no negatives can be dropped, break to avoid an infinite loop
         if median_count == 0:
@@ -52,9 +52,9 @@ def median_down_sampling(df_path, seed):
         indices_to_take = []
         # Iterate through negative groups to find rows to drop
         for name, group in tqdm(neg_groups, desc="Resampling negatives", total=len(neg_groups)):
-            if len(group) > median_count:
+            if len(group)//2 > median_count:
                 # Sample the rows from the group that we want to drop
-                drop_sample = group.sample(n=int(median_count // 1.7), random_state=42)
+                drop_sample = group.sample(n=int(median_count), random_state=seed)
                 indices_to_take.extend(drop_sample.index)
             else:
                 print(f"drop all for allele {name} with count {len(group)}")
@@ -559,7 +559,10 @@ def _anti_join(base, remove_df):
 
 def take_test_set_samples(fold):
     # test: all samples of 4 unique reduced_allele: SLA-30401, BOLA-300101, H-2-KK, HLA-A3004, HLA-B2701, HLA-C1701
-    test_alleles = ['SLA-30401', 'BOLA-300101', 'H-2-KK', 'HLA-A3004', 'HLA-B2701', 'HLA-C1701', 'MAMU-B06601']
+    if MHC_CLASS == 2:
+        test_alleles = ['H-2-IAD-A_H-2-IAD-B', 'HLA-DQA10501_HLA-DQB10402', 'HLA-DRA_HLA-DRB30301', 'HLA-DPA10301_HLA-DPB10402']
+    else:
+        test_alleles = ['SLA-30401', 'BOLA-300101', 'H-2-KK', 'HLA-A3004', 'HLA-B2701', 'HLA-C1701', 'MAMU-B06601']
     test_set = fold[fold['allele'].apply(clean_key).isin(test_alleles)].reset_index(
         drop=True)
     print(f"Test set created with {len(test_set)} samples from alleles: {test_alleles}")
@@ -569,7 +572,7 @@ def take_test_set_samples(fold):
         raise ValueError("Overlap with test pairs still exists after filtering.")
     return test_set, pmbind_filtered_remaining
 
-def leave_one_allele_out_split(pmbind_filtered):
+def leave_one_allele_out_split(pmbind_filtered, seed):
     # create test set with all samples of 4 unique reduced_allele: SLA-30401, BOLA-300101, H-2-KK, HLA-A3004, HLA-B2701, HLA-C1701
     # create validation set with some samples of these alleles: HLA-A0201, HLA-A0301, HLA-B2705, HLA-B0702, HLA-C0401, HLA-C0602
     # make sure no overlap between train/val/test and pmbind_filtered
@@ -579,7 +582,7 @@ def leave_one_allele_out_split(pmbind_filtered):
                    'PATR-B1301', 'SLA-20401', 'BOLA-601301']
     all_val_candidates = pmbind_filtered[
         pmbind_filtered['allele'].apply(clean_key).isin(val_alleles)].reset_index(drop=True)
-    val_set = all_val_candidates.groupby('allele').apply(lambda x: x.sample(min(len(x), 100), random_state=42)).reset_index(
+    val_set = all_val_candidates.groupby('allele').apply(lambda x: x.sample(min(len(x), 100), random_state=seed)).reset_index(
         drop=True)
 
     pmbind_filtered_remaining = _anti_join(pmbind_filtered, val_set)
@@ -851,7 +854,7 @@ def main():
         fold, rare_samples = median_down_sampling(df_path, seed)
         fold, benchmark_df_cache = remove_benchmark_samples(fold, benchmarks_dir=f"../../data/mhc{MHC_CLASS}/benchmarks")
         fold_test, fold_filtered = take_test_set_samples(fold)
-        fold_train, fold_val, = leave_one_allele_out_split(fold_filtered)
+        fold_train, fold_val, = leave_one_allele_out_split(fold_filtered, seed)
         statistics(fold_train, benchmark_df_cache, stats_dir=f"../../data/reforge/mhc{MHC_CLASS}/stats_{seed}")
         dataset_analysis(fold_train, benchmark_df_cache, stats_dir=f"../../data/reforge/mhc{MHC_CLASS}/stats_{seed}")
         allele_level_analysis(fold_train, benchmark_df_cache, stats_dir=f"../../data/reforge/mhc{MHC_CLASS}/stats_{seed}")

@@ -17,6 +17,10 @@ from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_prec
 from utils import (AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask,
                    MaskedEmbedding, reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython)
 
+from matplotlib.patches import Rectangle
+from matplotlib.gridspec import GridSpec
+from collections import Counter
+
 
 def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
     """
@@ -44,7 +48,6 @@ def visualize_tf_model(model_path='h5/bicross_encoder_decoder.h5'):
             'AnchorPositionExtractor': wrap_layer(AnchorPositionExtractor),
             'SplitLayer': wrap_layer(SplitLayer),
             'ConcatMask': wrap_layer(ConcatMask),
-            'ConcatBarcode': wrap_layer(ConcatBarcode),
             'MaskedEmbedding': wrap_layer(MaskedEmbedding),
         }
     )
@@ -693,22 +696,30 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
     )
 
     # Plot by Reduced Anchor Pair (old method for comparison)
-    anchor_pair_labels = df['long_mer'].apply(reduced_anchor_pair).astype('category')
-    unique_anchor_pairs = sorted(anchor_pair_labels.unique())
-    colors = sns.color_palette("hls", n_colors=len(unique_anchor_pairs))
-    anchor_color_map = {pair: color for pair, color in zip(unique_anchor_pairs, colors)}
-    if 'Short' in anchor_color_map:
-        anchor_color_map['Short'] = [0.7, 0.7, 0.7, 0.5]
+    # anchor_pair_labels = df['long_mer'].apply(reduced_anchor_pair).astype('category')
+    # unique_anchor_pairs = sorted(anchor_pair_labels.unique())
+    # colors = sns.color_palette("hls", n_colors=len(unique_anchor_pairs))
+    # anchor_color_map = {pair: color for pair, color in zip(unique_anchor_pairs, colors)}
+    # if 'Short' in anchor_color_map:
+    #     anchor_color_map['Short'] = [0.7, 0.7, 0.7, 0.5]
+    #
+    # _plot_umap(
+    #     embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
+    #     title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
+    #     filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_reduced.png"),
+    #     legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
+    #     legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
+    # )
 
-    _plot_umap(
-        embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
-        title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
-        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_reduced.png"),
-        legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
-        legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
+    # Plot by Anchor Pair with Amino Acid Colors
+    plot_anchor_pairs_with_amino_acid_colors_extended(
+        embedding=embedding,
+        peptide_sequences=df['long_mer'],
+        title=f'UMAP of {latent_type.capitalize()} Latents by Anchor Pairs\nColored by 1st Anchor AA (face) and 2nd Anchor AA (outline)',
+        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors.png"),
+        figsize=figsize,
+        point_size=point_size
     )
-
-    # Plot by Anchor Pair with Amino Acid Colors (new enhanced method)
     plot_anchor_pairs_with_amino_acid_colors(
         embedding=embedding,
         peptide_sequences=df['long_mer'],
@@ -717,6 +728,7 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         figsize=figsize,
         point_size=point_size
     )
+
 
     # Plot by C/N-terminal Amino Acid Type
     CN_peptide_df = df['long_mer'].apply(cn_terminal_amino_acids).apply(pd.Series)
@@ -892,18 +904,17 @@ def get_anchor_pair_amino_acids(peptide_seq: str) -> tuple:
 
 
 def plot_anchor_pairs_with_amino_acid_colors(
-    embedding: np.ndarray,
-    peptide_sequences: pd.Series,
-    title: str,
-    filename: str,
-    figsize: tuple = (15, 12),
-    point_size: int = 20,
-    edge_width: float = 1.5,
-    alpha: float = 0.8
+        embedding: np.ndarray,
+        peptide_sequences: pd.Series,
+        title: str,
+        filename: str,
+        figsize: tuple = (20, 8),
+        point_size: int = 30,
+        alpha: float = 0.6
 ):
     """
-    Plot UMAP embedding with points colored by first anchor amino acid
-    and outlined by second anchor amino acid color.
+    Plot UMAP embedding with side-by-side views of first and second anchor amino acids,
+    plus a combined view using marker shapes.
 
     Args:
         embedding: 2D UMAP embedding coordinates
@@ -912,101 +923,571 @@ def plot_anchor_pairs_with_amino_acid_colors(
         filename: Output filename
         figsize: Figure size
         point_size: Size of scatter points
-        edge_width: Width of outline
         alpha: Point transparency
     """
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
 
     # Get anchor pairs for all peptides
     anchor_pairs = peptide_sequences.apply(get_anchor_pair_amino_acids)
     first_anchors = anchor_pairs.apply(lambda x: x[0])
     second_anchors = anchor_pairs.apply(lambda x: x[1])
 
-    # Get unique amino acids for legend
+    # Get unique amino acids
     unique_first = sorted(set(first_anchors.values))
     unique_second = sorted(set(second_anchors.values))
 
-    # Plot points grouped by first anchor amino acid (face color)
+    # Define marker shapes for second anchor (for combined plot)
+    marker_shapes = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h', 'H', '8', 'P', 'X']
+    aa_to_marker = {aa: marker_shapes[i % len(marker_shapes)] for i, aa in enumerate(unique_second)}
+
+    # --- Panel 1: First Anchor ---
+    ax1 = axes[0]
+    for aa in unique_first:
+        mask = (first_anchors == aa)
+        if not np.any(mask):
+            continue
+        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
+        ax1.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            c=[color],
+            s=point_size,
+            alpha=alpha,
+            label=aa,
+            rasterized=True,
+            edgecolors='black',
+            linewidths=0.3
+        )
+
+    ax1.set_xlabel('UMAP Dimension 1', fontsize=12)
+    ax1.set_ylabel('UMAP Dimension 2', fontsize=12)
+    ax1.set_title('First Anchor (P2)', fontsize=14, fontweight='bold')
+    ax1.legend(title='Amino Acid', bbox_to_anchor=(1.02, 1), loc='upper left',
+               fontsize=9, ncol=1, framealpha=0.9)
+    ax1.grid(True, alpha=0.3)
+
+    # --- Panel 2: Second Anchor ---
+    ax2 = axes[1]
+    for aa in unique_second:
+        mask = (second_anchors == aa)
+        if not np.any(mask):
+            continue
+        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
+        ax2.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            c=[color],
+            s=point_size,
+            alpha=alpha,
+            label=aa,
+            rasterized=True,
+            edgecolors='black',
+            linewidths=0.3
+        )
+
+    ax2.set_xlabel('UMAP Dimension 1', fontsize=12)
+    ax2.set_ylabel('UMAP Dimension 2', fontsize=12)
+    ax2.set_title('Second Anchor (C-term)', fontsize=14, fontweight='bold')
+    ax2.legend(title='Amino Acid', bbox_to_anchor=(1.02, 1), loc='upper left',
+               fontsize=9, ncol=1, framealpha=0.9)
+    ax2.grid(True, alpha=0.3)
+
+    # --- Panel 3: Combined View (color = 1st anchor, shape = 2nd anchor) ---
+    ax3 = axes[2]
     for aa1 in unique_first:
         mask1 = (first_anchors == aa1)
         if not np.any(mask1):
             continue
+        color = AMINO_ACID_COLORS.get(aa1, AMINO_ACID_COLORS['X'])
 
-        # For this first anchor AA, plot points with different edge colors for second anchor
         for aa2 in unique_second:
             mask2 = (second_anchors == aa2)
             combined_mask = mask1 & mask2
-
             if not np.any(combined_mask):
                 continue
 
-            face_color = AMINO_ACID_COLORS.get(aa1, AMINO_ACID_COLORS['X'])
-            edge_color = AMINO_ACID_COLORS.get(aa2, AMINO_ACID_COLORS['X'])
-
-            ax.scatter(
+            marker = aa_to_marker[aa2]
+            ax3.scatter(
                 embedding[combined_mask, 0],
                 embedding[combined_mask, 1],
-                c=[face_color],
-                edgecolors=[edge_color],
-                s=point_size,
+                c=[color],
+                s=point_size * 1.2,
                 alpha=alpha,
-                linewidth=edge_width,
-                rasterized=True
+                marker=marker,
+                rasterized=True,
+                edgecolors='black',
+                linewidths=0.5
             )
 
-    # Create legends
-    # Legend for face colors (first anchor)
-    first_legend_elements = []
-    for aa in unique_first:
-        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
-        first_legend_elements.append(
-            plt.scatter([], [], c=[color], s=point_size, alpha=alpha,
-                       label=f'{aa} (1st anchor)')
-        )
+    ax3.set_xlabel('UMAP Dimension 1', fontsize=12)
+    ax3.set_ylabel('UMAP Dimension 2', fontsize=12)
+    ax3.set_title('Combined (Color=1st, Shape=2nd)', fontsize=14, fontweight='bold')
+    ax3.grid(True, alpha=0.3)
 
-    first_legend = ax.legend(
-        handles=first_legend_elements,
-        title='First Anchor (Face Color)',
+    # Create combined legend with both colors and shapes
+    # Color legend (first anchor)
+    color_handles = [
+        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X']),
+                   markersize=8, label=aa, markeredgecolor='black', markeredgewidth=0.5)
+        for aa in unique_first
+    ]
+    first_legend = ax3.legend(
+        handles=color_handles,
+        title='1st Anchor (Color)',
         bbox_to_anchor=(1.02, 1),
         loc='upper left',
-        fontsize=10,
-        title_fontsize=12
+        fontsize=8,
+        ncol=1,
+        framealpha=0.9
     )
-    ax.add_artist(first_legend)
+    ax3.add_artist(first_legend)
 
-    # Legend for edge colors (second anchor)
-    second_legend_elements = []
-    for aa in unique_second:
-        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
-        second_legend_elements.append(
-            plt.scatter([], [], c='white', edgecolors=[color], s=point_size,
-                       linewidth=edge_width, label=f'{aa} (2nd anchor)')
-        )
-
-    # Calculate position for second legend to avoid overlap
-    # Position it lower based on the number of items in the first legend
-    second_legend_y_position = max(0.1, 0.95 - len(unique_first) * 0.04)
-
-    second_legend = ax.legend(
-        handles=second_legend_elements,
-        title='Second Anchor (Edge Color)',
-        bbox_to_anchor=(1.02, second_legend_y_position),
+    # Shape legend (second anchor)
+    shape_handles = [
+        plt.Line2D([0], [0], marker=aa_to_marker[aa], color='w', markerfacecolor='gray',
+                   markersize=8, label=aa, markeredgecolor='black', markeredgewidth=0.5)
+        for aa in unique_second
+    ]
+    second_legend_y = max(0.1, 0.95 - len(unique_first) * 0.035)
+    ax3.legend(
+        handles=shape_handles,
+        title='2nd Anchor (Shape)',
+        bbox_to_anchor=(1.02, second_legend_y),
         loc='upper left',
-        fontsize=10,
-        title_fontsize=12
+        fontsize=8,
+        ncol=1,
+        framealpha=0.9
     )
 
-    # Set labels and title
-    ax.set_xlabel('UMAP Dimension 1', fontsize=14)
-    ax.set_ylabel('UMAP Dimension 2', fontsize=14)
-    ax.set_title(title, fontsize=16, fontweight='bold')
+    # Overall title
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=1.02)
 
     # Save plot
     plt.tight_layout()
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"✓ Anchor pair plot saved to {filename}")
+
+
+# Alternative: Heatmap-style visualization
+def plot_anchor_pairs_heatmap(
+        embedding: np.ndarray,
+        peptide_sequences: pd.Series,
+        title: str,
+        filename: str,
+        figsize: tuple = (14, 12),
+        bins: int = 50
+):
+    """
+    Alternative visualization: Show anchor pair combinations as a heatmap grid.
+
+    Args:
+        embedding: 2D UMAP embedding coordinates
+        peptide_sequences: Series of peptide sequences
+        title: Plot title
+        filename: Output filename
+        figsize: Figure size
+        bins: Number of bins for 2D histogram
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+
+    # Get anchor pairs
+    anchor_pairs = peptide_sequences.apply(get_anchor_pair_amino_acids)
+    first_anchors = anchor_pairs.apply(lambda x: x[0])
+    second_anchors = anchor_pairs.apply(lambda x: x[1])
+
+    # Get unique combinations
+    unique_pairs = sorted(set(zip(first_anchors, second_anchors)))
+
+    # Calculate grid dimensions
+    n_pairs = len(unique_pairs)
+    ncols = min(4, n_pairs)
+    nrows = (n_pairs + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+
+    for idx, (aa1, aa2) in enumerate(unique_pairs):
+        ax = axes[idx]
+        mask = (first_anchors == aa1) & (second_anchors == aa2)
+
+        if np.any(mask):
+            color = AMINO_ACID_COLORS.get(aa1, AMINO_ACID_COLORS['X'])
+            ax.scatter(
+                embedding[mask, 0],
+                embedding[mask, 1],
+                c=[color],
+                s=20,
+                alpha=0.6,
+                rasterized=True,
+                edgecolors='black',
+                linewidths=0.3
+            )
+            ax.set_title(f'{aa1} → {aa2}\n(n={np.sum(mask)})', fontsize=10, fontweight='bold')
+        else:
+            ax.set_title(f'{aa1} → {aa2}\n(n=0)', fontsize=10, color='gray')
+
+        ax.set_xlabel('UMAP 1', fontsize=8)
+        ax.set_ylabel('UMAP 2', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots
+    for idx in range(n_pairs, len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(filename.replace('.png', '_grid.png'), dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✓ Anchor pair grid plot saved to {filename.replace('.png', '_grid.png')}")
+
+def plot_anchor_pairs_with_amino_acid_colors_extended(
+        embedding: np.ndarray,
+        peptide_sequences: pd.Series,
+        title: str,
+        filename: str,
+        figsize: tuple = (20, 12),
+        point_size: int = 30,
+        alpha: float = 0.6,
+        show_top_n_pairs: int = 9
+):
+    """
+    Improved visualization showing anchor pairs with multiple views:
+    1. Side-by-side UMAP plots for each anchor position
+    2. Frequency heatmap of anchor pair combinations
+    3. Small multiples for most common anchor pairs
+
+    Args:
+        embedding: 2D UMAP embedding coordinates
+        peptide_sequences: Series of peptide sequences
+        title: Plot title
+        filename: Output filename
+        figsize: Figure size
+        point_size: Size of scatter points
+        alpha: Point transparency
+        show_top_n_pairs: Number of top anchor pairs to highlight in small multiples
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+
+    # Get anchor pairs for all peptides
+    anchor_pairs = peptide_sequences.apply(get_anchor_pair_amino_acids)
+    first_anchors = anchor_pairs.apply(lambda x: x[0])
+    second_anchors = anchor_pairs.apply(lambda x: x[1])
+
+    # Create combined anchor pair labels
+    pair_labels = first_anchors + '-' + second_anchors
+
+    # Count anchor pair frequencies
+    pair_counts = Counter(pair_labels)
+    top_pairs = [pair for pair, _ in pair_counts.most_common(show_top_n_pairs)]
+
+    # Set up the grid layout
+    fig = plt.figure(figsize=figsize)
+    gs = GridSpec(4, 4, figure=fig, hspace=0.35, wspace=0.3,
+                  height_ratios=[1.2, 1, 1, 1], width_ratios=[1, 1, 1, 1])
+
+    # === Top Row: Side-by-side anchor position plots ===
+    ax_first = fig.add_subplot(gs[0, 0:2])
+    ax_second = fig.add_subplot(gs[0, 2:4])
+
+    # Plot first anchor position
+    unique_first = sorted(set(first_anchors.values))
+    for aa in unique_first:
+        mask = (first_anchors == aa)
+        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
+        ax_first.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            c=[color],
+            s=point_size,
+            alpha=alpha,
+            label=aa,
+            edgecolors='white',
+            linewidth=0.5,
+            rasterized=True
+        )
+
+    ax_first.set_xlabel('UMAP Dimension 1', fontsize=12, fontweight='bold')
+    ax_first.set_ylabel('UMAP Dimension 2', fontsize=12, fontweight='bold')
+    ax_first.set_title('First Anchor Position (P2)', fontsize=14, fontweight='bold', pad=10)
+    ax_first.legend(loc='best', ncol=2, fontsize=9, framealpha=0.9)
+    ax_first.grid(True, alpha=0.3)
+
+    # Plot second anchor position
+    unique_second = sorted(set(second_anchors.values))
+    for aa in unique_second:
+        mask = (second_anchors == aa)
+        color = AMINO_ACID_COLORS.get(aa, AMINO_ACID_COLORS['X'])
+        ax_second.scatter(
+            embedding[mask, 0],
+            embedding[mask, 1],
+            c=[color],
+            s=point_size,
+            alpha=alpha,
+            label=aa,
+            edgecolors='white',
+            linewidth=0.5,
+            rasterized=True
+        )
+
+    ax_second.set_xlabel('UMAP Dimension 1', fontsize=12, fontweight='bold')
+    ax_second.set_ylabel('UMAP Dimension 2', fontsize=12, fontweight='bold')
+    ax_second.set_title('Second Anchor Position (C-terminal)', fontsize=14, fontweight='bold', pad=10)
+    ax_second.legend(loc='best', ncol=2, fontsize=9, framealpha=0.9)
+    ax_second.grid(True, alpha=0.3)
+
+    # === Middle Left: Anchor pair frequency heatmap ===
+    ax_heatmap = fig.add_subplot(gs[1, 0:2])
+
+    # Create frequency matrix
+    unique_pairs_first = sorted(unique_first)
+    unique_pairs_second = sorted(unique_second)
+    freq_matrix = np.zeros((len(unique_pairs_first), len(unique_pairs_second)))
+
+    for i, aa1 in enumerate(unique_pairs_first):
+        for j, aa2 in enumerate(unique_pairs_second):
+            pair_key = f"{aa1}-{aa2}"
+            freq_matrix[i, j] = pair_counts.get(pair_key, 0)
+
+    # Plot heatmap
+    sns.heatmap(
+        freq_matrix,
+        xticklabels=unique_pairs_second,
+        yticklabels=unique_pairs_first,
+        annot=True,
+        fmt='.0f',
+        cmap='YlOrRd',
+        ax=ax_heatmap,
+        cbar_kws={'label': 'Count'},
+        linewidths=0.5,
+        linecolor='gray'
+    )
+    ax_heatmap.set_xlabel('Second Anchor (C-terminal)', fontsize=11, fontweight='bold')
+    ax_heatmap.set_ylabel('First Anchor (P2)', fontsize=11, fontweight='bold')
+    ax_heatmap.set_title('Anchor Pair Frequency Distribution', fontsize=12, fontweight='bold', pad=10)
+
+    # === Middle Right: Top anchor pairs bar chart ===
+    ax_bars = fig.add_subplot(gs[1, 2:4])
+
+    top_pair_names = [pair for pair, _ in pair_counts.most_common(12)]
+    top_pair_values = [count for _, count in pair_counts.most_common(12)]
+
+    # Create color list for bars based on first anchor
+    bar_colors = []
+    for pair in top_pair_names:
+        first_aa = pair.split('-')[0]
+        bar_colors.append(AMINO_ACID_COLORS.get(first_aa, AMINO_ACID_COLORS['X']))
+
+    bars = ax_bars.barh(range(len(top_pair_names)), top_pair_values, color=bar_colors, alpha=0.7, edgecolor='black')
+    ax_bars.set_yticks(range(len(top_pair_names)))
+    ax_bars.set_yticklabels(top_pair_names, fontsize=10)
+    ax_bars.set_xlabel('Count', fontsize=11, fontweight='bold')
+    ax_bars.set_title('Most Common Anchor Pairs', fontsize=12, fontweight='bold', pad=10)
+    ax_bars.grid(True, alpha=0.3, axis='x')
+    ax_bars.invert_yaxis()
+
+    # Add count labels on bars
+    for i, (bar, count) in enumerate(zip(bars, top_pair_values)):
+        ax_bars.text(count, i, f'  {count}', va='center', fontsize=9, fontweight='bold')
+
+    # === Bottom Row: Small multiples for top anchor pairs ===
+    n_cols = 4
+    n_rows = 2
+
+    for idx, pair in enumerate(top_pairs[:n_cols * n_rows]):
+        row = idx // n_cols + 1
+        col = idx % n_cols
+        ax_small = fig.add_subplot(gs[row + 1, col])
+
+        # Highlight this specific pair
+        mask = (pair_labels == pair)
+
+        # Plot all points in gray
+        ax_small.scatter(
+            embedding[~mask, 0],
+            embedding[~mask, 1],
+            c='lightgray',
+            s=point_size * 0.3,
+            alpha=0.2,
+            rasterized=True
+        )
+
+        # Highlight the specific pair
+        if np.any(mask):
+            first_aa = pair.split('-')[0]
+            color = AMINO_ACID_COLORS.get(first_aa, AMINO_ACID_COLORS['X'])
+            ax_small.scatter(
+                embedding[mask, 0],
+                embedding[mask, 1],
+                c=[color],
+                s=point_size * 1.2,
+                alpha=0.8,
+                edgecolors='black',
+                linewidth=1,
+                rasterized=True
+            )
+
+        count = pair_counts[pair]
+        ax_small.set_title(f'{pair}\n(n={count})', fontsize=10, fontweight='bold')
+        ax_small.set_xticks([])
+        ax_small.set_yticks([])
+        ax_small.grid(True, alpha=0.2)
+
+        # Add border color based on first anchor
+        first_aa = pair.split('-')[0]
+        border_color = AMINO_ACID_COLORS.get(first_aa, AMINO_ACID_COLORS['X'])
+        for spine in ax_small.spines.values():
+            spine.set_edgecolor(border_color)
+            spine.set_linewidth(3)
+
+    # Main title
+    fig.suptitle(title, fontsize=18, fontweight='bold', y=0.98)
+
+    # Save plot
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✓ Improved anchor pair plot saved to {filename}")
+
+
+def plot_anchor_pairs_interactive_style(
+        embedding: np.ndarray,
+        peptide_sequences: pd.Series,
+        title: str,
+        filename: str,
+        figsize: tuple = (16, 10),
+        point_size: int = 40,
+        alpha: float = 0.7
+):
+    """
+    Alternative visualization using bivariate color mapping where both anchors
+    are encoded in a single color using RGB channels.
+
+    Args:
+        embedding: 2D UMAP embedding coordinates
+        peptide_sequences: Series of peptide sequences
+        title: Plot title
+        filename: Output filename
+        figsize: Figure size
+        point_size: Size of scatter points
+        alpha: Point transparency
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, (ax_main, ax_legend) = plt.subplots(1, 2, figsize=figsize,
+                                             gridspec_kw={'width_ratios': [3, 1]})
+
+    # Get anchor pairs
+    anchor_pairs = peptide_sequences.apply(get_anchor_pair_amino_acids)
+    first_anchors = anchor_pairs.apply(lambda x: x[0])
+    second_anchors = anchor_pairs.apply(lambda x: x[1])
+
+    # Create bivariate colors
+    colors = []
+    for aa1, aa2 in zip(first_anchors, second_anchors):
+        color1 = np.array(plt.matplotlib.colors.to_rgb(AMINO_ACID_COLORS.get(aa1, AMINO_ACID_COLORS['X'])))
+        color2 = np.array(plt.matplotlib.colors.to_rgb(AMINO_ACID_COLORS.get(aa2, AMINO_ACID_COLORS['X'])))
+        # Blend colors: 60% first anchor, 40% second anchor
+        blended = 0.6 * color1 + 0.4 * color2
+        colors.append(blended)
+
+    # Main scatter plot
+    ax_main.scatter(
+        embedding[:, 0],
+        embedding[:, 1],
+        c=colors,
+        s=point_size,
+        alpha=alpha,
+        edgecolors='white',
+        linewidth=0.5,
+        rasterized=True
+    )
+
+    ax_main.set_xlabel('UMAP Dimension 1', fontsize=14, fontweight='bold')
+    ax_main.set_ylabel('UMAP Dimension 2', fontsize=14, fontweight='bold')
+    ax_main.set_title(title, fontsize=16, fontweight='bold', pad=15)
+    ax_main.grid(True, alpha=0.3)
+
+    # Create legend showing color combinations
+    unique_pairs = sorted(set(zip(first_anchors, second_anchors)))
+    pair_counts = Counter(zip(first_anchors, second_anchors))
+
+    # Sort by frequency
+    unique_pairs = sorted(unique_pairs, key=lambda x: pair_counts[x], reverse=True)[:15]
+
+    ax_legend.axis('off')
+    ax_legend.set_xlim(0, 1)
+    ax_legend.set_ylim(0, len(unique_pairs) + 1)
+
+    y_pos = len(unique_pairs)
+    for aa1, aa2 in unique_pairs:
+        color1 = np.array(plt.matplotlib.colors.to_rgb(AMINO_ACID_COLORS.get(aa1, AMINO_ACID_COLORS['X'])))
+        color2 = np.array(plt.matplotlib.colors.to_rgb(AMINO_ACID_COLORS.get(aa2, AMINO_ACID_COLORS['X'])))
+        blended = 0.6 * color1 + 0.4 * color2
+
+        # Draw color box
+        rect = Rectangle((0.05, y_pos - 0.4), 0.15, 0.8,
+                         facecolor=blended, edgecolor='black', linewidth=1)
+        ax_legend.add_patch(rect)
+
+        # Add label
+        count = pair_counts[(aa1, aa2)]
+        ax_legend.text(0.25, y_pos, f'{aa1}-{aa2}  (n={count})',
+                       va='center', fontsize=10, fontweight='bold')
+
+        y_pos -= 1
+
+    ax_legend.text(0.5, len(unique_pairs) + 0.5, 'Top Anchor Pairs\n(60% P2 + 40% C-term)',
+                   ha='center', fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f"✓ Bivariate color anchor plot saved to {filename}")
+
+
+def plot_anchor_pairs_combined(
+        embedding: np.ndarray,
+        peptide_sequences: pd.Series,
+        title_base: str,
+        filename_base: str,
+        **kwargs
+):
+    """
+    Create both visualization styles.
+
+    Args:
+        embedding: 2D UMAP embedding coordinates
+        peptide_sequences: Series of peptide sequences
+        title_base: Base title for plots
+        filename_base: Base filename (without extension)
+        **kwargs: Additional arguments passed to plotting functions
+    """
+    # Main improved plot
+    plot_anchor_pairs_with_amino_acid_colors_extended(
+        embedding=embedding,
+        peptide_sequences=peptide_sequences,
+        title=f"{title_base} - Comprehensive Anchor Analysis",
+        filename=f"{filename_base}_comprehensive.png",
+        **kwargs
+    )
+
+    # Bivariate color plot
+    plot_anchor_pairs_interactive_style(
+        embedding=embedding,
+        peptide_sequences=peptide_sequences,
+        title=f"{title_base} - Bivariate Color Encoding",
+        filename=f"{filename_base}_bivariate.png",
+        **{k: v for k, v in kwargs.items() if k in ['figsize', 'point_size', 'alpha']}
+    )
+
+    plot_anchor_pairs_heatmap(
+        embedding=embedding,
+        peptide_sequences=peptide_sequences,
+        title=f"{title_base} - Anchor Pair Frequency Heatmap",
+        filename=f"{filename_base}_heatmap.png",
+        **{k: v for k, v in kwargs.items() if k in ['figsize', 'bins']}
+    )
 
 
 def visualize_inference_results(df_processed, true_labels, predictions, out_dir, dataset_name):
@@ -1070,10 +1551,10 @@ def visualize_inference_results(df_processed, true_labels, predictions, out_dir,
     print(f"✓ Inference visualizations saved to {out_dir}")
 
 
-def visualize_per_allele_auc(df, true_labels, predictions, out_dir, dataset_name,
-                              allele_col='allele', min_samples=10, top_n=None):
+def visualize_per_allele_metrics(df, true_labels, predictions, out_dir, dataset_name,
+                                 allele_col='allele', min_samples=10, top_n=None, threshold=0.5):
     """
-    Compute and visualize per-allele AUC scores.
+    Compute and visualize per-allele performance metrics (AUC, Accuracy, Precision, Recall).
 
     Parameters:
         df: DataFrame containing allele information
@@ -1082,131 +1563,219 @@ def visualize_per_allele_auc(df, true_labels, predictions, out_dir, dataset_name
         out_dir: Output directory to save plots
         dataset_name: Name of the dataset
         allele_col: Column name containing allele information
-        min_samples: Minimum number of samples required per allele to compute AUC
+        min_samples: Minimum number of samples required per allele
         top_n: If specified, only show top N alleles by sample count
+        threshold: Classification threshold for converting probabilities to labels
     """
     os.makedirs(out_dir, exist_ok=True)
 
     # Add predictions and true labels to dataframe
     df_copy = df.copy()
     df_copy['true_label'] = true_labels
-    df_copy['prediction'] = predictions
+    df_copy['prediction_prob'] = predictions
+    df_copy['prediction_label'] = (predictions >= threshold).astype(int)
 
-    # Compute AUC per allele
+    # Compute metrics per allele
     allele_metrics = []
     for allele in df_copy[allele_col].unique():
         allele_mask = df_copy[allele_col] == allele
         allele_true = df_copy.loc[allele_mask, 'true_label']
-        allele_pred = df_copy.loc[allele_mask, 'prediction']
+        allele_pred_prob = df_copy.loc[allele_mask, 'prediction_prob']
+        allele_pred_label = df_copy.loc[allele_mask, 'prediction_label']
 
         n_samples = len(allele_true)
 
-        # Skip alleles with insufficient samples or only one class
+        # Skip alleles with insufficient samples
         if n_samples < min_samples:
             continue
-        if len(allele_true.unique()) < 2:
-            continue
 
-        try:
-            fpr, tpr, _ = roc_curve(allele_true, allele_pred)
-            allele_auc = auc(fpr, tpr)
+        # Compute confusion matrix elements
+        tp = int(np.sum((allele_pred_label == 1) & (allele_true == 1)))
+        tn = int(np.sum((allele_pred_label == 0) & (allele_true == 0)))
+        fp = int(np.sum((allele_pred_label == 1) & (allele_true == 0)))
+        fn = int(np.sum((allele_pred_label == 0) & (allele_true == 1)))
 
-            allele_metrics.append({
-                'allele': allele,
-                'auc': allele_auc,
-                'n_samples': n_samples,
-                'n_positive': allele_true.sum(),
-                'n_negative': (1 - allele_true).sum()
-            })
-        except Exception as e:
-            print(f"Warning: Could not compute AUC for allele {allele}: {e}")
-            continue
+        # Compute metrics
+        eps = 1e-12
+        accuracy = (tp + tn) / max(n_samples, eps)
+        precision = tp / max(tp + fp, eps)
+        recall = tp / max(tp + fn, eps)
 
-    # Create DataFrame and sort by AUC
+        # Compute AUC if both classes present
+        auc_score = np.nan
+        if len(allele_true.unique()) >= 2:
+            try:
+                fpr, tpr, _ = roc_curve(allele_true, allele_pred_prob)
+                auc_score = auc(fpr, tpr)
+            except Exception as e:
+                print(f"Warning: Could not compute AUC for allele {allele}: {e}")
+
+        allele_metrics.append({
+            'allele': allele,
+            'n_samples': n_samples,
+            'n_positive': int(allele_true.sum()),
+            'n_negative': int((1 - allele_true).sum()),
+            'TP': tp,
+            'TN': tn,
+            'FP': fp,
+            'FN': fn,
+            'AUC': auc_score,
+            'Accuracy': accuracy,
+            'Precision': precision,
+            'Recall': recall
+        })
+
+    # Create DataFrame and sort by sample count
     metrics_df = pd.DataFrame(allele_metrics)
     if len(metrics_df) == 0:
-        print(f"Warning: No alleles with sufficient samples to compute AUC")
+        print(f"Warning: No alleles with sufficient samples to compute metrics")
         return
 
-    metrics_df = metrics_df.sort_values('auc', ascending=False)
+    metrics_df = metrics_df.sort_values('n_samples', ascending=False)
 
     # Filter to top N if specified
     if top_n is not None:
-        metrics_df = metrics_df.nlargest(top_n, 'n_samples')
+        metrics_df = metrics_df.head(top_n)
 
-    # Plot 1: Bar chart of per-allele AUC
-    plt.figure(figsize=(max(12, len(metrics_df) * 0.4), 8))
-    colors = plt.cm.RdYlGn(metrics_df['auc'].values)
-    bars = plt.bar(range(len(metrics_df)), metrics_df['auc'], color=colors)
+    # Plot 1: Heatmap of all metrics per allele
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, max(8, len(metrics_df) * 0.3)))
 
-    plt.axhline(y=0.5, color='red', linestyle='--', linewidth=2, label='Random (AUC=0.5)')
-    plt.axhline(y=metrics_df['auc'].mean(), color='blue', linestyle='--',
-                linewidth=2, label=f'Mean AUC={metrics_df["auc"].mean():.3f}')
+    # Confusion matrix counts
+    confusion_data = metrics_df[['TP', 'TN', 'FP', 'FN']].set_index(metrics_df['allele'])
+    sns.heatmap(confusion_data, annot=True, fmt='d', cmap='Blues', ax=ax1, cbar_kws={'label': 'Count'})
+    ax1.set_title(f'Confusion Matrix Counts per Allele - {dataset_name}', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Allele', fontsize=11)
+    ax1.set_xlabel('Metric', fontsize=11)
 
-    plt.xlabel('Allele', fontsize=12)
-    plt.ylabel('AUC', fontsize=12)
-    plt.title(f'Per-Allele AUC - {dataset_name}\n({len(metrics_df)} alleles with ≥{min_samples} samples)',
-              fontsize=14, fontweight='bold')
-    plt.xticks(range(len(metrics_df)), metrics_df['allele'], rotation=90, ha='right')
-    plt.ylim([0, 1.05])
-    plt.legend(loc='lower right')
-    plt.grid(axis='y', alpha=0.3)
+    # Performance metrics
+    perf_data = metrics_df[['AUC', 'Accuracy', 'Precision', 'Recall']].set_index(metrics_df['allele'])
+    sns.heatmap(perf_data, annot=True, fmt='.3f', cmap='RdYlGn', vmin=0, vmax=1, ax=ax2, cbar_kws={'label': 'Score'})
+    ax2.set_title(f'Performance Metrics per Allele - {dataset_name}', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Allele', fontsize=11)
+    ax2.set_xlabel('Metric', fontsize=11)
+
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f'per_allele_auc_{dataset_name}.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(out_dir, f'per_allele_heatmap_{dataset_name}.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
-    # Plot 2: Scatter plot of AUC vs sample count
-    plt.figure(figsize=(10, 8))
-    scatter = plt.scatter(metrics_df['n_samples'], metrics_df['auc'],
-                         c=metrics_df['auc'], cmap='RdYlGn',
-                         s=100, alpha=0.6, edgecolors='black', linewidth=1)
-    plt.colorbar(scatter, label='AUC')
+    # Plot 2: Grouped bar chart of metrics
+    metrics_to_plot = ['AUC', 'Accuracy', 'Precision', 'Recall']
+    x = np.arange(len(metrics_df))
+    width = 0.2
 
-    # Annotate outliers (very high or very low AUC)
-    for idx, row in metrics_df.iterrows():
-        if row['auc'] > 0.9 or row['auc'] < 0.6:
-            plt.annotate(row['allele'], (row['n_samples'], row['auc']),
-                        fontsize=8, alpha=0.7, xytext=(5, 5),
-                        textcoords='offset points')
+    fig, ax = plt.subplots(figsize=(max(14, len(metrics_df) * 0.5), 8))
 
-    plt.axhline(y=0.5, color='red', linestyle='--', linewidth=2, alpha=0.5, label='Random')
-    plt.xlabel('Number of Samples', fontsize=12)
-    plt.ylabel('AUC', fontsize=12)
-    plt.title(f'Per-Allele AUC vs Sample Count - {dataset_name}', fontsize=14, fontweight='bold')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    for i, metric in enumerate(metrics_to_plot):
+        offset = width * (i - 1.5)
+        values = metrics_df[metric].fillna(0)
+        ax.bar(x + offset, values, width, label=metric, alpha=0.8)
+
+    ax.axhline(y=0.5, color='red', linestyle='--', linewidth=1, alpha=0.5, label='Random (0.5)')
+    ax.set_xlabel('Allele', fontsize=12)
+    ax.set_ylabel('Score', fontsize=12)
+    ax.set_title(
+        f'Per-Allele Performance Metrics - {dataset_name}\n({len(metrics_df)} alleles with ≥{min_samples} samples)',
+        fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics_df['allele'], rotation=90, ha='right')
+    ax.set_ylim([0, 1.05])
+    ax.legend(loc='lower right', fontsize=10)
+    ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f'per_allele_auc_vs_samples_{dataset_name}.png'),
+    plt.savefig(os.path.join(out_dir, f'per_allele_metrics_bars_{dataset_name}.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Plot 3: Scatter plots of metrics vs sample count
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+
+    for idx, metric in enumerate(metrics_to_plot):
+        ax = axes[idx]
+        values = metrics_df[metric].fillna(0)
+
+        scatter = ax.scatter(metrics_df['n_samples'], values,
+                             c=values, cmap='RdYlGn', vmin=0, vmax=1,
+                             s=100, alpha=0.6, edgecolors='black', linewidth=1)
+
+        # Annotate outliers
+        for _, row in metrics_df.iterrows():
+            val = row[metric]
+            if pd.notna(val) and (val > 0.9 or val < 0.6):
+                ax.annotate(row['allele'], (row['n_samples'], val),
+                            fontsize=7, alpha=0.7, xytext=(5, 5),
+                            textcoords='offset points')
+
+        ax.axhline(y=0.5, color='red', linestyle='--', linewidth=1.5, alpha=0.5)
+        mean_val = values.mean()
+        ax.axhline(y=mean_val, color='blue', linestyle='--', linewidth=1.5, alpha=0.5,
+                   label=f'Mean={mean_val:.3f}')
+
+        ax.set_xlabel('Number of Samples', fontsize=11)
+        ax.set_ylabel(metric, fontsize=11)
+        ax.set_title(f'{metric} vs Sample Count', fontsize=12, fontweight='bold')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        plt.colorbar(scatter, ax=ax, label=metric)
+
+    plt.suptitle(f'Per-Allele Metrics vs Sample Count - {dataset_name}', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'per_allele_metrics_vs_samples_{dataset_name}.png'),
                 dpi=300, bbox_inches='tight')
     plt.close()
 
-    # Plot 3: Distribution of AUC scores
-    plt.figure(figsize=(10, 6))
-    plt.hist(metrics_df['auc'], bins=20, edgecolor='black', alpha=0.7, color='skyblue')
-    plt.axvline(x=0.5, color='red', linestyle='--', linewidth=2, label='Random (AUC=0.5)')
-    plt.axvline(x=metrics_df['auc'].mean(), color='blue', linestyle='--',
-                linewidth=2, label=f'Mean AUC={metrics_df["auc"].mean():.3f}')
-    plt.axvline(x=metrics_df['auc'].median(), color='green', linestyle='--',
-                linewidth=2, label=f'Median AUC={metrics_df["auc"].median():.3f}')
-    plt.xlabel('AUC', fontsize=12)
-    plt.ylabel('Number of Alleles', fontsize=12)
-    plt.title(f'Distribution of Per-Allele AUC - {dataset_name}', fontsize=14, fontweight='bold')
-    plt.legend()
-    plt.grid(axis='y', alpha=0.3)
+    # Plot 4: Distribution of each metric
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+
+    for idx, metric in enumerate(metrics_to_plot):
+        ax = axes[idx]
+        values = metrics_df[metric].dropna()
+
+        if len(values) > 0:
+            ax.hist(values, bins=20, edgecolor='black', alpha=0.7, color='skyblue')
+            ax.axvline(x=0.5, color='red', linestyle='--', linewidth=2, alpha=0.5, label='Random (0.5)')
+            ax.axvline(x=values.mean(), color='blue', linestyle='--', linewidth=2,
+                       label=f'Mean={values.mean():.3f}')
+            ax.axvline(x=values.median(), color='green', linestyle='--', linewidth=2,
+                       label=f'Median={values.median():.3f}')
+
+            ax.set_xlabel(metric, fontsize=11)
+            ax.set_ylabel('Number of Alleles', fontsize=11)
+            ax.set_title(f'Distribution of {metric}', fontsize=12, fontweight='bold')
+            ax.legend(fontsize=9)
+            ax.grid(axis='y', alpha=0.3)
+
+    plt.suptitle(f'Distribution of Per-Allele Metrics - {dataset_name}', fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f'per_allele_auc_distribution_{dataset_name}.png'),
+    plt.savefig(os.path.join(out_dir, f'per_allele_metrics_distribution_{dataset_name}.png'),
                 dpi=300, bbox_inches='tight')
     plt.close()
 
     # Save metrics to CSV
     metrics_df.to_csv(os.path.join(out_dir, f'per_allele_metrics_{dataset_name}.csv'), index=False)
 
-    print(f"✓ Per-allele AUC visualizations saved to {out_dir}")
+    # Print summary statistics
+    print(f"\n✓ Per-allele metrics visualizations saved to {out_dir}")
     print(f"  - {len(metrics_df)} alleles analyzed")
-    print(f"  - Mean AUC: {metrics_df['auc'].mean():.3f} ± {metrics_df['auc'].std():.3f}")
-    print(f"  - Median AUC: {metrics_df['auc'].median():.3f}")
-    print(f"  - Best allele: {metrics_df.iloc[0]['allele']} (AUC={metrics_df.iloc[0]['auc']:.3f})")
-    print(f"  - Worst allele: {metrics_df.iloc[-1]['allele']} (AUC={metrics_df.iloc[-1]['auc']:.3f})")
+    print(f"\nMetric Summaries:")
+    for metric in metrics_to_plot:
+        values = metrics_df[metric].dropna()
+        if len(values) > 0:
+            print(f"  {metric}:")
+            print(f"    Mean:   {values.mean():.3f} ± {values.std():.3f}")
+            print(f"    Median: {values.median():.3f}")
+            print(f"    Min:    {values.min():.3f}")
+            print(f"    Max:    {values.max():.3f}")
+
+    # Find best and worst alleles by AUC
+    if not metrics_df['AUC'].isna().all():
+        best_idx = metrics_df['AUC'].idxmax()
+        worst_idx = metrics_df['AUC'].idxmin()
+        print(
+            f"\n  Best allele (AUC):  {metrics_df.loc[best_idx, 'allele']} (AUC={metrics_df.loc[best_idx, 'AUC']:.3f})")
+        print(
+            f"  Worst allele (AUC): {metrics_df.loc[worst_idx, 'allele']} (AUC={metrics_df.loc[worst_idx, 'AUC']:.3f})")
 
 
 def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mhc_seq,
@@ -1341,15 +1910,15 @@ def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mh
 
     # Highlight top pockets
     for idx in top_pocket_indices:
-        ax.text(idx, pocket_scores[idx], f'{mhc_seq[idx]}',
-               ha='center', va='bottom', fontweight='bold', fontsize=8, rotation=0)
+        ax.text(idx, pocket_scores[idx], f'{pocket_scores[idx]:.3f}',
+                ha='center', va='bottom', fontweight='bold', fontsize=8, rotation=0)
 
     ax.set_xlabel('MHC Position', fontsize=12)
     ax.set_ylabel(f'Attention Score ({pooling} pooling)', fontsize=12)
     ax.set_title(f'MHC Binding Pocket Regions (Sample {sample_idx})\nTop {top_k_pockets} highlighted in red',
-                fontsize=14, fontweight='bold')
-    ax.set_xticks(positions[::5])  # Show every 5th position to avoid crowding
-    ax.set_xticklabels([f'{i+1}' for i in range(0, mhc_len, 5)], fontsize=9)
+                 fontsize=14, fontweight='bold')
+    ax.set_xticks(positions)
+    ax.set_xticklabels([f'{i + 1}\n{mhc_seq[i]}' for i in range(mhc_len)], fontsize=7, rotation=90)
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f'mhc_binding_pockets_sample_{sample_idx}.png'),
@@ -1409,42 +1978,63 @@ def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mh
                    dpi=300, bbox_inches='tight')
         plt.close()
 
-    # === VISUALIZATION 4: 2D Heatmap of Peptide-MHC Cross-Attention with Anchor/Pocket Highlights ===
+    # === VISUALIZATION 4: 2D Heatmaps of Both Cross-Attention Directions ===
     # Average attention across heads for clearer visualization
     avg_pep_to_mhc = np.mean(pep_to_mhc, axis=0)  # (pep_len, mhc_len)
+    avg_mhc_to_pep = np.mean(mhc_to_pep, axis=0)  # (mhc_len, pep_len)
 
-    fig, ax = plt.subplots(figsize=(max(12, mhc_len * 0.4), max(8, pep_len * 0.6)))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(20, mhc_len * 0.6), max(8, pep_len * 0.6)))
 
-    # Create heatmap
-    im = ax.imshow(avg_pep_to_mhc, aspect='auto', cmap='viridis', interpolation='nearest')
-
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('Attention Score', fontsize=12)
+    # Peptide -> MHC attention
+    im1 = ax1.imshow(avg_pep_to_mhc, aspect='auto', cmap='viridis', interpolation='nearest')
+    cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    cbar1.set_label('Attention Score', fontsize=12)
 
     # Mark top peptide anchor positions with red lines
     for idx in top_anchor_indices:
-        ax.axhline(y=idx, color='red', linewidth=2, linestyle='--', alpha=0.7)
+        ax1.axhline(y=idx, color='red', linewidth=2, linestyle='--', alpha=0.7)
 
-    # Mark top MHC binding pocket positions with red lines
+    # Mark top MHC binding pocket positions with yellow lines
     for idx in top_pocket_indices:
-        ax.axvline(x=idx, color='yellow', linewidth=2, linestyle='--', alpha=0.7)
+        ax1.axvline(x=idx, color='yellow', linewidth=2, linestyle='--', alpha=0.7)
 
-    # Labels
-    ax.set_xlabel('MHC Position', fontsize=12)
-    ax.set_ylabel('Peptide Position', fontsize=12)
-    ax.set_title(f'Peptide→MHC Cross-Attention with Anchor & Pocket Highlights (Sample {sample_idx})\n' +
-                f'Red lines: Top {top_k_anchors} peptide anchors | Yellow lines: Top {top_k_pockets} MHC pockets',
-                fontsize=14, fontweight='bold')
+    ax1.set_xlabel('MHC Position', fontsize=12)
+    ax1.set_ylabel('Peptide Position', fontsize=12)
+    ax1.set_title(
+        f'Peptide→MHC Attention\nRed: Top {top_k_anchors} peptide anchors | Yellow: Top {top_k_pockets} MHC pockets',
+        fontsize=12, fontweight='bold')
+    ax1.set_xticks(range(mhc_len))
+    ax1.set_yticks(range(pep_len))
+    ax1.set_xticklabels([f'{i + 1}\n{mhc_seq[i]}' for i in range(mhc_len)], fontsize=7, rotation=90)
+    ax1.set_yticklabels([f'P{i + 1}:{peptide_seq[i]}' for i in range(pep_len)], fontsize=9)
 
-    # Set ticks
-    ax.set_xticks(range(0, mhc_len, max(1, mhc_len // 20)))
-    ax.set_yticks(range(pep_len))
-    ax.set_xticklabels([f'{i+1}' for i in range(0, mhc_len, max(1, mhc_len // 20))], fontsize=9)
-    ax.set_yticklabels([f'P{i+1}:{peptide_seq[i]}' for i in range(pep_len)], fontsize=9)
+    # MHC -> Peptide attention
+    im2 = ax2.imshow(avg_mhc_to_pep, aspect='auto', cmap='plasma', interpolation='nearest')
+    cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+    cbar2.set_label('Attention Score', fontsize=12)
 
+    # Mark top MHC binding pocket positions with yellow lines
+    for idx in top_pocket_indices:
+        ax2.axhline(y=idx, color='yellow', linewidth=2, linestyle='--', alpha=0.7)
+
+    # Mark top peptide anchor positions with red lines
+    for idx in top_anchor_indices:
+        ax2.axvline(x=idx, color='red', linewidth=2, linestyle='--', alpha=0.7)
+
+    ax2.set_xlabel('Peptide Position', fontsize=12)
+    ax2.set_ylabel('MHC Position', fontsize=12)
+    ax2.set_title(
+        f'MHC→Peptide Attention\nYellow: Top {top_k_pockets} MHC pockets | Red: Top {top_k_anchors} peptide anchors',
+        fontsize=12, fontweight='bold')
+    ax2.set_xticks(range(pep_len))
+    ax2.set_yticks(range(mhc_len))
+    ax2.set_xticklabels([f'P{i + 1}\n{peptide_seq[i]}' for i in range(pep_len)], fontsize=9, rotation=90)
+    ax2.set_yticklabels([f'{i + 1}:{mhc_seq[i]}' for i in range(mhc_len)], fontsize=7)
+
+    plt.suptitle(f'Bidirectional Cross-Attention Analysis (Sample {sample_idx})',
+                 fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f'cross_attention_with_highlights_sample_{sample_idx}.png'),
+    plt.savefig(os.path.join(out_dir, f'cross_attention_bidirectional_sample_{sample_idx}.png'),
                 dpi=300, bbox_inches='tight')
     plt.close()
 
