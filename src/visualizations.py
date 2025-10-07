@@ -2054,3 +2054,492 @@ def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mh
         'anchor_scores_all': anchor_scores.tolist(),
         'pocket_scores_all': pocket_scores.tolist()
     }
+
+
+# ========================================================================
+# PERMUTATION AND ABLATION STUDY VISUALIZATIONS
+# ========================================================================
+
+def visualize_permutation_importance(pep_results, mhc_results, pos_results, blosum_results,
+                                     baseline_score, out_dir, metric='auc'):
+    """
+    Visualize permutation importance results.
+
+    Args:
+        pep_results: DataFrame with peptide permutation results
+        mhc_results: DataFrame with MHC permutation results
+        pos_results: DataFrame with per-position permutation results
+        blosum_results: DataFrame with BLOSUM feature permutation results
+        baseline_score: Baseline performance score
+        out_dir: Output directory for plots
+        metric: Performance metric name
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Create comprehensive permutation importance plot
+    fig = plt.figure(figsize=(20, 12))
+    gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
+
+    # 1. Peptide and MHC permutation comparison
+    ax1 = fig.add_subplot(gs[0, :2])
+
+    # Combine peptide and MHC results
+    combined_data = []
+    for _, row in pep_results.iterrows():
+        combined_data.append({'component': 'Peptide', 'importance': row['importance']})
+    for _, row in mhc_results.iterrows():
+        combined_data.append({'component': 'MHC', 'importance': row['importance']})
+
+    combined_df = pd.DataFrame(combined_data)
+
+    sns.boxplot(data=combined_df, x='component', y='importance', ax=ax1, palette='Set2')
+    sns.stripplot(data=combined_df, x='component', y='importance', ax=ax1,
+                 color='black', alpha=0.5, size=4)
+    ax1.axhline(y=0, color='red', linestyle='--', alpha=0.7, label='No importance')
+    ax1.set_title(f'Permutation Importance: Peptide vs MHC\n(Baseline {metric.upper()}: {baseline_score:.4f})',
+                 fontsize=14, fontweight='bold')
+    ax1.set_ylabel(f'{metric.upper()} Drop', fontsize=12)
+    ax1.set_xlabel('Component', fontsize=12)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Summary statistics table
+    ax2 = fig.add_subplot(gs[0, 2])
+    ax2.axis('off')
+
+    summary_data = [
+        ['Component', 'Mean Importance', 'Std'],
+        ['Peptide', f"{pep_results['importance'].mean():.4f}", f"{pep_results['importance'].std():.4f}"],
+        ['MHC', f"{mhc_results['importance'].mean():.4f}", f"{mhc_results['importance'].std():.4f}"],
+    ]
+
+    table = ax2.table(cellText=summary_data, cellLoc='center', loc='center',
+                     colWidths=[0.4, 0.3, 0.3])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1, 2)
+
+    # Style header row
+    for i in range(3):
+        table[(0, i)].set_facecolor('#4CAF50')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+
+    ax2.set_title('Summary Statistics', fontsize=12, fontweight='bold', pad=20)
+
+    # 3. Position importance bar plot
+    ax3 = fig.add_subplot(gs[1, :])
+
+    positions = pos_results['position'].values
+    importances = pos_results['importance'].values
+    errors = pos_results.get('std_score', np.zeros_like(importances))
+
+    colors = ['#ff6b6b' if imp > importances.mean() else '#4ecdc4' for imp in importances]
+    bars = ax3.bar(positions, importances, yerr=errors, capsize=5, alpha=0.7,
+                  color=colors, edgecolor='black', linewidth=1.5)
+
+    # Highlight anchor positions (P2 = position 1, P-omega = last position)
+    if len(positions) > 0:
+        ax3.axvline(x=1, color='red', linestyle='--', alpha=0.7, linewidth=2, label='P2 anchor')
+        ax3.axvline(x=positions[-1], color='orange', linestyle='--', alpha=0.7,
+                   linewidth=2, label='P-omega anchor')
+
+    ax3.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax3.axhline(y=importances.mean(), color='green', linestyle=':', alpha=0.7,
+               label=f'Mean importance: {importances.mean():.4f}')
+
+    ax3.set_xlabel('Peptide Position', fontsize=12, fontweight='bold')
+    ax3.set_ylabel(f'{metric.upper()} Drop', fontsize=12, fontweight='bold')
+    ax3.set_title('Per-Position Permutation Importance', fontsize=14, fontweight='bold')
+    ax3.set_xticks(positions)
+    ax3.set_xticklabels([f'P{i+1}' for i in positions])
+    ax3.legend(loc='best')
+    ax3.grid(True, alpha=0.3, axis='y')
+
+    # 4. BLOSUM feature importance
+    ax4 = fig.add_subplot(gs[2, :2])
+
+    blosum_importances = blosum_results['importance'].values
+    blosum_features = blosum_results['feature_idx'].values
+    blosum_errors = blosum_results.get('std_score', np.zeros_like(blosum_importances))
+
+    # Sort by importance
+    sorted_indices = np.argsort(blosum_importances)[::-1]
+    top_n = 15
+    top_indices = sorted_indices[:top_n]
+
+    y_pos = np.arange(top_n)
+    ax4.barh(y_pos, blosum_importances[top_indices],
+            xerr=blosum_errors[top_indices], capsize=3,
+            color=plt.cm.viridis(blosum_importances[top_indices] / blosum_importances.max()),
+            edgecolor='black', linewidth=1)
+
+    ax4.set_yticks(y_pos)
+    ax4.set_yticklabels([f'Feature {blosum_features[i]}' for i in top_indices])
+    ax4.invert_yaxis()
+    ax4.set_xlabel(f'{metric.upper()} Drop', fontsize=12, fontweight='bold')
+    ax4.set_title(f'Top {top_n} BLOSUM62 Feature Importances', fontsize=14, fontweight='bold')
+    ax4.axvline(x=0, color='red', linestyle='--', alpha=0.7)
+    ax4.grid(True, alpha=0.3, axis='x')
+
+    # 5. Distribution of all importances
+    ax5 = fig.add_subplot(gs[2, 2])
+
+    all_importances = np.concatenate([
+        pep_results['importance'].values,
+        mhc_results['importance'].values,
+        pos_results['importance'].values,
+        blosum_results['importance'].values
+    ])
+
+    ax5.hist(all_importances, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+    ax5.axvline(x=0, color='red', linestyle='--', linewidth=2, label='No importance')
+    ax5.axvline(x=all_importances.mean(), color='green', linestyle=':',
+               linewidth=2, label=f'Mean: {all_importances.mean():.4f}')
+    ax5.set_xlabel(f'{metric.upper()} Drop', fontsize=10, fontweight='bold')
+    ax5.set_ylabel('Frequency', fontsize=10, fontweight='bold')
+    ax5.set_title('Overall Importance Distribution', fontsize=12, fontweight='bold')
+    ax5.legend(fontsize=8)
+    ax5.grid(True, alpha=0.3)
+
+    plt.suptitle('Permutation Feature Importance Analysis', fontsize=16, fontweight='bold', y=0.995)
+
+    plt.savefig(os.path.join(out_dir, 'permutation_importance_comprehensive.png'),
+               dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"✓ Permutation importance visualization saved to {out_dir}")
+
+
+def visualize_ablation_results(input_results, pos_results, anchor_results,
+                               baseline_score, out_dir, metric='auc'):
+    """
+    Visualize ablation study results.
+
+    Args:
+        input_results: DataFrame with input ablation results (peptide/MHC)
+        pos_results: DataFrame with per-position ablation results
+        anchor_results: DataFrame with anchor position ablation results
+        baseline_score: Baseline performance score
+        out_dir: Output directory for plots
+        metric: Performance metric name
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Create comprehensive ablation results plot
+    fig = plt.figure(figsize=(18, 10))
+    gs = GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+
+    # 1. Input component ablation
+    ax1 = fig.add_subplot(gs[0, 0])
+
+    components = input_results['component'].values
+    importances = input_results['importance'].values
+
+    colors = ['#e74c3c', '#3498db']
+    bars = ax1.bar(range(len(components)), importances, color=colors,
+                  edgecolor='black', linewidth=2, alpha=0.8)
+
+    ax1.set_xticks(range(len(components)))
+    ax1.set_xticklabels(['Peptide\nInput', 'MHC\nInput'], fontsize=11)
+    ax1.set_ylabel(f'{metric.upper()} Drop', fontsize=12, fontweight='bold')
+    ax1.set_title('Input Component Ablation', fontsize=13, fontweight='bold')
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels on bars
+    for i, (bar, val) in enumerate(zip(bars, importances)):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.4f}', ha='center', va='bottom' if val > 0 else 'top',
+                fontweight='bold', fontsize=10)
+
+    # 2. Anchor position ablation
+    ax2 = fig.add_subplot(gs[0, 1])
+
+    anchors = anchor_results['anchor'].values
+    anchor_importances = anchor_results['importance'].values
+
+    colors_anchor = ['#f39c12', '#e67e22', '#c0392b']
+    bars = ax2.bar(range(len(anchors)), anchor_importances, color=colors_anchor[:len(anchors)],
+                  edgecolor='black', linewidth=2, alpha=0.8)
+
+    ax2.set_xticks(range(len(anchors)))
+    ax2.set_xticklabels(anchors, fontsize=11)
+    ax2.set_ylabel(f'{metric.upper()} Drop', fontsize=12, fontweight='bold')
+    ax2.set_title('Anchor Position Ablation', fontsize=13, fontweight='bold')
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    # Add value labels
+    for bar, val in zip(bars, anchor_importances):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.4f}', ha='center', va='bottom' if val > 0 else 'top',
+                fontweight='bold', fontsize=10)
+
+    # 3. Summary comparison
+    ax3 = fig.add_subplot(gs[0, 2])
+    ax3.axis('off')
+
+    summary_data = [
+        ['Component', f'{metric.upper()} Drop', 'Score'],
+        ['Baseline', '0.0000', f'{baseline_score:.4f}'],
+        ['Peptide Ablated', f"{input_results[input_results['component']=='peptide_input']['importance'].values[0]:.4f}",
+         f"{input_results[input_results['component']=='peptide_input']['score'].values[0]:.4f}"],
+        ['MHC Ablated', f"{input_results[input_results['component']=='mhc_input']['importance'].values[0]:.4f}",
+         f"{input_results[input_results['component']=='mhc_input']['score'].values[0]:.4f}"],
+    ]
+
+    table = ax3.table(cellText=summary_data, cellLoc='center', loc='center',
+                     colWidths=[0.4, 0.3, 0.3])
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 2)
+
+    # Style header
+    for i in range(3):
+        table[(0, i)].set_facecolor('#2c3e50')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+
+    ax3.set_title('Ablation Summary', fontsize=12, fontweight='bold', pad=20)
+
+    # 4. Per-position ablation (full plot)
+    ax4 = fig.add_subplot(gs[1, :])
+
+    positions = pos_results['position'].values
+    pos_importances = pos_results['importance'].values
+
+    # Color based on importance magnitude
+    norm = plt.Normalize(vmin=pos_importances.min(), vmax=pos_importances.max())
+    colors_pos = plt.cm.RdYlGn_r(norm(pos_importances))
+
+    bars = ax4.bar(positions, pos_importances, color=colors_pos,
+                  edgecolor='black', linewidth=1.5, alpha=0.85)
+
+    # Highlight key positions
+    if len(positions) > 0:
+        ax4.axvline(x=1, color='red', linestyle='--', alpha=0.7, linewidth=2.5, label='P2 anchor')
+        if len(positions) > 8:  # Only show P-omega if we have enough positions
+            ax4.axvline(x=positions[-1], color='orange', linestyle='--', alpha=0.7,
+                       linewidth=2.5, label='P-omega anchor')
+
+    ax4.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax4.axhline(y=pos_importances.mean(), color='blue', linestyle=':', alpha=0.7,
+               linewidth=2, label=f'Mean: {pos_importances.mean():.4f}')
+
+    ax4.set_xlabel('Peptide Position', fontsize=13, fontweight='bold')
+    ax4.set_ylabel(f'{metric.upper()} Drop', fontsize=13, fontweight='bold')
+    ax4.set_title('Per-Position Ablation Importance', fontsize=14, fontweight='bold')
+    ax4.set_xticks(positions)
+    ax4.set_xticklabels([f'P{i+1}' for i in positions])
+    ax4.legend(loc='best', fontsize=10)
+    ax4.grid(True, alpha=0.3, axis='y')
+
+    # Add colorbar for position importance
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.RdYlGn_r, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax4, orientation='vertical', pad=0.01, aspect=30)
+    cbar.set_label('Importance Magnitude', fontsize=10, fontweight='bold')
+
+    plt.suptitle('Ablation Study Results', fontsize=16, fontweight='bold', y=0.98)
+
+    plt.savefig(os.path.join(out_dir, 'ablation_results_comprehensive.png'),
+               dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"✓ Ablation results visualization saved to {out_dir}")
+
+
+def visualize_position_importance(pos_results, baseline_score, max_pep_len,
+                                  out_dir, study_type='permutation', metric='auc'):
+    """
+    Create detailed position-specific importance visualization.
+
+    Args:
+        pos_results: DataFrame with per-position results
+        baseline_score: Baseline performance score
+        max_pep_len: Maximum peptide length
+        out_dir: Output directory
+        study_type: 'permutation' or 'ablation'
+        metric: Performance metric name
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+
+    positions = pos_results['position'].values
+    importances = pos_results['importance'].values
+
+    # 1. Bar plot with error bars
+    ax1 = axes[0, 0]
+    if 'std_score' in pos_results.columns:
+        errors = pos_results['std_score'].values
+    else:
+        errors = np.zeros_like(importances)
+
+    colors = plt.cm.viridis(importances / (importances.max() + 1e-8))
+    bars = ax1.bar(positions, importances, yerr=errors, capsize=4,
+                  color=colors, edgecolor='black', linewidth=1.5, alpha=0.8)
+
+    # Mark important positions
+    threshold = importances.mean() + importances.std()
+    for i, (pos, imp) in enumerate(zip(positions, importances)):
+        if imp > threshold:
+            ax1.text(pos, imp + errors[i], f'{imp:.3f}',
+                    ha='center', va='bottom', fontweight='bold', fontsize=9)
+
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax1.axhline(y=importances.mean(), color='red', linestyle='--', alpha=0.7,
+               label=f'Mean: {importances.mean():.4f}')
+    ax1.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax1.set_ylabel(f'{metric.upper()} Drop', fontsize=11, fontweight='bold')
+    ax1.set_title(f'Position Importance ({study_type.capitalize()})', fontsize=12, fontweight='bold')
+    ax1.set_xticks(positions)
+    ax1.set_xticklabels([f'P{i+1}' for i in positions], rotation=0)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    # 2. Line plot showing trend
+    ax2 = axes[0, 1]
+    ax2.plot(positions, importances, marker='o', linewidth=2.5, markersize=8,
+            color='#2c3e50', markerfacecolor='#e74c3c', markeredgecolor='black',
+            markeredgewidth=1.5, alpha=0.8)
+
+    if len(importances) > 3:
+        # Add trend line
+        z = np.polyfit(positions, importances, 2)
+        p = np.poly1d(z)
+        ax2.plot(positions, p(positions), "--", alpha=0.7, linewidth=2,
+                color='#3498db', label='Trend (polynomial)')
+
+    ax2.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax2.fill_between(positions, 0, importances, alpha=0.2, color='#3498db')
+    ax2.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax2.set_ylabel(f'{metric.upper()} Drop', fontsize=11, fontweight='bold')
+    ax2.set_title('Position Importance Trend', fontsize=12, fontweight='bold')
+    ax2.set_xticks(positions)
+    ax2.set_xticklabels([f'P{i+1}' for i in positions])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+    # 3. Heatmap view
+    ax3 = axes[1, 0]
+    importance_matrix = importances.reshape(1, -1)
+
+    im = ax3.imshow(importance_matrix, cmap='RdYlGn_r', aspect='auto',
+                   interpolation='nearest')
+    ax3.set_yticks([0])
+    ax3.set_yticklabels(['Importance'])
+    ax3.set_xticks(range(len(positions)))
+    ax3.set_xticklabels([f'P{i+1}' for i in positions])
+    ax3.set_title('Position Importance Heatmap', fontsize=12, fontweight='bold')
+
+    # Add text annotations
+    for i, val in enumerate(importances):
+        ax3.text(i, 0, f'{val:.3f}', ha='center', va='center',
+                color='white' if val > importances.mean() else 'black',
+                fontweight='bold', fontsize=8)
+
+    plt.colorbar(im, ax=ax3, label=f'{metric.upper()} Drop')
+
+    # 4. Cumulative importance
+    ax4 = axes[1, 1]
+
+    # Sort by importance
+    sorted_indices = np.argsort(importances)[::-1]
+    sorted_importances = importances[sorted_indices]
+    cumulative = np.cumsum(sorted_importances)
+    cumulative_pct = (cumulative / cumulative[-1]) * 100 if cumulative[-1] != 0 else cumulative
+
+    ax4.plot(range(len(cumulative)), cumulative_pct, marker='s', linewidth=2.5,
+            markersize=7, color='#16a085', markeredgecolor='black', markeredgewidth=1)
+    ax4.axhline(y=50, color='red', linestyle='--', alpha=0.7, label='50% threshold')
+    ax4.axhline(y=80, color='orange', linestyle='--', alpha=0.7, label='80% threshold')
+    ax4.fill_between(range(len(cumulative)), 0, cumulative_pct, alpha=0.3, color='#16a085')
+
+    ax4.set_xlabel('Number of Top Positions', fontsize=11, fontweight='bold')
+    ax4.set_ylabel('Cumulative Importance (%)', fontsize=11, fontweight='bold')
+    ax4.set_title('Cumulative Position Importance', fontsize=12, fontweight='bold')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+
+    plt.suptitle(f'Position-Specific {study_type.capitalize()} Analysis\n(Baseline {metric.upper()}: {baseline_score:.4f})',
+                fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    plt.savefig(os.path.join(out_dir, f'position_importance_{study_type}.png'),
+               dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"✓ Position importance visualization saved to {out_dir}")
+
+
+def visualize_feature_importance_heatmap(blosum_results, out_dir):
+    """
+    Create heatmap visualization for BLOSUM62 feature importance.
+
+    Args:
+        blosum_results: DataFrame with BLOSUM feature importance results
+        out_dir: Output directory
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Amino acid labels for BLOSUM62 (23 dimensions including gap)
+    aa_labels = ['A', 'R', 'N', 'D', 'C', 'Q', 'E', 'G', 'H', 'I',
+                'L', 'K', 'M', 'F', 'P', 'S', 'T', 'W', 'Y', 'V', 'B', 'Z', 'X']
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    # 1. Feature importance as heatmap
+    ax1 = axes[0]
+
+    importances = blosum_results['importance'].values
+    importance_matrix = importances.reshape(-1, 1)
+
+    im = ax1.imshow(importance_matrix.T, cmap='RdYlGn_r', aspect='auto')
+    ax1.set_xticks(range(len(aa_labels)))
+    ax1.set_xticklabels(aa_labels, fontsize=10)
+    ax1.set_yticks([0])
+    ax1.set_yticklabels(['Importance'])
+    ax1.set_title('BLOSUM62 Feature Importance Heatmap', fontsize=13, fontweight='bold')
+
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax1, orientation='horizontal', pad=0.1)
+    cbar.set_label('Importance (AUC Drop)', fontsize=11, fontweight='bold')
+
+    # 2. Top features bar plot
+    ax2 = axes[1]
+
+    # Sort and get top 10
+    sorted_indices = np.argsort(importances)[::-1]
+    top_n = min(10, len(importances))
+    top_indices = sorted_indices[:top_n]
+
+    top_labels = [aa_labels[i] if i < len(aa_labels) else f'F{i}' for i in top_indices]
+    top_importances = importances[top_indices]
+
+    colors = plt.cm.Reds(top_importances / top_importances.max())
+    bars = ax2.barh(range(top_n), top_importances, color=colors,
+                   edgecolor='black', linewidth=1.5)
+
+    ax2.set_yticks(range(top_n))
+    ax2.set_yticklabels(top_labels, fontsize=11, fontweight='bold')
+    ax2.invert_yaxis()
+    ax2.set_xlabel('Importance (AUC Drop)', fontsize=11, fontweight='bold')
+    ax2.set_title(f'Top {top_n} Most Important BLOSUM62 Features', fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='x')
+
+    # Add value labels
+    for i, (bar, val) in enumerate(zip(bars, top_importances)):
+        width = bar.get_width()
+        ax2.text(width, bar.get_y() + bar.get_height()/2.,
+                f' {val:.4f}', ha='left', va='center', fontweight='bold', fontsize=9)
+
+    plt.suptitle('BLOSUM62 Feature Importance Analysis', fontsize=15, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    plt.savefig(os.path.join(out_dir, 'blosum_feature_importance.png'),
+               dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"✓ BLOSUM feature importance visualization saved to {out_dir}")
