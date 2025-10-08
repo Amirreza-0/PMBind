@@ -1355,9 +1355,9 @@ class BinaryActiveNegativeLoss(tf.keras.losses.Loss):
     """
     def __init__(
             self,
-            alpha=1.0,
-            beta=0.5,
-            min_prob=1e-7,
+            alpha=3.0,
+            beta=3.0,
+            min_prob=0.02,
             reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE,
             name='binary_active_negative_loss',
             **kwargs
