@@ -1,8 +1,0 @@
-python create_tfrecords.py \
-  --train_path ../data/cross_validation_dataset/mhc1/cv_folds/fold_01_train.parquet \
-  --val_path ../data/cross_validation_dataset/mhc1/cv_folds/fold_01_val.parquet \
-  --embed_npz ../data/ESM/esm3-open/PMGen_whole_seq_/mhc1_encodings.npz \
-  --seq_csv ../data/alleles/aligned_PMGen_class_1.csv \
-  --embed_key ../data/ESM/esm3-open/PMGen_whole_seq_/mhc1_encodings.csv \
-  --output_dir ../data/tfrecords/fold_01/ \
-  --mhc_class 1
