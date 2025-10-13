@@ -696,27 +696,27 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
     )
 
     # Plot by Reduced Anchor Pair (old method for comparison)
-    # anchor_pair_labels = df['long_mer'].apply(reduced_anchor_pair).astype('category')
-    # unique_anchor_pairs = sorted(anchor_pair_labels.unique())
-    # colors = sns.color_palette("hls", n_colors=len(unique_anchor_pairs))
-    # anchor_color_map = {pair: color for pair, color in zip(unique_anchor_pairs, colors)}
-    # if 'Short' in anchor_color_map:
-    #     anchor_color_map['Short'] = [0.7, 0.7, 0.7, 0.5]
-    #
-    # _plot_umap(
-    #     embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
-    #     title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
-    #     filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_reduced.png"),
-    #     legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
-    #     legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
-    # )
+    anchor_pair_labels = df['long_mer'].apply(reduced_anchor_pair).astype('category')
+    unique_anchor_pairs = sorted(anchor_pair_labels.unique())
+    colors = sns.color_palette("hls", n_colors=len(unique_anchor_pairs))
+    anchor_color_map = {pair: color for pair, color in zip(unique_anchor_pairs, colors)}
+    if 'Short' in anchor_color_map:
+        anchor_color_map['Short'] = [0.7, 0.7, 0.7, 0.5]
+
+    _plot_umap(
+        embedding=embedding, labels=anchor_pair_labels, color_map=anchor_color_map,
+        title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
+        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_reduced_legacy.png"),
+        legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
+        legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
+    )
 
     # Plot by Anchor Pair with Amino Acid Colors
     plot_anchor_pairs_with_amino_acid_colors_extended(
         embedding=embedding,
         peptide_sequences=df['long_mer'],
         title=f'UMAP of {latent_type.capitalize()} Latents by Anchor Pairs\nColored by 1st Anchor AA (face) and 2nd Anchor AA (outline)',
-        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors.png"),
+        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors_extended.png"),
         figsize=figsize,
         point_size=point_size
     )
@@ -724,7 +724,7 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         embedding=embedding,
         peptide_sequences=df['long_mer'],
         title=f'UMAP of {latent_type.capitalize()} Latents by Anchor Pairs\nColored by 1st Anchor AA (face) and 2nd Anchor AA (outline)',
-        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors.png"),
+        filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors_legacy.png"),
         figsize=figsize,
         point_size=point_size
     )
@@ -1781,7 +1781,7 @@ def visualize_per_allele_metrics(df, true_labels, predictions, out_dir, dataset_
 def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mhc_seq,
                                                      max_pep_len, max_mhc_len, out_dir,
                                                      sample_idx=0, pooling='max',
-                                                     top_k_anchors=3, top_k_pockets=10):
+                                                     top_k_anchors=4, top_k_pockets=10):
     """
     Use max pooling on attention weights to identify:
     1. Peptide anchor positions (positions with high MHC->peptide attention)
@@ -1983,9 +1983,9 @@ def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mh
     avg_pep_to_mhc = np.mean(pep_to_mhc, axis=0)  # (pep_len, mhc_len)
     avg_mhc_to_pep = np.mean(mhc_to_pep, axis=0)  # (mhc_len, pep_len)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(20, mhc_len * 0.6), max(8, pep_len * 0.6)))
+    # Heatmap 1: Peptide -> MHC attention (horizontal: more columns than rows)
+    fig1, ax1 = plt.subplots(figsize=(max(16, mhc_len * 0.5), max(6, pep_len * 0.5)))
 
-    # Peptide -> MHC attention
     im1 = ax1.imshow(avg_pep_to_mhc, aspect='auto', cmap='viridis', interpolation='nearest')
     cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
     cbar1.set_label('Attention Score', fontsize=12)
@@ -2008,7 +2008,14 @@ def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mh
     ax1.set_xticklabels([f'{i + 1}\n{mhc_seq[i]}' for i in range(mhc_len)], fontsize=7, rotation=90)
     ax1.set_yticklabels([f'P{i + 1}:{peptide_seq[i]}' for i in range(pep_len)], fontsize=9)
 
-    # MHC -> Peptide attention
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f'peptide_to_mhc_attention_sample_{sample_idx}.png'),
+                dpi=300, bbox_inches='tight')
+    plt.close(fig1)
+
+    # Heatmap 2: MHC -> Peptide attention (vertical: more rows than columns)
+    fig2, ax2 = plt.subplots(figsize=(max(6, pep_len * 0.5), max(16, mhc_len * 0.5)))
+
     im2 = ax2.imshow(avg_mhc_to_pep, aspect='auto', cmap='plasma', interpolation='nearest')
     cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
     cbar2.set_label('Attention Score', fontsize=12)
@@ -2031,12 +2038,10 @@ def visualize_anchor_positions_and_binding_pockets(attn_weights, peptide_seq, mh
     ax2.set_xticklabels([f'P{i + 1}\n{peptide_seq[i]}' for i in range(pep_len)], fontsize=9, rotation=90)
     ax2.set_yticklabels([f'{i + 1}:{mhc_seq[i]}' for i in range(mhc_len)], fontsize=7)
 
-    plt.suptitle(f'Bidirectional Cross-Attention Analysis (Sample {sample_idx})',
-                 fontsize=14, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, f'cross_attention_bidirectional_sample_{sample_idx}.png'),
+    plt.savefig(os.path.join(out_dir, f'mhc_to_peptide_attention_sample_{sample_idx}.png'),
                 dpi=300, bbox_inches='tight')
-    plt.close()
+    plt.close(fig2)
 
     # Print summary
     print(f"\n✓ Anchor and binding pocket analysis complete for sample {sample_idx}")

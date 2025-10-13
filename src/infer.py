@@ -32,7 +32,7 @@ from utils import (seq_to_onehot, get_embed_key, NORM_TOKEN, MASK_TOKEN, PAD_TOK
                    load_metadata, load_embedding_table, normalize_embedding_tf, AA_BLOSUM,
                    load_embedding_db, apply_dynamic_masking, min_max_norm, log_norm_zscore, _preprocess_df_chunk
                    )
-from models import pmbind_multitask_plus as pmbind
+from models import pmbind_multitask_v8 as pmbind
 from visualizations import (_analyze_latents, visualize_attention_weights,
                             visualize_per_allele_metrics, visualize_anchor_positions_and_binding_pockets)
 
@@ -292,9 +292,9 @@ def generate_attention_visualizations(model, df, seq_map, embed_map, max_pep_len
                 max_mhc_len=max_mhc_len,
                 out_dir=sample_out_dir,
                 sample_idx=0,
-                pooling='both',  # Show both max and mean pooling
-                top_k_anchors=3,
-                top_k_pockets=10
+                pooling='max',  # Show both max and mean pooling
+                top_k_anchors=4,
+                top_k_pockets=15
             )
 
             # Also save sample information
@@ -302,7 +302,7 @@ def generate_attention_visualizations(model, df, seq_map, embed_map, max_pep_len
                 f.write(f"Sample Index: {sample_idx}\n")
                 f.write(f"Peptide: {pep_seq}\n")
                 f.write(f"MHC Allele: {sample_row['allele']}\n")
-                f.write(f"MHC Sequence: {mhc_seq[:50]}{'...' if len(mhc_seq) > 50 else ''}\n")
+                f.write(f"MHC Sequence: {mhc_seq}\n")
                 if 'assigned_label' in sample_row:
                     f.write(f"True Label: {sample_row['assigned_label']}\n")
                 if 'prediction_score' in sample_row:
@@ -370,7 +370,7 @@ def run_visualizations(df, latents_pooled, latents_seq, out_dir, name, max_pep_l
 
 def infer(model_weights_path, config_path, df_path, out_dir, name,
           allele_seq_path, embedding_key_path, embedding_npz_path,
-          batch_size=256, source_col=None, allow_cache=False):
+          batch_size=10, source_col=None, allow_cache=False):
     global EMB_DB, MHC_CLASS, ESM_DIM
     os.makedirs(out_dir, exist_ok=True)
 
@@ -584,7 +584,7 @@ def main():
     parser.add_argument("--allele_seq_path", required=True)
     parser.add_argument("--embedding_key_path", required=True)
     parser.add_argument("--embedding_npz_path", required=True)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=10)
     parser.add_argument("--source_col")
     parser.add_argument("--allow_cache", action='store_true', help="Use cached inference results if available")
     args = parser.parse_args()
