@@ -55,7 +55,7 @@ print("Paths loaded.")
 
 ## --- Globals ---
 MHC_CLASS = 1
-EMB_NORM_METHOD = "robust_zscore"  # clip_norm1000, None
+EMB_NORM_METHOD = None #"robust_zscore"  # clip_norm1000, None
 
 ## --- Constant lookup table for on-the-fly feature creation ---
 _blosum_vectors = [np.asarray(BLOSUM62[aa], dtype=np.float32) for aa in AA_BLOSUM]
@@ -67,6 +67,8 @@ metadata = load_metadata(tfrecord_dir)
 # Load EMB_DB_p for DataGenerator
 print("\nLoading MHC embedding lookup table for DataGenerator...")
 EMB_DB_p = load_embedding_db(embedding_table_path)
+print(f"Loaded MHC embedding DB for DataGenerator with {len(EMB_DB_p)} entries.")
+print(f"Example embedding shape: {next(iter(EMB_DB_p.values())).shape}")
 
 lookup_path = os.path.join(tfrecord_dir, "train_mhc_embedding_lookup.npz")
 MHC_EMBEDDING_TABLE_RAW = load_embedding_table(lookup_path, metadata)
@@ -82,7 +84,8 @@ print(f"Max value in normalized table: {tf.reduce_max(MHC_EMBEDDING_TABLE):.2f}"
 # Extract all the important values from metadata
 MAX_PEP_LEN = metadata['MAX_PEP_LEN']
 MAX_MHC_LEN = metadata['MAX_MHC_LEN']
-ESM_DIM = metadata['ESM_DIM']
+# ESM_DIM = metadata['ESM_DIM']
+ESM_DIM = MHC_EMBEDDING_TABLE.shape[-1]
 train_samples = metadata['train_samples']
 
 # Load sequence and embedding mappings
@@ -769,7 +772,6 @@ def main(args):
     os.makedirs(out_dir, exist_ok=True)
     print(f"Starting run: {run_name}\nOutput directory: {out_dir}")
 
-    # save run config
     with open(os.path.join(out_dir, "run_config.json"), "w") as f:
         json.dump(RUN_CONFIG, f, indent=4)
 

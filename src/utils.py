@@ -378,7 +378,7 @@ class AttentionLayer(keras.layers.Layer):
 
     def __init__(self, query_dim, context_dim, output_dim, type, heads=4,
                  resnet=True, return_att_weights=False, name='attention',
-                 epsilon=1e-6, gate=True, mask_token=-1., pad_token=-2.):
+                 epsilon=1e-6, gate=True, mask_token=-1., pad_token=-2., **kwargs):
         super().__init__(name=name)
         assert isinstance(query_dim, int) and isinstance(context_dim, int) and isinstance(output_dim, int)
         assert type in ['self', 'cross']
@@ -1338,6 +1338,89 @@ class AsymmetricPenaltyBinaryCrossentropy(tf.keras.losses.Loss):
     @classmethod
     def from_config(cls, config):
         return cls(**config)
+
+
+class BinaryActiveNegativeLoss(tf.keras.losses.Loss):
+    """
+    Binary Active-Negative Loss (ANL-CE)
+    Combines normalized cross entropy (NCE) and normalized negative cross entropy (NNCE)
+    to balance active and negative learning signals.
+
+    Args:
+        alpha: Weight for the active loss component (default: 1.0)
+        beta: Weight for the negative loss component (default: 0.5)
+        min_prob: Minimum probability threshold for numerical stability (default: 1e-7)
+        reduction: Type of reduction to apply to loss (default: 'sum_over_batch_size')
+        name: Optional name for the loss instance
+    """
+    def __init__(
+            self,
+            alpha=3.0,
+            beta=3.0,
+            min_prob=0.02,
+            reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE,
+            name='binary_active_negative_loss',
+            **kwargs
+    ):
+        super().__init__(reduction=reduction, name=name)
+        self.alpha = alpha
+        self.beta = beta
+        self.min_prob = min_prob
+
+    def _binary_normalized_cross_entropy(self, y_true, y_pred):
+        """Binary Normalized Cross Entropy (NCE)"""
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1 - epsilon)
+        bce_numerator = -(
+                y_true * tf.math.log(y_pred) +
+                (1 - y_true) * tf.math.log(1 - y_pred)
+        )
+        log_prob_sum = -(tf.math.log(y_pred) + tf.math.log(1 - y_pred))
+        log_prob_sum = tf.maximum(log_prob_sum, epsilon)
+        nce = bce_numerator / log_prob_sum
+        return nce
+
+    def _binary_normalized_negative_cross_entropy(self, y_true, y_pred):
+        """Binary Normalized Negative Cross Entropy (NNCE)"""
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, self.min_prob, 1 - self.min_prob)
+        A = -tf.math.log(tf.constant(self.min_prob))
+        log_p_transform = A + tf.math.log(y_pred)
+        log_1mp_transform = A + tf.math.log(1 - y_pred)
+        neg_ce_numerator = (
+                y_true * log_p_transform +
+                (1 - y_true) * log_1mp_transform
+        )
+        neg_ce_denominator = tf.maximum(
+            log_p_transform + log_1mp_transform,
+            epsilon
+        )
+
+        nnce = 1 - (neg_ce_numerator / neg_ce_denominator)
+        return nnce
+
+    def call(self, y_true, y_pred):
+        """
+        Compute the Binary Active-Negative Loss.
+        Args:
+            y_true: Ground truth labels
+            y_pred: Predicted probabilities
+        Returns:
+            Loss value (per sample, before reduction)
+        """
+        active_loss = self._binary_normalized_cross_entropy(y_true, y_pred)
+        negative_loss = self._binary_normalized_negative_cross_entropy(y_true, y_pred)
+        return self.alpha * active_loss + self.beta * negative_loss
+
+    def get_config(self):
+        """Returns the config of the loss for serialization."""
+        config = super().get_config()
+        config.update({
+            'alpha': self.alpha,
+            'beta': self.beta,
+            'min_prob': self.min_prob
+        })
+        return config
 
 
 # Training utilities
