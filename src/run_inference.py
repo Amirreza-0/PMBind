@@ -25,9 +25,9 @@ with open(config_path, "r") as f:
 # Configuration for inference
 CONFIG = {
     # Directory containing all your trained model folders
-    "BASE_MODEL_DIR": "../results/PMBind_runs/",
+    "BASE_MODEL_DIR": "/media/amirreza/Crucial-500/BASE_MODEL_DIR",
     # Base directory where all inference output will be saved
-    "BASE_OUTPUT_FOLDER": "../results/PMBind_inference/",
+    "BASE_OUTPUT_FOLDER": "/media/amirreza/Crucial-500/BASE_MODEL_DIR/Inference_Results",
     # Paths loaded from training_paths.json
     "ALLELE_SEQ_PATH": PATHS_CONFIG["allele_seq_path"],
     "EMBEDDING_KEY_PATH": PATHS_CONFIG["embedding_key_path"],
@@ -40,7 +40,7 @@ CONFIG = {
     # MHC Class (1 or 2)
     "MHC_CLASS": 1,
     # Batch size for inference
-    "BATCH_SIZE": 256
+    "BATCH_SIZE": 10
 }
 
 
