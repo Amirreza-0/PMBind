@@ -102,6 +102,9 @@ Special amino acids B and Z:
     Values: Average of the two possible residues
 """
 
+import numpy as np
+import pandas as pd
+
 # ============================================================================
 # RAW VALUES WITH SOURCES
 # ============================================================================
@@ -136,9 +139,6 @@ peptide_binding_encoding_raw = {
     # Special token
     "X": [ 0.000,  0.000,  0.000,  0.000,  0.000, 135, 105, 0, 1.5, 1.5, 0.400,  8.0, 6.00, -0.50],
 }
-
-import numpy as np
-import pandas as pd
 
 feature_names = [
     "Atchley1_PAH", "Atchley2_PSS", "Atchley3_MS", "Atchley4_CC", "Atchley5_EC",
