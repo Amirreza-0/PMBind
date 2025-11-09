@@ -104,6 +104,8 @@ Special amino acids B and Z:
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # ============================================================================
 # RAW VALUES WITH SOURCES
@@ -259,9 +261,6 @@ for i, aa in enumerate(peptide[:3]):
 # ============================================================================
 # CORRELATION ANALYSIS AND VISUALIZATION
 # ============================================================================
-
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # Calculate correlation matrix
 correlation_matrix = df_normalized.corr()
