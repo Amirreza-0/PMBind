@@ -14,7 +14,7 @@ from sklearn.neighbors import NearestNeighbors
 from kneed import KneeLocator
 import matplotlib.colors as mcolors
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, confusion_matrix
-from utils import (AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask,
+from utils_Phys import (AttentionLayer, PositionalEncoding, AnchorPositionExtractor, SplitLayer, ConcatMask,
                    MaskedEmbedding, reduced_anchor_pair, cn_terminal_amino_acids, peptide_properties_biopython)
 
 from matplotlib.patches import Rectangle
@@ -300,6 +300,8 @@ def _plot_umap(
         legend_style: str = "detailed",
         legend_font_size: int = 16,
         cbar_font_size: int = 12,
+        edgewidth: float = 0.0,
+        shape_by_labels: pd.Series | None = None,
 ):
     """
     Draw a UMAP scatter plot.
@@ -368,7 +370,9 @@ def _plot_umap(
         sc = ax.scatter(
             embedding[:, 0], embedding[:, 1],
             c=codes, cmap=cmap, norm=norm,
-            s=point_size, alpha=0.7, rasterized=True
+            s=point_size, alpha=0.7, rasterized=True,
+            edgecolors='black' if edgewidth > 0 else 'none',
+            linewidths=edgewidth
         )
 
     else:  # "detailed"
@@ -378,8 +382,38 @@ def _plot_umap(
             colour = color_map.get(lbl, default_grey)
             ax.scatter(
                 embedding[mask, 0], embedding[mask, 1],
-                c=[colour], label=lbl, s=point_size, alpha=0.7, rasterized=True
+                c=[colour], label=lbl, s=point_size, alpha=0.7, rasterized=True,
+                edgecolors='black' if edgewidth > 0 else 'none',
+                linewidths=edgewidth
             )
+
+    # 1.5 Overlay shapes based on a categorical variable (e.g., alleles)
+    if shape_by_labels is not None:
+        unique_shape_labels = shape_by_labels.unique()
+        # Define a comprehensive list of distinct marker shapes
+        marker_shapes = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h', 'H', '8', 'P', 'X', 'd', '|', '_',
+                        '1', '2', '3', '4', '+', 'x']
+
+        # Limit to reasonable number of shapes to avoid overcrowding
+        max_shapes_to_show = min(15, len(unique_shape_labels))
+        selected_shape_labels = sorted(unique_shape_labels)[:max_shapes_to_show]
+
+        for i, shape_lbl in enumerate(selected_shape_labels):
+            mask = (shape_by_labels == shape_lbl)
+            if np.any(mask):
+                marker = marker_shapes[i % len(marker_shapes)]
+                # Get the colors for these points from the underlying data
+                point_colors = [color_map.get(lbl, default_grey) for lbl in labels[mask]]
+                ax.scatter(
+                    embedding[mask, 0], embedding[mask, 1],
+                    c='none',
+                    marker=marker,
+                    s=point_size * 1.5,
+                    edgecolors=point_colors,
+                    linewidth=0.5,
+                    alpha=0.8,
+                    rasterized=True
+                )
 
     # 2.  Highlight selected alleles
     if alleles_to_highlight:
@@ -460,7 +494,7 @@ def _plot_umap(
                     highlight_handles, highlight_labels,
                     title='Highlighted Alleles', bbox_to_anchor=(1.05, 1),
                     loc='upper left', frameon=True, fontsize=legend_font_size,
-                    title_fontsize=20, markerscale=4.0
+                    title_fontsize=20, markerscale=6.0
                 )
                 ax.add_artist(first_legend)
 
@@ -514,7 +548,7 @@ def _plot_umap(
                     regular_handles, regular_labels, title=legend_name,
                     bbox_to_anchor=(1.05, 0.75 if highlight_handles else 1),
                     loc='upper left', fontsize=legend_font_size, frameon=True,
-                    title_fontsize=20, markerscale=4.0
+                    title_fontsize=20, markerscale=6.0
                 )
 
     # 5.  Save & close
@@ -604,6 +638,9 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
     print(f"\n--- Processing {latent_type.capitalize()} Latents ---")
     np.random.seed(999)  # for reproducibility
 
+    if highlight_mask is None:
+        point_size = point_size * 5  # increase point size if no highlights
+
     # Ensure latents are 2D
     if latents.ndim > 2:
         latents = latents.reshape((latents.shape[0], -1))
@@ -617,16 +654,17 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         embedding=embedding, labels=alleles, color_map=allele_color_map,
         title=f'UMAP of {latent_type.capitalize()} Latents ({len(df)} Samples)\nColored by {len(alleles.cat.categories)} Unique Alleles',
         filename=os.path.join(out_dir, f"umap_raw_{latent_type}.png"),
-        alleles_to_highlight=random_alleles_to_highlight,
+        alleles_to_highlight=None,  # No shape markers on raw plot
         figsize=figsize,
         point_size=point_size,
         legend_=False,
-        highlight_mask=highlight_mask,
+        # highlight_mask=highlight_mask,
         legend_font_size=legend_font_size,
-        cbar_font_size=cbar_font_size
+        cbar_font_size=cbar_font_size,
+        edgewidth=0.0
     )
 
-    # --- DBSCAN Clustering ---
+   # --- UMAP Plot (Colored by Assigned Label) ---
     label_colors = {0: 'blue', 1: 'red'}
     _plot_umap(
         embedding=embedding, labels=df['assigned_label'], color_map=label_colors,
@@ -640,6 +678,29 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         cbar_font_size=cbar_font_size
     )
 
+    # --- UMAP Plot (Colored by Predicted Probability) ---
+    if 'prediction_score' in df.columns:
+        # Generate proper color map for continuous prediction scores (blue -> yellow -> red)
+        pred_scores = df['prediction_score']
+        vmin, vmax = pred_scores.min(), pred_scores.max()
+        cmap = plt.cm.RdYlBu_r # Reversed: blue (low) -> yellow (mid) -> red (high)
+        norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        pred_color_map = {val: cmap(norm(val)) for val in pred_scores.unique()}
+        _plot_umap(
+            embedding=embedding, labels=pred_scores, color_map=pred_color_map,
+            title=f'UMAP of {latent_type.capitalize()} Latents Colored by Prediction Score\nShapes indicate different alleles',
+            filename=os.path.join(out_dir, f"umap_{latent_type}_by_prediction_score.png"),
+            legend_name='Prediction Score',
+            highlight_mask=highlight_mask,
+            figsize=figsize, point_size=point_size,
+            legend_=True,
+            legend_style='bar',
+            legend_font_size=legend_font_size,
+            cbar_font_size=cbar_font_size,
+            shape_by_labels=alleles  # Add shapes for each unique allele
+        )
+
+    # --- DBSCAN Clustering ---
     clusters = _run_dbscan_and_plot(
         embedding=embedding, alleles=alleles,
         latent_type=latent_type, out_dir=out_dir,
@@ -708,16 +769,19 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
         title=f'UMAP of {latent_type.capitalize()} Latents by Reduced Anchor Pairs\n({len(unique_anchor_pairs)} unique pairs)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_reduced_legacy.png"),
         legend_name='Anchor Pair (Reduced)', figsize=figsize, point_size=point_size, legend_=True,
-        legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2
+        legend_font_size=legend_font_size // 2, cbar_font_size=cbar_font_size // 2,
+        edgewidth=0.0
     )
 
     # Plot by Anchor Pair with Amino Acid Colors
+    # Use a taller figsize for the extended plot since it has multiple rows
+    extended_figsize = (figsize[0], 60)  # Keep width, increase height to 60
     plot_anchor_pairs_with_amino_acid_colors_extended(
         embedding=embedding,
         peptide_sequences=df['long_mer'],
         title=f'UMAP of {latent_type.capitalize()} Latents by Anchor Pairs\nColored by 1st Anchor AA (face) and 2nd Anchor AA (outline)',
         filename=os.path.join(out_dir, f"umap_{latent_type}_by_anchor_pair_aa_colors_extended.png"),
-        figsize=figsize,
+        figsize=extended_figsize,
         point_size=point_size
     )
     plot_anchor_pairs_with_amino_acid_colors(
@@ -751,14 +815,18 @@ def _analyze_latents(latents, df, alleles, allele_color_map, random_alleles_to_h
     physiochem_df = df['long_mer'].apply(peptide_properties_biopython).apply(pd.Series)
     for prop in ['hydrophobicity', 'charge', 'fraction_polar']:
         prop_values = physiochem_df[prop]
-        cmap = plt.cm.viridis
-        norm = plt.Normalize(vmin=prop_values.min(), vmax=prop_values.max())
-        prop_color_map = {val: cmap(norm(val)) for val in prop_values.unique()}
+
+        # Use percentile-based normalization for better color distribution
+        vmin, vmax = np.percentile(prop_values, [5, 95])
+        cmap = plt.cm.RdYlBu_r if prop == 'charge' else plt.cm.plasma
+        norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        prop_color_map = {val: cmap(norm(np.clip(val, vmin, vmax))) for val in prop_values.unique()}
+
         _plot_umap(
             embedding=embedding, labels=prop_values, color_map=prop_color_map,
             title=f'UMAP of {latent_type.capitalize()} Latents by Peptide {prop.capitalize()}',
             filename=os.path.join(out_dir, f"umap_{latent_type}_by_pep_{prop}.png"),
-            legend_style='bar', figsize=figsize, point_size=point_size,
+            legend_style='bar', figsize=figsize, point_size=point_size, legend_name=prop.capitalize(),
             legend_=True, legend_font_size=legend_font_size, cbar_font_size=cbar_font_size
         )
 
@@ -956,8 +1024,8 @@ def plot_anchor_pairs_with_amino_acid_colors(
             alpha=alpha,
             label=aa,
             rasterized=True,
-            edgecolors='black',
-            linewidths=0.3
+            edgecolors='none',
+            linewidths=0.0
         )
 
     ax1.set_xlabel('UMAP Dimension 1', fontsize=12)
@@ -982,8 +1050,8 @@ def plot_anchor_pairs_with_amino_acid_colors(
             alpha=alpha,
             label=aa,
             rasterized=True,
-            edgecolors='black',
-            linewidths=0.3
+            edgecolors='none',
+            linewidths=0.0
         )
 
     ax2.set_xlabel('UMAP Dimension 1', fontsize=12)
@@ -1016,8 +1084,8 @@ def plot_anchor_pairs_with_amino_acid_colors(
                 alpha=alpha,
                 marker=marker,
                 rasterized=True,
-                edgecolors='black',
-                linewidths=0.5
+                edgecolors='none',
+                linewidths=0.0
             )
 
     ax3.set_xlabel('UMAP Dimension 1', fontsize=12)
@@ -1148,10 +1216,10 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
         peptide_sequences: pd.Series,
         title: str,
         filename: str,
-        figsize: tuple = (20, 12),
-        point_size: int = 30,
-        alpha: float = 0.6,
-        show_top_n_pairs: int = 9
+        figsize: tuple = (20, 50),
+        point_size: int = 50,
+        alpha: float = 0.9,
+        show_top_n_pairs: int = 8
 ):
     """
     Improved visualization showing anchor pairs with multiple views:
@@ -1183,16 +1251,16 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
     pair_counts = Counter(pair_labels)
     top_pairs = [pair for pair, _ in pair_counts.most_common(show_top_n_pairs)]
 
-    # Set up the grid layout
+    # Set up the grid layout - make width larger and adjust ratios for square lower plots
     fig = plt.figure(figsize=figsize)
     gs = GridSpec(4, 4, figure=fig, hspace=0.35, wspace=0.3,
-                  height_ratios=[1.2, 1, 1, 1], width_ratios=[1, 1, 1, 1])
+                  height_ratios=[1.2, 1, 1.2, 1.2], width_ratios=[1, 1, 1, 1])
 
     # === Top Row: Side-by-side anchor position plots ===
     ax_first = fig.add_subplot(gs[0, 0:2])
     ax_second = fig.add_subplot(gs[0, 2:4])
 
-    # Plot first anchor position
+    # Plot first anchor position with increased alpha and point size
     unique_first = sorted(set(first_anchors.values))
     for aa in unique_first:
         mask = (first_anchors == aa)
@@ -1201,11 +1269,11 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
             embedding[mask, 0],
             embedding[mask, 1],
             c=[color],
-            s=point_size,
-            alpha=alpha,
+            s=point_size * 1.5,
+            alpha=0.95,
             label=aa,
             edgecolors='white',
-            linewidth=0.5,
+            linewidth=0.1,
             rasterized=True
         )
 
@@ -1214,8 +1282,9 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
     ax_first.set_title('First Anchor Position (P2)', fontsize=14, fontweight='bold', pad=10)
     ax_first.legend(loc='best', ncol=2, fontsize=9, framealpha=0.9)
     ax_first.grid(True, alpha=0.3)
+    ax_first.set_aspect('equal', adjustable='box')
 
-    # Plot second anchor position
+    # Plot second anchor position with increased alpha and point size
     unique_second = sorted(set(second_anchors.values))
     for aa in unique_second:
         mask = (second_anchors == aa)
@@ -1224,11 +1293,11 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
             embedding[mask, 0],
             embedding[mask, 1],
             c=[color],
-            s=point_size,
-            alpha=alpha,
+            s=point_size * 1.5,
+            alpha=0.95,
             label=aa,
             edgecolors='white',
-            linewidth=0.5,
+            linewidth=0.1,
             rasterized=True
         )
 
@@ -1237,6 +1306,7 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
     ax_second.set_title('Second Anchor Position (C-terminal)', fontsize=14, fontweight='bold', pad=10)
     ax_second.legend(loc='best', ncol=2, fontsize=9, framealpha=0.9)
     ax_second.grid(True, alpha=0.3)
+    ax_second.set_aspect('equal', adjustable='box')
 
     # === Middle Left: Anchor pair frequency heatmap ===
     ax_heatmap = fig.add_subplot(gs[1, 0:2])
@@ -1334,6 +1404,7 @@ def plot_anchor_pairs_with_amino_acid_colors_extended(
         ax_small.set_xticks([])
         ax_small.set_yticks([])
         ax_small.grid(True, alpha=0.2)
+        ax_small.set_aspect('equal', adjustable='box')  # Make plots square
 
         # Add border color based on first anchor
         first_aa = pair.split('-')[0]
