@@ -9,7 +9,7 @@ PMBind is a deep learning framework for predicting peptide-MHC binding interacti
 PMBind predicts peptide binding to Major Histocompatibility Complex (MHC) molecules using:
 - Multi-task learning (binding prediction + sequence reconstruction)
 - 2D-masked cross-attention transformer
-- ESM-2 protein language model embeddings
+- ESM-C600m protein language model embeddings
 - Physicochemical peptide encoding
 
 ## Installation
@@ -36,18 +36,18 @@ Extract to the `data/` directory.
 cd src/
 python create_dataset.py
 python preprocessing/run_ESM.py --input ../data/PMDb_alleles_sequences_aligned.csv \
-                                --model esmc_300m --device cuda:0
+                                --model esmc_600m --device cuda:0
 python create_tfrecords.py
 ```
 
 ### 2. Train Model
 ```bash
-python run_training.py --epochs 100 --batch_size 512
+python run_training.py --fold 1
 ```
 
 ### 3. Run Inference
 ```bash
-python run_inference.py --model_weights h5/best_model.weights.h5 \
+python run_inference.py --model_weights best_model.weights.keras \
                        --test_data ../data/test.parquet
 ```
 
@@ -69,15 +69,12 @@ PMBind/
 
 - `run_training.py` - Train the model
 - `run_inference.py` - Run predictions
-- `infer_binding_affinity.py` - Analyze binding affinity correlations
-- `accumulative_attention.py` - Visualize attention patterns
-- `run_grid_search.py` - Hyperparameter tuning
 
 ## Model Architecture
 
 PMBind uses a transformer with:
 - Peptide encoding: BLOSUM62 + physicochemical properties (14D)
-- MHC encoding: ESM-2 embeddings (1536D)
+- MHC encoding: ESM-C embeddings (1152D)
 - 2D-masked cross-attention (prevents self-attention, enables cross-attention)
 - Multi-task heads: binding prediction, peptide reconstruction, MHC reconstruction
 
