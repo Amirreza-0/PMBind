@@ -4,9 +4,9 @@ models.py
 -------------------------
 
 End-to-end peptide × MHC cross-attention reconstruction model.
-This multi-task model architecture jointly learns a binary binding label (classification) and per-residue reconstruction for both peptide and MHC. A shared transformer-style encoder with a custom 2D-masked cross-attention produces a latent sequence that supports clustering and downstream analyses; the model exposes attention weights and pooled latent vectors for explainability, visualization, and unsupervised / classification guided clustering of pMHCs..
+This multi-task model architecture jointly learns a binary binding label (classification) and per-residue reconstruction for peptide. A shared transformer-style encoder with a custom 2D-masked cross-attention produces a latent sequence that supports clustering and downstream analyses; the model exposes attention weights and pooled latent vectors for explainability, visualization, and unsupervised / classification guided clustering of pMHCs..
 
-Author: Amirreza Aleyasin 2025-10-02
+Author: Amirreza Aleyasin 2025-12-12
 """
 import tensorflow as tf
 from tensorflow import keras
@@ -18,255 +18,303 @@ from utils import (
     MaskedEmbedding,
     GlobalMeanPooling1D,
     GlobalSTDPooling1D,
-    SelfAttentionWith2DMask,
-    SelfAttentionWith2DMask2
+    GlobalMaxPooling1D,
+    AttentionLayer,
+    SelfAttentionWith2DMaskRMSNorm,
+    SpatialTemporalDropout1D,
+    SubtractLayer
 )
 
 
-
-def pmbind_multitask(max_pep_len: int,
-                        max_mhc_len: int,
-                        emb_dim: int = 32,
-                        heads: int = 2,
-                        transformer_layers: int = 2,
-                        mask_token: float = MASK_TOKEN,
-                        pad_token: float = PAD_TOKEN,
-                        noise_std: float = 0.1,
-                        latent_dim: int = 128,
-                        drop_out_rate: float = 0.2,
-                        l2_reg: float = 0.01,
-                        ESM_dim: int = 1536):
+def pmbind_multitask_v12(max_pep_len: int,
+                         max_mhc_len: int,
+                         pep_dim: int = 14,
+                         emb_dim: int = 32,
+                         heads: int = 8,
+                         transformer_layers: int = 2,
+                         mask_token: float = MASK_TOKEN,
+                         pad_token: float = PAD_TOKEN,
+                         noise_std: float = 0.1,
+                         latent_dim: int = 32,
+                         drop_out_rate: float = 0.18,
+                         l2_reg: float = 0.01,
+                         ESM_dim: int = 14,
+                         return_logits: bool = False):
     """
     A multi-task model for pMHC reconstruction and binding prediction.
     """
     # -------------------------------------------------------------------
     # INPUTS
     # -------------------------------------------------------------------
-    pep_blossom62_in = layers.Input((max_pep_len, 23), name="pep_blossom62")
-    pep_mask_in = layers.Input((max_pep_len,), name="pep_mask")
-    pep_ohe_target_in = layers.Input((max_pep_len, 21), name="pep_ohe_target")
+    pep_in = layers.Input((max_pep_len, pep_dim), name="pep_emb")  # (B, P, D)
+    pep_mask_in = layers.Input((max_pep_len,), name="pep_mask")  # (B, P)
+    pep_ohe_target_in = layers.Input((max_pep_len, 21),
+                                     name="pep_ohe_target")  # (B, P, 21) one-hot encoded target for reconstruction
 
-    mhc_emb_in = layers.Input((max_mhc_len, ESM_dim), name="mhc_emb")
-    mhc_mask_in = layers.Input((max_mhc_len,), name="mhc_mask")
-    mhc_ohe_target_in = layers.Input((max_mhc_len, 21), name="mhc_ohe_target")
+    mhc_emb_in = layers.Input((max_mhc_len, ESM_dim), name="mhc_emb")  # (B, M, ESM_dim)
+    mhc_mask_in = layers.Input((max_mhc_len,), name="mhc_mask")  # (B, M)
 
     # -------------------------------------------------------------------
-    # SHARED ENCODER
+    # input processing
     # -------------------------------------------------------------------
     # 1. Embed Peptide and MHC to the same dimension
-    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_blossom62_in, pep_mask_in)
-    # pep = layers.LayerNormalization(name="pep_norm_input1")(pep)
-    pep = PositionalEncoding(23, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)
-    pep = layers.GaussianNoise(noise_std, name="pep_gaussian_noise")(pep)
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_in, pep_mask_in)  # (B, P, D)
+    pep = PositionalEncoding(pep_dim, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)  # (B, P, D)
+    pep = layers.GaussianNoise(noise_std, name="pep_gaussian_noise")(pep)  # (B, P, D)
     pep = layers.SpatialDropout1D(drop_out_rate, name="pep_dropout")(
         pep)  # SpatialDropout1D for sequence data to drop entire feature maps
-    pep = layers.Dense(emb_dim, name="pep_dense_embed")(pep)
-    pep = layers.Dropout(drop_out_rate)(pep)
 
-    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc_emb_in, mhc_mask_in)
-    # mhc = layers.LayerNormalization(name="mhc_norm_layer_inp")(mhc)
-    mhc = layers.GaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc)
-    mhc = PositionalEncoding(ESM_dim, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc_emb_in, mhc_mask_in)  # (B, M, ESM_dim)
+    mhc = layers.GaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc)  # (B, M, ESM_dim)
+    mhc = PositionalEncoding(ESM_dim, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)  # (B, M, ESM_dim)
     mhc = layers.SpatialDropout1D(drop_out_rate, name="mhc_dropout")(
         mhc)  # SpatialDropout1D for sequence data to drop entire feature maps
-    mhc = layers.Dense(emb_dim, name="mhc_dense_embed")(mhc)
-    mhc = layers.Dropout(drop_out_rate)(mhc)
-    #mhc = layers.LayerNormalization(name="mhc_layer_norm")(mhc)
 
-    pmhc_concat = layers.Concatenate(axis=1, name="pmhc_concat")([pep, mhc])  # (B, P+M, D)
+    # -------------------------------------------------------------------
+    # Subtract pep from MHC embeddings
+    # -------------------------------------------------------------------
+    mhc_subtracted = SubtractLayer(name="mhc_subtract_pep")(pep, pep_mask_in, mhc, mhc_mask_in)  # (B, M, P*D)
+    # P*D is now our new MHC embedding dimension after subtraction
 
-    # pmhc self-attention with 2D mask
-    pmhc_interaction, pmhc_attn_weights = SelfAttentionWith2DMask(
-        query_dim=emb_dim,
-        context_dim=emb_dim,
-        output_dim=emb_dim,
+    # layer norm
+    mhc_subtracted = layers.LayerNormalization(epsilon=1e-6, name="mhc_subtract_layernorm")(mhc_subtracted)
+
+    mhc_subtracted = layers.Dense(latent_dim, activation="gelu",
+                                  kernel_regularizer=keras.regularizers.l2(l2_reg),
+                                  bias_regularizer=keras.regularizers.l2(l2_reg),
+                                  name="mhc_subtract_dense")(mhc_subtracted)  # (B, M, L)
+
+    # Normal self attention
+    pmhc_interaction, pmhc_attn_weights = AttentionLayer(
+        query_dim=latent_dim,
+        context_dim=latent_dim,
+        output_dim=latent_dim,
+        type='self',
         heads=heads,
+        resnet=True,
         return_att_weights=True,
-        self_attn_mhc=False,  # Prevent both peptide and MHC self-attention in this layer
+        name='pmhc_self_attention',
+        epsilon=1e-6,
+        gate=True,
+        mask_token=mask_token,
+        pad_token=pad_token,
         apply_rope=True,
-        name="pmhc_2d_masked_attention"
-    )(pmhc_concat, pep_mask_in, mhc_mask_in)
+    )(mhc_subtracted, mhc_mask_in)  # (B, M, L), (B, heads, M, M)
 
-    # The final output of the encoder is our shared latent sequence
-    latent_sequence = pmhc_interaction  # Shape: (B, P+M, D)
-    #latent_sequence = layers.BatchNormalization(name="latent_sequence_norm")(latent_sequence)
+    pmhc_pool = GlobalMaxPooling1D(name="mhc_pool_after_subtract", axis=-2)(pmhc_interaction)  # (B, L)
+
+    pmhc_pool = layers.Dense(
+        pep_dim * max_pep_len,
+        activation=None,
+        kernel_regularizer=keras.regularizers.l2(l2_reg),
+        bias_regularizer=keras.regularizers.l2(l2_reg),
+        name="mhc_project_after_subtract"
+    )(pmhc_pool)  # (B, P*D)
+
+    # # (B, P*D) to (B, P, D) - reshape without learnable layers
+    pmhc = layers.Reshape((max_pep_len, pep_dim), name="mhc_reshape")(pmhc_pool)  # (B, P, D)
+
+    latent_sequence = pmhc
 
     # -------------------------------------------------------------------
     # TASK 1: BINDING PREDICTION HEAD # this part directly affects clustering
     # -------------------------------------------------------------------
     # pooled_latent = GlobalMaxPooling1D(name="latent_vector_pool-2", axis=-2)(latent_sequence) # (B, D) # Tells how strong the overall signal is across the sequence (using this forces the model to pu one feature as the distance/binder information)
-    pooled_std2 = GlobalSTDPooling1D(name="latent_vector_std-2", axis=-2)(
-       latent_sequence)  # (B, D) # Tells how much variation there is in the signal across the sequence
-    pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(
-       latent_sequence)  # (B, P+M) # Tells how strong the overall signal is across the features
+    # pooled_std2 = GlobalSTDPooling1D(name="latent_vector_std-2", axis=-2)(
+    #    latent_sequence)  # (B, D) # Tells how much variation there is in the signal across the sequence
+    # pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(
+    #    latent_sequence)  # (B, P+M) # Tells how strong the overall signal is across the features
     # pooled_std1 = GlobalSTDPooling1D(name="latent_vector_std-1", axis=-1)(latent_sequence)  # (B, P+M) # Tells how much variation there is in the signal across the features
 
     # concatenate mean and std pooled vectors
-    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)(
-       [pooled_mean1, pooled_std2])  # (B, 1*(D+P+M))
+    # pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)(
+    #    [pooled_mean1, pooled_std2])  # (B, 1*(D+P+M))
 
+    pooled_latent = GlobalMaxPooling1D(name="latent_vector_pool", axis=-2)(latent_sequence)  # (B, D)
     binding_head = layers.Dropout(drop_out_rate * 1.5, name='dropout_pooled_latent')(pooled_latent)
     binding_head = layers.Dense(emb_dim // 2, activation="gelu", name="binding_dense1",
                                 kernel_regularizer=keras.regularizers.l2(l2_reg),
                                 bias_regularizer=keras.regularizers.l2(l2_reg))(binding_head)
     binding_head = layers.Dropout(drop_out_rate, name="binding_dropout2")(binding_head)
-    binding_pred = layers.Dense(1, activation="sigmoid", name="binding_pred", dtype="float32")(binding_head)  # (B, 1)
+    binding_activation = None if return_logits else "sigmoid"
+    binding_pred = layers.Dense(1, activation=binding_activation, name="binding_pred", dtype="float32")(
+        binding_head)  # (B, 1)
 
     # -------------------------------------------------------------------
     # TASK 2: RECONSTRUCTION HEAD
     # -------------------------------------------------------------------
-    pep_latent_seq = latent_sequence[:, :max_pep_len, :]  # (B, P, D)
-    mhc_latent_seq = latent_sequence[:, max_pep_len:, :]  # (B, M, D)
-
-    pep_recon_head = layers.Dropout(drop_out_rate, name='pep_recon_dropout_1')(pep_latent_seq)
-    pep_recon_head = layers.Dense(emb_dim * 2, activation='relu')(pep_recon_head)
+    pep_recon_head = layers.Dropout(drop_out_rate, name='pep_recon_dropout_1')(latent_sequence)
+    pep_recon_head = layers.Dense(emb_dim * 2, activation='gelu')(pep_recon_head)
     pep_recon_head = layers.Dropout(drop_out_rate, name='pep_recon_dropout_2')(pep_recon_head)
     pep_recon_pred = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon_head)
 
-    mhc_recon_head = layers.Dropout(drop_out_rate, name='mhc_recon_dropout_1')(mhc_latent_seq)
-    mhc_recon_head = layers.Dense(emb_dim * 2, activation='relu')(mhc_recon_head)
-    mhc_recon_head = layers.Dropout(drop_out_rate, name='mhc_recon_dropout_2')(mhc_recon_head)
-    mhc_recon_pred = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon_head)
-
     pep_out = layers.Concatenate(name='pep_ytrue_ypred')([pep_ohe_target_in, pep_recon_pred])
-    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred')([mhc_ohe_target_in, mhc_recon_pred])
 
     # -------------------------------------------------------------------
     # MODEL DEFINITION
     # -------------------------------------------------------------------
     pMHC_multitask_model = keras.Model(
-        inputs=[pep_blossom62_in, pep_mask_in, mhc_emb_in, mhc_mask_in, pep_ohe_target_in, mhc_ohe_target_in],
+        inputs=[pep_in, pep_mask_in, mhc_emb_in, mhc_mask_in, pep_ohe_target_in],
         outputs={
             "pep_ytrue_ypred": pep_out,
-            "mhc_ytrue_ypred": mhc_out,
             "cls_ypred": binding_pred,
-            "attn_weights": pmhc_attn_weights,  # (B, heads, P+M, P+M)
-            "latent_vector": pooled_latent,  # (B, P+M+D)
-            "latent_seq": latent_sequence  # (B, P+M, D)
+            "attn_weights": pmhc_attn_weights,  # (B, heads, M, M)
+            "latent_vector": pooled_latent,  # (B, D+P+M)
+            "latent_seq": latent_sequence  # (B, P, D)
         },
-        name="pMHC_Multitask_Transformer_Custom_Attention"
+        name="pMHC_Multitask_Transformer_Subtract_CrossAttention_Model_V12"
     )
 
     return pMHC_multitask_model
 
-# Slightly deeper model
 
-def pmbind_multitask_plus(max_pep_len: int,
-                          max_mhc_len: int,
-                          emb_dim: int = 32,
-                          heads: int = 8,
-                          transformer_layers: int = 2,
-                          mask_token: float = MASK_TOKEN,
-                          pad_token: float = PAD_TOKEN,
-                          noise_std: float = 0.1,
-                          latent_dim: int = 128,
-                          drop_out_rate: float = 0.18,
-                          l2_reg: float = 0.03,
-                          ESM_dim: int = 1536):
+def pmbind_multitask_v17(max_pep_len: int,
+                         max_mhc_len: int,
+                         pep_dim: int = 14,
+                         mhc_dim: int = 14,
+                         emb_dim: int = 32,
+                         heads: int = 8,
+                         transformer_layers: int = 2,
+                         mask_token: float = MASK_TOKEN,
+                         pad_token: float = PAD_TOKEN,
+                         noise_std: float = 0.1,
+                         latent_dim: int = 32,
+                         drop_out_rate: float = 0.18,
+                         l2_reg: float = 0.02,
+                         return_logits: bool = False):
     """
-    A multi-task model for pMHC reconstruction and binding prediction, deeper version.
+    A multi-task model for pMHC reconstruction and binding prediction.
     """
     # -------------------------------------------------------------------
     # INPUTS
     # -------------------------------------------------------------------
-    pep_blossom62_in = layers.Input((max_pep_len, 23), name="pep_blossom62")
-    pep_mask_in = layers.Input((max_pep_len,), name="pep_mask")
-    pep_ohe_target_in = layers.Input((max_pep_len, 21), name="pep_ohe_target")
+    pep_in = layers.Input((max_pep_len, pep_dim), name="pep_emb")  # (B, P, D)
+    pep_mask_in = layers.Input((max_pep_len,), name="pep_mask")  # (B, P)
+    pep_ohe_target_in = layers.Input((max_pep_len, 21),
+                                     name="pep_ohe_target")  # (B, P, 21) one-hot encoded target for reconstruction
 
-    mhc_emb_in = layers.Input((max_mhc_len, ESM_dim), name="mhc_emb")
-    mhc_mask_in = layers.Input((max_mhc_len,), name="mhc_mask")
-    mhc_ohe_target_in = layers.Input((max_mhc_len, 21), name="mhc_ohe_target")
+    mhc_emb_in = layers.Input((max_mhc_len, mhc_dim), name="mhc_emb")  # (B, M, mhc_dim)
+    mhc_mask_in = layers.Input((max_mhc_len,), name="mhc_mask")  # (B, M)
 
     # -------------------------------------------------------------------
-    # SHARED ENCODER
+    # input processing
     # -------------------------------------------------------------------
-    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_blossom62_in, pep_mask_in)
-    pep = PositionalEncoding(23, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)
-    pep = layers.SpatialDropout1D(drop_out_rate, name="pep_dropout")(pep)
-    pep = layers.Dense(emb_dim, activation="gelu", name="pep_dense_embed")(pep)
-    pep = layers.LayerNormalization(name="pep_layer_norm")(pep)
-    pep = layers.GaussianNoise(noise_std, name="pep_gaussian_noise")(pep)
-    pep = layers.Dropout(drop_out_rate//2)(pep)
+    # 1. Embed Peptide and MHC to the same dimension
+    pep = MaskedEmbedding(mask_token, pad_token, name="pep_mask_embed")(pep_in, pep_mask_in)  # (B, P, D)
+    pep = PositionalEncoding(pep_dim, int(max_pep_len * 3), name="pep_pos_enc")(pep, pep_mask_in)  # (B, P, D)
+    pep = layers.GaussianNoise(noise_std, name="pep_gaussian_noise")(pep)  # (B, P, D)
+    pep = SpatialTemporalDropout1D(drop_out_rate, name="pep_dropout")(
+        pep)  # SpatialDropout1D for sequence data to drop entire feature maps
 
-    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc_emb_in, mhc_mask_in)
-    mhc = PositionalEncoding(ESM_dim, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)
-    mhc = layers.SpatialDropout1D(drop_out_rate, name="mhc_dropout")(mhc)
-    mhc = layers.Dense(emb_dim, activation="gelu", name="mhc_dense_embed")(mhc)
-    mhc = layers.LayerNormalization(name="mhc_layer_norm_1")(mhc)
-    mhc = layers.GaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc)
-    mhc = layers.Dropout(drop_out_rate//2)(mhc)
+    mhc = MaskedEmbedding(mask_token, pad_token, name="mhc_mask_embed")(mhc_emb_in, mhc_mask_in)  # (B, M, mhc_dim)
+    mhc = layers.GaussianNoise(noise_std, name="mhc_gaussian_noise")(mhc)  # (B, M, mhc_dim)
+    mhc = PositionalEncoding(mhc_dim, int(max_mhc_len * 3), name="mhc_pos_enc")(mhc, mhc_mask_in)  # (B, M, mhc_dim)
+    mhc = SpatialTemporalDropout1D(drop_out_rate, name="mhc_dropout")(
+        mhc)  # SpatialDropout1D for sequence data to drop entire feature maps
 
-    pmhc_concat = layers.Concatenate(axis=1, name="pmhc_concat")([pep, mhc])
+    # print shapes
+    print(f"pep shape: {pep.shape}, mhc shape: {mhc.shape}")
 
+    pmhc_concat = layers.Concatenate(axis=1, name="pmhc_concat")([pep, mhc])  # (B, P+M, D)
+
+    # -------------------------------------------------------------------
+    # TRANSFORMER CROSS-ATTENTION ENCODER
+    # -------------------------------------------------------------------
     # pmhc self-attention with 2D mask
-    pmhc_interaction, pmhc_attn_weights = SelfAttentionWith2DMask2(
-        query_dim=emb_dim,
-        context_dim=emb_dim,
-        output_dim=emb_dim,
+    pmhc_inter = SelfAttentionWith2DMaskRMSNorm(
+        query_dim=pep_dim,
+        context_dim=mhc_dim,
+        output_dim=pep_dim,
+        heads=heads,
+        return_att_weights=False,
+        self_attn_mhc=False,  # Prevent both peptide and MHC self-attention in this layer
+        apply_rope=True,
+        resnet=True,
+        name="pmhc_2d_masked_attention"
+    )(pmhc_concat, pep_mask_in, mhc_mask_in)
+
+    pmhc_interaction, pmhc_attn_weights = SelfAttentionWith2DMaskRMSNorm(
+        query_dim=pep_dim,
+        context_dim=mhc_dim,
+        output_dim=pep_dim,
         heads=heads,
         return_att_weights=True,
         self_attn_mhc=False,  # Prevent both peptide and MHC self-attention in this layer
         apply_rope=True,
-        name="pmhc_2d_masked_attention2",
-        attention_dropout=drop_out_rate/2,
-        output_dropout=drop_out_rate/2
-    )(pmhc_concat, pep_mask_in, mhc_mask_in)
+        resnet=False,
+        name="pmhc_2d_masked_attention_2"
+    )(pmhc_inter, pep_mask_in, mhc_mask_in)  # (B, P+M, D)
 
-    # The final output of the encoder is our shared latent sequence
-    latent_sequence = pmhc_interaction  # Shape: (B, P+M, D)
-    #latent_sequence = layers.BatchNormalization(name="latent_sequence_norm")(latent_sequence)
+    #
+    latent_sequence = pmhc_interaction
 
     # -------------------------------------------------------------------
-    # TASK 1: BINDING PREDICTION HEAD
+    # SHARED LATENT REPRESENTATION FOR BOTH HEADS
     # -------------------------------------------------------------------
-    pooled_std2 = GlobalSTDPooling1D(name="latent_vector_std-2", axis=-2)(latent_sequence)
-    pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(latent_sequence)
+    # pooled_latent = GlobalMaxPooling1D(name="latent_vector_pool-2", axis=-2)(latent_sequence) # (B, D) # Tells how strong the overall signal is across the sequence (using this forces the model to pu one feature as the distance/binder information)
+    pooled_std2 = GlobalSTDPooling1D(name="latent_vector_std-2", axis=-2)(
+        latent_sequence)  # (B, D) # Tells how much variation there is in the signal across the sequence
+    pooled_mean1 = GlobalMeanPooling1D(name="latent_vector_pool-1", axis=-1)(
+        latent_sequence)  # (B, P+M) # Tells how strong the overall signal is across the features
+    # pooled_std1 = GlobalSTDPooling1D(name="latent_vector_std-1", axis=-1)(latent_sequence)  # (B, P+M) # Tells how much variation there is in the signal across the features
 
-    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)([pooled_mean1, pooled_std2])
+    # concatenate mean and std pooled vectors
+    pooled_latent = layers.Concatenate(name="pooled_latent_concat", axis=-1)(
+        [pooled_mean1, pooled_std2])  # (B, 1*(D+P+M))
 
-    binding_head = layers.Dropout(drop_out_rate * 1.5)(pooled_latent)
+    # -------------------------------------------------------------------
+    # TASK 1a: CORE SELECTION HEAD - g(c, S_i, MHC)
+    # -------------------------------------------------------------------
+    core_head = layers.Dropout(drop_out_rate * 1.5, name='dropout_core_head')(pooled_latent)
+    core_head = layers.Dense(emb_dim // 2, activation="gelu", name="core_dense1",
+                             kernel_regularizer=keras.regularizers.l2(l2_reg),
+                             bias_regularizer=keras.regularizers.l2(l2_reg))(core_head)
+    core_head = layers.Dropout(drop_out_rate, name="core_dropout2")(core_head)
+    core_logits = layers.Dense(1, activation=None, name="core_logits", dtype="float32")(core_head)
+
+    # -------------------------------------------------------------------
+    # TASK 1b: BINDING PREDICTION HEAD - f(c, MHC)
+    # -------------------------------------------------------------------
+    binding_head = layers.Dropout(drop_out_rate * 1.5, name='dropout_binding_head')(pooled_latent)
     binding_head = layers.Dense(emb_dim // 2, activation="gelu", name="binding_dense1",
                                 kernel_regularizer=keras.regularizers.l2(l2_reg),
                                 bias_regularizer=keras.regularizers.l2(l2_reg))(binding_head)
+    binding_head = layers.Dropout(drop_out_rate, name="binding_dropout2")(binding_head)
+    binding_logits = layers.Dense(1, activation=None, name="binding_logits", dtype="float32")(binding_head)
 
-    binding_head = layers.Dropout(drop_out_rate * 1.2)(binding_head)
-    binding_head = layers.Dense(emb_dim // 4 , activation='gelu')(binding_head)
-    binding_head = layers.Dropout(drop_out_rate)(binding_head)
-    binding_pred = layers.Dense(1, activation='sigmoid', dtype='float32')(binding_head)
+    # Optional sigmoid for direct prediction (backwards compatibility)
+    binding_pred = layers.Activation("sigmoid", name="binding_pred", dtype="float32")(
+        binding_logits) if not return_logits else binding_logits
 
     # -------------------------------------------------------------------
-    # TASK 2: RECONSTRUCTION HEAD
+    # TASK 3: RECONSTRUCTION HEAD
     # -------------------------------------------------------------------
-    pep_latent_seq = latent_sequence[:, :max_pep_len, :]
-    mhc_latent_seq = latent_sequence[:, max_pep_len:, :]
+    # Extract only the peptide portion from the latent sequence (first P positions)
+    pep_latent = latent_sequence[:, :max_pep_len, :]  # (B, P, D)
 
-    pep_recon_head = layers.Dropout(drop_out_rate, name='pep_recon_dropout_1')(pep_latent_seq)
-    pep_recon_head = layers.Dense(emb_dim * 2, activation='relu')(pep_recon_head)
+    pep_recon_head = layers.Dropout(drop_out_rate, name='pep_recon_dropout_1')(pep_latent)
+    pep_recon_head = layers.Dense(emb_dim * 2, activation='gelu')(pep_recon_head)
     pep_recon_head = layers.Dropout(drop_out_rate, name='pep_recon_dropout_2')(pep_recon_head)
-    pep_recon_pred = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred')(pep_recon_head)
-
-    mhc_recon_head = layers.Dropout(drop_out_rate, name='mhc_recon_dropout_1')(mhc_latent_seq)
-    mhc_recon_head = layers.Dense(emb_dim * 2, activation='relu')(mhc_recon_head)
-    mhc_recon_head = layers.Dropout(drop_out_rate, name='mhc_recon_dropout_2')(mhc_recon_head)
-    mhc_recon_pred = layers.Dense(21, activation='softmax', name='mhc_reconstruction_pred')(mhc_recon_head)
+    pep_recon_pred = layers.Dense(21, activation='softmax', name='pep_reconstruction_pred', dtype="float32")(
+        pep_recon_head)
 
     pep_out = layers.Concatenate(name='pep_ytrue_ypred')([pep_ohe_target_in, pep_recon_pred])
-    mhc_out = layers.Concatenate(name='mhc_ytrue_ypred')([mhc_ohe_target_in, mhc_recon_pred])
 
     # -------------------------------------------------------------------
     # MODEL DEFINITION
     # -------------------------------------------------------------------
     pMHC_multitask_model = keras.Model(
-        inputs=[pep_blossom62_in, pep_mask_in, mhc_emb_in, mhc_mask_in, pep_ohe_target_in, mhc_ohe_target_in],
+        inputs=[pep_in, pep_mask_in, mhc_emb_in, mhc_mask_in, pep_ohe_target_in],
         outputs={
             "pep_ytrue_ypred": pep_out,
-            "mhc_ytrue_ypred": mhc_out,
             "cls_ypred": binding_pred,
+            "core_logits": core_logits,  # g(c, S_i, MHC) for core selection
+            "binding_logits": binding_logits,  # f(c, MHC) for binding prediction
             "attn_weights": pmhc_attn_weights,
             "latent_vector": pooled_latent,
             "latent_seq": latent_sequence
         },
-        name="pMHC_Multitask_Transformer_Custom_Attention"
+        name="pMHC_Multitask_Transformer_Subtract_Model_V17"
     )
 
     return pMHC_multitask_model
