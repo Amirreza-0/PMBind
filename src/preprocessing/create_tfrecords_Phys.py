@@ -11,7 +11,7 @@ import json
 import time
 
 # Local utilities for sequence and key processing
-from utils_Phys import (get_embed_key, get_seq, clean_key, PAD_VALUE, PAD_INDEX_23, PAD_INDEX_OHE, NORM_TOKEN,
+from ..utils import (get_embed_key, get_seq, clean_key, PAD_VALUE, PAD_INDEX_23, PAD_INDEX_OHE, NORM_TOKEN,
                    seq_to_indices_AA_ENCODINGS, seq_to_ohe_indices, get_mhc_seq_class2, get_embed_key_class2, seq_to_aa_encodings)
 
 # --- Globals for worker processes ---

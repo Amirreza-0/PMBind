@@ -251,7 +251,7 @@ PAD_INDEX_OHE = len(AA)  # 20 total chars for OHE
 # Create a mapping from Amino Acid to an integer index
 AA_23 = "ARNDCQEGHILKMFPSTWYVBZX"
 AA_TO_BLOSUM_IDX = {aa: i for i, aa in enumerate(AA_23)}
-PAD_INDEX_62 = len(AA_23)  # The new padding index is 23
+PAD_INDEX_23 = len(AA_23)  # The new padding index is 23
 
 # Create a constant TensorFlow tensor to act as a lookup table
 AA_ENCODINGS_VECTORS = np.array([AA_ENCODINGS[aa] for aa in AA_23] + [[0.0] * len(AA_ENCODINGS[AA_23[0]])],
@@ -375,10 +375,10 @@ def AA_ENCODINGS_to_seq(blosum_matrix: np.ndarray) -> str:
 
 def seq_to_indices_AA_ENCODINGS(seq, max_seq_len):
     """Correctly converts an amino acid sequence to an array of integer indices."""
-    indices = np.full(max_seq_len, PAD_INDEX_62, dtype=np.int64)
+    indices = np.full(max_seq_len, PAD_INDEX_23, dtype=np.int64)
     for i, aa in enumerate(seq.upper()[:max_seq_len]):
         # Use the correct mapping: character -> index
-        indices[i] = AA_TO_BLOSUM_IDX.get(aa, PAD_INDEX_62)
+        indices[i] = AA_TO_BLOSUM_IDX.get(aa, PAD_INDEX_23)
     return indices
 
 
