@@ -19,8 +19,10 @@ Key Features:
 
 # %%
 import os
+import sys
 import json
 import time
+import argparse
 import warnings
 import numpy as np
 import pandas as pd
@@ -69,7 +71,7 @@ EMBED_DIM = 64  # Embedding dimension
 LATENT_DIM = 32  # Latent dimension
 NUM_HEADS = 4  # Attention heads
 BATCH_SIZE = 1024
-EPOCHS = 3
+EPOCHS = 5
 LEARNING_RATE = 5e-4
 DROPOUT_RATE = 0.3
 L2_REG = 0.003
@@ -82,8 +84,8 @@ SUBSET_SIZE = None  # e.g., 10000 for quick test, None for full data
 
 # Unseen test alleles (for holdout evaluation)
 UNSEEN_ALLELES = [
-    "Bola-300101", "H-2-KK", "HLA-A3004",
-    "HLA-B2701", "HLA-C1701", "Mamu-B06601"
+    "BOLA-300101", "H-2-KK", "HLA-A30040101",
+    "HLA-B2701", "HLA-C17010102", "MAMU-B06601"
 ]
 
 # Random seed for reproducibility
@@ -95,10 +97,24 @@ RANDOM_SEED = 999
 from datetime import datetime
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUTPUT_DIR = f"/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_{RUN_TIMESTAMP}"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(os.path.join(OUTPUT_DIR, "models"), exist_ok=True)
-os.makedirs(os.path.join(OUTPUT_DIR, "plots"), exist_ok=True)
-print(f"Output directory: {OUTPUT_DIR}")
+
+# ============================================================================
+# CHECKPOINT RESUMPTION - Set to existing run directory to continue training
+# ============================================================================
+# Set RESUME_FROM_CHECKPOINT to an existing run directory to continue training
+# e.g., RESUME_FROM_CHECKPOINT = "/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_20241220_120000"
+RESUME_FROM_CHECKPOINT = "/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_20251221_165016" #None  # Set to checkpoint directory path to resume
+
+# If resuming, use the checkpoint directory instead
+if RESUME_FROM_CHECKPOINT and os.path.exists(RESUME_FROM_CHECKPOINT):
+    OUTPUT_DIR = RESUME_FROM_CHECKPOINT
+    print(f"Resuming from checkpoint: {OUTPUT_DIR}")
+else:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "models"), exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "plots"), exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "checkpoints"), exist_ok=True)
+    print(f"Output directory: {OUTPUT_DIR}")
 np.random.seed(RANDOM_SEED)
 tf.random.set_seed(RANDOM_SEED)
 
@@ -153,7 +169,53 @@ def clean_allele_key(allele: str) -> str:
     """Clean allele name by removing special characters."""
     if allele is None:
         return ""
-    return allele.replace("*", "").replace(":", "").replace(" ", "").replace("/", "_").upper()
+    return allele.strip().replace("*", "").replace(":", "").replace(" ", "").replace("/", "_").upper()
+
+
+def normalize_allele_for_lookup(allele: str) -> str:
+    """
+    Normalize allele name for lookup, keeping the HLA-X format but removing * and :.
+    E.g., 'HLA-A*01:01' -> 'HLA-A0101'
+    """
+    if allele is None:
+        return ""
+    allele = allele.strip()
+    # Remove * and : but keep hyphens for HLA-A, HLA-B format
+    return allele.replace("*", "").replace(":", "").replace(" ", "").upper()
+
+
+def find_matching_mhc_key(allele: str, mhc_keys: set, mhc_key_to_original: Dict[str, str] = None) -> Optional[str]:
+    """
+    Find a matching MHC key for an allele, handling different precision levels.
+    
+    E.g., 'HLA-A*01:01' should match 'HLA-A01010101' (4-field format)
+    
+    Args:
+        allele: The allele to look up (e.g., 'HLA-A*01:01')
+        mhc_keys: Set of available MHC keys (already normalized)
+        mhc_key_to_original: Optional mapping from normalized key to original key
+        
+    Returns:
+        Matching key or None
+    """
+    # First try exact match with clean_allele_key
+    cleaned = clean_allele_key(allele)
+    if cleaned in mhc_keys:
+        return cleaned
+    
+    # Try normalized format (keeping HLA-A format)
+    normalized = normalize_allele_for_lookup(allele)
+    normalized_cleaned = clean_allele_key(normalized)
+    if normalized_cleaned in mhc_keys:
+        return normalized_cleaned
+    
+    # Try prefix matching for different precision levels
+    # HLA-A*01:01 -> look for keys starting with HLAA0101
+    for key in mhc_keys:
+        if key.startswith(cleaned) or cleaned.startswith(key):
+            return key
+    
+    return None
 
 
 def seq_to_encoding(sequence: str, max_len: int) -> np.ndarray:
@@ -254,9 +316,20 @@ def load_and_prepare_data(
     mhc_info = pd.read_csv(mhc_info_csv_path)
     print(f"  MHC info: {len(mhc_info)} alleles")
 
-    # Clean allele keys
+    # Clean allele keys - strip whitespace first
+    df['allele'] = df['allele'].str.strip()
     df['allele_key'] = df['allele'].apply(clean_allele_key)
     mhc_info['allele_key'] = mhc_info['key'].apply(clean_allele_key)
+    
+    # Build lookup structures for flexible matching
+    mhc_keys_set = set(mhc_info['allele_key'].unique())
+    mhc_key_to_seq = dict(zip(mhc_info['allele_key'], mhc_info['mhc_sequence']))
+    mhc_key_to_3di = dict(zip(mhc_info['allele_key'], mhc_info['pseudo_3di']))
+    
+    # Track samples before merge
+    samples_before_merge = len(df)
+    unique_alleles_in_data = set(df['allele_key'].unique())
+    unique_alleles_in_mhc = set(mhc_info['allele_key'].unique())
 
     # Merge MHC sequences
     df = df.merge(
@@ -265,11 +338,38 @@ def load_and_prepare_data(
         how='left'
     )
 
+    # Report missing MHC sequences BEFORE dropping
+    missing_mask = df['mhc_sequence'].isna()
+    missing_count = missing_mask.sum()
+    if missing_count > 0:
+        missing_alleles = df[missing_mask]['allele_key'].unique()[:10]
+        print(f"  Warning: {missing_count} samples missing MHC sequence")
+        print(f"    Sample missing allele keys: {list(missing_alleles)}")
+        print(f"    Will attempt flexible matching...")
+        
+        # Try flexible matching for missing alleles
+        for idx in df[missing_mask].index:
+            allele = df.loc[idx, 'allele']
+            matched_key = find_matching_mhc_key(allele, mhc_keys_set)
+            if matched_key:
+                df.loc[idx, 'mhc_sequence'] = mhc_key_to_seq.get(matched_key)
+                df.loc[idx, 'pseudo_3di'] = mhc_key_to_3di.get(matched_key)
+                df.loc[idx, 'allele_key'] = matched_key
+        
+        # Report remaining missing
+        still_missing = df['mhc_sequence'].isna().sum()
+        if still_missing > 0:
+            print(f"    Still missing after flexible matching: {still_missing} samples, dropping...")
+        else:
+            print(f"    All missing sequences resolved via flexible matching!")
+
     # Handle missing sequences
     missing_seq = df['mhc_sequence'].isna().sum()
     if missing_seq > 0:
-        print(f"  Warning: {missing_seq} samples missing MHC sequence, dropping...")
         df = df.dropna(subset=['mhc_sequence'])
+    
+    samples_after_merge = len(df)
+    print(f"  Samples after MHC merge: {samples_after_merge} ({samples_after_merge/samples_before_merge*100:.1f}% retained)")
 
     # Rename columns for consistency
     if 'long_mer' in df.columns:
@@ -283,18 +383,33 @@ def load_and_prepare_data(
         df = df.sample(n=subset_size, random_state=RANDOM_SEED).reset_index(drop=True)
         print(f"  After subset: {len(df)} samples")
 
-    # Load benchmark data
+    # Load benchmark data with flexible allele matching
     benchmark_df = pd.DataFrame()
     if benchmark_parquet_path and os.path.exists(benchmark_parquet_path):
         benchmark_df = pd.read_parquet(benchmark_parquet_path)
         if 'long_mer' in benchmark_df.columns:
             benchmark_df = benchmark_df.rename(columns={'long_mer': 'peptide'})
+        benchmark_df['allele'] = benchmark_df['allele'].str.strip()
         benchmark_df['allele_key'] = benchmark_df['allele'].apply(clean_allele_key)
         benchmark_df = benchmark_df.merge(
             mhc_info[['allele_key', 'mhc_sequence', 'pseudo_3di']].drop_duplicates('allele_key'),
             on='allele_key',
             how='left'
-        ).dropna(subset=['mhc_sequence'])
+        )
+        
+        # Try flexible matching for missing benchmark alleles
+        missing_bench_mask = benchmark_df['mhc_sequence'].isna()
+        if missing_bench_mask.sum() > 0:
+            print(f"  Benchmark: {missing_bench_mask.sum()} samples with missing MHC, trying flexible match...")
+            for idx in benchmark_df[missing_bench_mask].index:
+                allele = benchmark_df.loc[idx, 'allele']
+                matched_key = find_matching_mhc_key(allele, mhc_keys_set)
+                if matched_key:
+                    benchmark_df.loc[idx, 'mhc_sequence'] = mhc_key_to_seq.get(matched_key)
+                    benchmark_df.loc[idx, 'pseudo_3di'] = mhc_key_to_3di.get(matched_key)
+                    benchmark_df.loc[idx, 'allele_key'] = matched_key
+        
+        benchmark_df = benchmark_df.dropna(subset=['mhc_sequence'])
         print(f"  Benchmark: {len(benchmark_df)} samples")
 
         # Remove benchmark pairs from main dataset
@@ -303,11 +418,19 @@ def load_and_prepare_data(
         df = df[~df.apply(lambda x: (x['allele_key'], x['peptide']) in benchmark_pairs, axis=1)]
         print(f"  Removed {before_removal - len(df)} benchmark pairs from training data")
 
-    # Split unseen test alleles
-    unseen_mask = df['allele_key'].isin(UNSEEN_ALLELES)
+    # Split unseen test alleles - use cleaned keys for matching
+    unseen_allele_keys = [clean_allele_key(a) for a in UNSEEN_ALLELES]
+    unseen_mask = df['allele_key'].isin(unseen_allele_keys)
     unseen_test_df = df[unseen_mask].copy()
     df = df[~unseen_mask].copy()
-    print(f"  Unseen test alleles: {len(unseen_test_df)} samples ({unseen_test_df['allele_key'].nunique()} alleles)")
+    
+    # Report which unseen alleles were found vs expected
+    found_unseen = set(unseen_test_df['allele_key'].unique())
+    expected_unseen = set(unseen_allele_keys)
+    missing_unseen = expected_unseen - found_unseen
+    if missing_unseen:
+        print(f"  Warning: Missing unseen test alleles: {missing_unseen}")
+    print(f"  Unseen test alleles: {len(unseen_test_df)} samples ({unseen_test_df['allele_key'].nunique()}/{len(UNSEEN_ALLELES)} alleles)")
 
     # Train/validation split (stratified by label)
     train_df, val_df = train_test_split(
@@ -1146,9 +1269,44 @@ class DataGenerator(keras.utils.Sequence):
 # # 10. Mixture of Experts Training
 
 # %%
+def load_checkpoint_state(checkpoint_dir: str) -> Optional[Dict]:
+    """
+    Load checkpoint state from a directory.
+    
+    Args:
+        checkpoint_dir: Path to checkpoint directory
+        
+    Returns:
+        Dictionary with checkpoint state or None if no checkpoint found
+    """
+    checkpoint_file = os.path.join(checkpoint_dir, "checkpoints", "training_state.json")
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            state = json.load(f)
+        print(f"Loaded checkpoint state from {checkpoint_file}")
+        return state
+    return None
+
+
+def save_checkpoint_state(checkpoint_dir: str, state: Dict):
+    """
+    Save checkpoint state to a directory.
+    
+    Args:
+        checkpoint_dir: Path to checkpoint directory
+        state: Dictionary with checkpoint state
+    """
+    os.makedirs(os.path.join(checkpoint_dir, "checkpoints"), exist_ok=True)
+    checkpoint_file = os.path.join(checkpoint_dir, "checkpoints", "training_state.json")
+    with open(checkpoint_file, 'w') as f:
+        json.dump(state, f, indent=2)
+    print(f"Saved checkpoint state to {checkpoint_file}")
+
+
 class MixtureOfExpertsTrainer:
     """
     Trains multiple expert models, each specialized for a cluster of MHC alleles.
+    Supports checkpoint resumption for continuing training.
     """
 
     def __init__(
@@ -1159,7 +1317,8 @@ class MixtureOfExpertsTrainer:
             num_experts: int = NUM_EXPERTS,
             batch_size: int = BATCH_SIZE,
             epochs: int = EPOCHS,
-            patience: int = PATIENCE
+            patience: int = PATIENCE,
+            resume_from: Optional[str] = None
     ):
         self.train_df = train_df
         self.val_df = val_df
@@ -1168,10 +1327,34 @@ class MixtureOfExpertsTrainer:
         self.batch_size = batch_size
         self.epochs = epochs
         self.patience = patience
+        self.resume_from = resume_from
+        
+        # Try to load checkpoint state
+        self.checkpoint_state = None
+        if resume_from and os.path.exists(resume_from):
+            self.checkpoint_state = load_checkpoint_state(resume_from)
+            if self.checkpoint_state:
+                print(f"Found checkpoint: experts completed = {self.checkpoint_state.get('completed_experts', [])}")
 
-        # Cluster alleles
-        all_alleles = list(set(train_df['allele_key'].unique()) | set(val_df['allele_key'].unique()))
-        self.allele_to_cluster = cluster_mhc_alleles(mhc_info, all_alleles, num_experts)
+        # Load allele_to_cluster from checkpoint if available
+        if self.checkpoint_state and 'allele_to_cluster' in self.checkpoint_state:
+            self.allele_to_cluster = self.checkpoint_state['allele_to_cluster']
+            print(f"Loaded allele_to_cluster from checkpoint ({len(self.allele_to_cluster)} alleles)")
+        elif resume_from:
+            # Try loading from saved mapping file
+            mapping_file = os.path.join(resume_from, 'allele_to_cluster.json')
+            if os.path.exists(mapping_file):
+                with open(mapping_file, 'r') as f:
+                    self.allele_to_cluster = json.load(f)
+                print(f"Loaded allele_to_cluster from {mapping_file}")
+            else:
+                # Cluster alleles fresh
+                all_alleles = list(set(train_df['allele_key'].unique()) | set(val_df['allele_key'].unique()))
+                self.allele_to_cluster = cluster_mhc_alleles(mhc_info, all_alleles, num_experts)
+        else:
+            # Cluster alleles fresh
+            all_alleles = list(set(train_df['allele_key'].unique()) | set(val_df['allele_key'].unique()))
+            self.allele_to_cluster = cluster_mhc_alleles(mhc_info, all_alleles, num_experts)
 
         # Split data by cluster
         self.train_by_cluster = self._split_by_cluster(train_df)
@@ -1180,10 +1363,48 @@ class MixtureOfExpertsTrainer:
         # Build experts
         self.experts = {}
         self.trainers = {}
+        
+        # Track completed epochs per expert (for continuing training)
+        self.completed_epochs = {}  # cluster_id -> num_epochs_completed
+        if self.checkpoint_state and 'history' in self.checkpoint_state:
+            # Determine how many epochs each expert has completed from history
+            for cid_str, hist in self.checkpoint_state['history'].items():
+                cid = int(cid_str)
+                self.completed_epochs[cid] = len(hist.get('train_loss', []))
+            print(f"Completed epochs per expert: {self.completed_epochs}")
 
         for cluster_id in range(num_experts):
             if cluster_id in self.train_by_cluster and len(self.train_by_cluster[cluster_id]) > 0:
                 expert = build_expert_model(name=f"cluster{cluster_id}")
+                
+                # Try to load weights from checkpoint
+                if resume_from:
+                    model_path = os.path.join(resume_from, "models", f"expert_{cluster_id}_best_model.keras")
+                    weight_path = os.path.join(resume_from, "models", f"expert_{cluster_id}_best.weights.h5")
+                    if os.path.exists(model_path):
+                        try:
+                            expert = keras.models.load_model(model_path, custom_objects={
+                                'SubtractLayer': SubtractLayer,
+                                'DualAxisAttentionPooling': DualAxisAttentionPooling,
+                                'PositionalEncoding': PositionalEncoding,
+                                'MaskedEmbedding': MaskedEmbedding,
+                            })
+                            print(f"  Loaded expert {cluster_id} from {model_path}")
+                        except Exception as e:
+                            print(f"  Warning: Could not load model for expert {cluster_id}: {e}")
+                            if os.path.exists(weight_path):
+                                try:
+                                    expert.load_weights(weight_path)
+                                    print(f"  Loaded weights for expert {cluster_id} from {weight_path}")
+                                except Exception as e2:
+                                    print(f"  Warning: Could not load weights either: {e2}")
+                    elif os.path.exists(weight_path):
+                        try:
+                            expert.load_weights(weight_path)
+                            print(f"  Loaded weights for expert {cluster_id} from {weight_path}")
+                        except Exception as e:
+                            print(f"  Warning: Could not load weights for expert {cluster_id}: {e}")
+                
                 self.experts[cluster_id] = expert
                 self.trainers[cluster_id] = ExpertTrainer(
                     expert, 
@@ -1194,15 +1415,23 @@ class MixtureOfExpertsTrainer:
                 print(f"Expert {cluster_id}: {len(self.train_by_cluster[cluster_id])} train, "
                       f"{len(self.val_by_cluster.get(cluster_id, []))} val samples")
 
+        # Initialize history, loading from checkpoint if available
         self.history = {cid: {'train_loss': [], 'train_auc': [], 'train_mcc': [],
                                'val_loss': [], 'val_auc': [], 'val_mcc': []}
                         for cid in self.experts.keys()}
+        if self.checkpoint_state and 'history' in self.checkpoint_state:
+            for cid_str, hist in self.checkpoint_state['history'].items():
+                cid = int(cid_str)
+                if cid in self.history:
+                    self.history[cid] = hist
+                    print(f"  Loaded history for expert {cid}: {len(hist.get('train_loss', []))} epochs")
 
     def _split_by_cluster(self, df):
         """Split DataFrame by cluster assignment."""
         clusters = {}
         df = df.copy()
-        df['cluster'] = df['allele_key'].map(self.allele_to_cluster)
+        # Use .get() with default 0 to handle any alleles not in the mapping
+        df['cluster'] = df['allele_key'].map(lambda x: self.allele_to_cluster.get(x, 0))
 
         for cid in range(self.num_experts):
             cluster_df = df[df['cluster'] == cid]
@@ -1210,16 +1439,40 @@ class MixtureOfExpertsTrainer:
                 clusters[cid] = cluster_df
 
         return clusters
+    
+    def _save_checkpoint(self):
+        """Save checkpoint state for resumption."""
+        state = {
+            'completed_epochs': self.completed_epochs,
+            'history': {str(k): v for k, v in self.history.items()},
+            'allele_to_cluster': self.allele_to_cluster,
+            'num_experts': self.num_experts,
+            'epochs': self.epochs,
+        }
+        save_checkpoint_state(OUTPUT_DIR, state)
 
     def train(self):
-        """Train all experts."""
+        """Train all experts with checkpoint support."""
         print("\n" + "=" * 60)
         print("Starting Mixture of Experts Training")
+        if self.completed_epochs:
+            print(f"Resuming - completed epochs per expert: {self.completed_epochs}")
+        print(f"Target epochs: {self.epochs}")
         print("=" * 60)
 
         for cluster_id, expert in self.experts.items():
+            # Check how many epochs this expert has already completed
+            start_epoch = self.completed_epochs.get(cluster_id, 0)
+            
+            # Skip if already trained for requested number of epochs
+            if start_epoch >= self.epochs:
+                print(f"\n{'=' * 60}")
+                print(f"Skipping Expert {cluster_id} (already completed {start_epoch}/{self.epochs} epochs)")
+                print(f"{'=' * 60}")
+                continue
+            
             print(f"\n{'=' * 60}")
-            print(f"Training Expert {cluster_id}")
+            print(f"Training Expert {cluster_id} (epochs {start_epoch + 1} to {self.epochs})")
             print(f"{'=' * 60}")
 
             train_df = self.train_by_cluster[cluster_id]
@@ -1245,15 +1498,21 @@ class MixtureOfExpertsTrainer:
             val_gen = DataGenerator(val_df, self.batch_size, shuffle=False, augment=False)
 
             trainer = self.trainers[cluster_id]
-            best_mcc = -1
+            
+            # Initialize best_mcc from previous training if resuming
+            if start_epoch > 0 and cluster_id in self.history and self.history[cluster_id]['val_mcc']:
+                best_mcc = max(self.history[cluster_id]['val_mcc'])
+                print(f"  Resuming from epoch {start_epoch}, previous best MCC: {best_mcc:.4f}")
+            else:
+                best_mcc = -1
             patience_counter = 0
 
-            for epoch in range(self.epochs):
+            for epoch in range(start_epoch, self.epochs):
                 trainer.reset_metrics()
                 epoch_start = time.time()
 
                 # Training
-                pbar = tqdm(train_gen, desc=f"Epoch {epoch + 1}/{self.epochs}")
+                pbar = tqdm(train_gen, desc=f"Epoch {epoch + 1}/{self.epochs} (Expert {cluster_id})")
                 for batch in pbar:
                     loss, recon_loss, cls_loss, _ = trainer.train_step(batch, class_weights)
                     pbar.set_postfix({
@@ -1313,6 +1572,10 @@ class MixtureOfExpertsTrainer:
                         break
 
                 train_gen.on_epoch_end()
+                
+                # Update completed epochs and save checkpoint after each epoch
+                self.completed_epochs[cluster_id] = epoch + 1
+                self._save_checkpoint()
 
             # Load best weights
             try:
@@ -1322,6 +1585,7 @@ class MixtureOfExpertsTrainer:
                 pass
 
             print(f"Expert {cluster_id} best MCC: {best_mcc:.4f}")
+            print(f"  Completed {self.completed_epochs.get(cluster_id, 0)}/{self.epochs} epochs")
 
         return self.history
 
@@ -1471,7 +1735,8 @@ def main(
         num_experts: int = NUM_EXPERTS,
         epochs: int = EPOCHS,
         batch_size: int = BATCH_SIZE,
-        subset_size: Optional[int] = None
+        subset_size: Optional[int] = None,
+        resume_from: Optional[str] = None
 ):
     """
     Main training and evaluation pipeline.
@@ -1484,6 +1749,7 @@ def main(
         epochs: Training epochs
         batch_size: Batch size
         subset_size: If set, use only this many samples for quick testing
+        resume_from: Path to checkpoint directory to resume training from
     """
 
     # Load data
@@ -1491,7 +1757,7 @@ def main(
         data_parquet_path, mhc_info_csv_path, benchmark_parquet_path, subset_size
     )
 
-    # Initialize MoE trainer
+    # Initialize MoE trainer with optional checkpoint resumption
     moe = MixtureOfExpertsTrainer(
         train_df=train_df,
         val_df=val_df,
@@ -1499,15 +1765,18 @@ def main(
         num_experts=num_experts,
         batch_size=batch_size,
         epochs=epochs,
-        patience=PATIENCE
+        patience=PATIENCE,
+        resume_from=resume_from
     )
 
-    # Plot cluster distribution
-    print("\nCluster Distribution:")
-    plot_cluster_distribution(
-        moe.allele_to_cluster, train_df,
-        save_path=os.path.join(OUTPUT_DIR, "plots", "cluster_distribution.png")
-    )
+    # Plot cluster distribution (only if not resuming or plots don't exist)
+    cluster_plot_path = os.path.join(OUTPUT_DIR, "plots", "cluster_distribution.png")
+    if not os.path.exists(cluster_plot_path):
+        print("\nCluster Distribution:")
+        plot_cluster_distribution(
+            moe.allele_to_cluster, train_df,
+            save_path=cluster_plot_path
+        )
 
     # Train
     history = moe.train()
@@ -1582,9 +1851,29 @@ def main(
 # # 13. Run Training
 #
 # Modify the paths below to match your data files:
+# To resume training from a checkpoint, set RESUME_FROM_CHECKPOINT at the top of the script.
 
 # %%
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='MoE Peptide-MHC Binding Prediction')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint directory to resume training from')
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Total number of epochs to train (overrides EPOCHS constant)')
+    args = parser.parse_args()
+    
+    # Override settings from command line
+    if args.resume:
+        RESUME_FROM_CHECKPOINT = args.resume
+    if args.epochs:
+        EPOCHS = args.epochs
+    
+    # Update OUTPUT_DIR if resuming
+    if args.resume and os.path.exists(args.resume):
+        OUTPUT_DIR = args.resume
+        print(f"Resuming from checkpoint: {OUTPUT_DIR}")
+    
     # === CONFIGURE YOUR PATHS HERE ===
     DATA_PARQUET = "/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/PMDb/PMDb_2025_11_18_class1.parquet"
     MHC_INFO_CSV = "/scratch-scc/users/u15472/PMBind/data/alleles/mhc_pseudo_class1.csv"
@@ -1596,7 +1885,7 @@ if __name__ == "__main__":
             print(f"Warning: {name} file not found at {path}")
             print("Please update the file paths before running.")
 
-    # Run training
+    # Run training (with optional checkpoint resumption)
     moe_model, results = main(
         data_parquet_path=DATA_PARQUET,
         mhc_info_csv_path=MHC_INFO_CSV,
@@ -1604,7 +1893,8 @@ if __name__ == "__main__":
         num_experts=NUM_EXPERTS,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
-        subset_size=SUBSET_SIZE  # Set to e.g. 10000 for quick pipeline test
+        subset_size=SUBSET_SIZE,  # Set to e.g. 10000 for quick pipeline test
+        resume_from=RESUME_FROM_CHECKPOINT  # Set at top of script to resume
     )
 
 
