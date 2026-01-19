@@ -66,16 +66,16 @@ matplotlib.use('Agg')
 # ============================================================================
 NUM_EXPERTS = 5  # Number of expert models (MHC allele clusters)
 MAX_PEP_LEN = 15  # Maximum peptide length
-MAX_MHC_LEN = 34  # Maximum MHC pseudo sequence length
+MAX_MHC_LEN = 54  # Maximum MHC pseudo sequence length
 EMBED_DIM = 64  # Embedding dimension
 LATENT_DIM = 32  # Latent dimension
 NUM_HEADS = 4  # Attention heads
-BATCH_SIZE = 1024
-EPOCHS = 5
+BATCH_SIZE = 2048
+EPOCHS = 25
 LEARNING_RATE = 5e-4
 DROPOUT_RATE = 0.3
 L2_REG = 0.003
-PATIENCE = 3  # Early stopping patience
+PATIENCE = 5  # Early stopping patience
 NOISE_STD = 0.1
 CORE_TEMPERATURE = 1.0
 
@@ -103,7 +103,7 @@ OUTPUT_DIR = f"/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_
 # ============================================================================
 # Set RESUME_FROM_CHECKPOINT to an existing run directory to continue training
 # e.g., RESUME_FROM_CHECKPOINT = "/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_20241220_120000"
-RESUME_FROM_CHECKPOINT = "/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_20251221_165016" #None  # Set to checkpoint directory path to resume
+RESUME_FROM_CHECKPOINT = "/scratch-scc/users/u15472/PMBind/src/PY_runs/py6_moe/outputs/run_20251227_142351"  # None  # Set to checkpoint directory path to resume
 
 # If resuming, use the checkpoint directory instead
 if RESUME_FROM_CHECKPOINT and os.path.exists(RESUME_FROM_CHECKPOINT):
@@ -283,6 +283,59 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray,
 
     return metrics
 
+
+def apply_dynamic_masking(features, emd_mask_d2=True):
+    """
+    Applies random masking for training augmentation inside the tf.data pipeline.
+    This version is corrected to match the original DataGenerator logic.
+    """
+    # Peptide Masking
+    valid_pep_positions = tf.where(tf.equal(features["pep_mask"], NORM_TOKEN))
+    num_valid_pep = tf.shape(valid_pep_positions)[0]
+    # At least 2 positions, or 15% of the valid sequence length
+    num_to_mask_pep = tf.maximum(2, tf.cast(tf.cast(num_valid_pep, tf.float32) * 0.15, tf.int32))
+    shuffled_pep_indices = tf.random.shuffle(valid_pep_positions)[:num_to_mask_pep]
+    if tf.shape(shuffled_pep_indices)[0] > 0:
+        # Update the mask to MASK_TOKEN (-1.0)
+        features["pep_mask"] = tf.tensor_scatter_nd_update(features["pep_mask"], shuffled_pep_indices,
+                                                           tf.repeat(MASK_TOKEN, num_to_mask_pep))
+        # Zero out the feature values for the masked positions
+        feat_dtype = features["pep_emb"].dtype
+        mask_updates_pep = tf.fill([num_to_mask_pep, tf.shape(features["pep_emb"])[-1]],
+                                   tf.cast(MASK_VALUE, feat_dtype))
+        features["pep_emb"] = tf.tensor_scatter_nd_update(features["pep_emb"], shuffled_pep_indices,
+                                                                mask_updates_pep)
+    # MHC Masking
+    valid_mhc_positions = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
+    num_valid_mhc = tf.shape(valid_mhc_positions)[0]
+    # At least 5 positions, or 15% of the valid sequence length
+    num_to_mask_mhc = tf.maximum(10, tf.cast(tf.cast(num_valid_mhc, tf.float32) * 0.15, tf.int32))
+    shuffled_mhc_indices = tf.random.shuffle(valid_mhc_positions)[:num_to_mask_mhc]
+    if tf.shape(shuffled_mhc_indices)[0] > 0:
+        # Update the mask to MASK_TOKEN (-1.0)
+        features["mhc_mask"] = tf.tensor_scatter_nd_update(features["mhc_mask"], shuffled_mhc_indices,
+                                                           tf.repeat(MASK_TOKEN, num_to_mask_mhc))
+        # Zero out the feature values for the masked positions
+        mhc_dtype = features["mhc_emb"].dtype
+        mask_updates_mhc = tf.fill([num_to_mask_mhc, tf.shape(features["mhc_emb"])[-1]], tf.cast(MASK_VALUE, mhc_dtype))
+        features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], shuffled_mhc_indices, mask_updates_mhc)
+
+    # Dimension-level masking for MHC embeddings
+    if emd_mask_d2:
+        # Find positions that are STILL valid (not padded and not positionally masked)
+        remaining_valid_mhc = tf.where(tf.equal(features["mhc_mask"], NORM_TOKEN))
+        if tf.shape(remaining_valid_mhc)[0] > 0:
+            # Get the embeddings at these remaining valid positions
+            valid_embeddings = tf.gather_nd(features["mhc_emb"], remaining_valid_mhc)
+            # Create a random mask for the feature dimensions
+            dim_mask = tf.random.uniform(shape=tf.shape(valid_embeddings), dtype=features["mhc_emb"].dtype) < tf.cast(
+                0.15, features["mhc_emb"].dtype)
+            # Apply the mask (multiply by 0 where True, 1 where False)
+            masked_embeddings = valid_embeddings * tf.cast(~dim_mask, features["mhc_emb"].dtype)
+            # Scatter the modified embeddings back into the original tensor
+            features["mhc_emb"] = tf.tensor_scatter_nd_update(features["mhc_emb"], remaining_valid_mhc,
+                                                              masked_embeddings)
+    return features
 
 # %% [markdown]
 # # 4. Data Loading and Preprocessing
@@ -732,6 +785,37 @@ class MaskedEmbedding(keras.layers.Layer):
         config.update({'mask_token': self.mask_token, 'pad_token': self.pad_token})
         return config
 
+@tf.keras.utils.register_keras_serializable(name="SpatialTemporalDropout1D", package="CustomLayers")
+class SpatialTemporalDropout1D(keras.layers.Layer):
+    """Drops entire feature channels AND entire timesteps."""
+    
+    def __init__(self, feature_rate=0.1, timestep_rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.feature_rate = feature_rate
+        self.timestep_rate = timestep_rate
+
+    @tf.function()
+    def call(self, inputs, training=None):
+        if not training:
+            return inputs
+        shape = tf.shape(inputs)  # (B, T, F)
+        # Drop entire features: mask shape (B, 1, F)
+        feature_mask = tf.random.uniform((shape[0], 1, shape[2])) > self.feature_rate
+        # Drop entire timesteps: mask shape (B, T, 1)
+        timestep_mask = tf.random.uniform((shape[0], shape[1], 1)) > self.timestep_rate
+        # Combine masks
+        combined_mask = tf.cast(feature_mask & timestep_mask, inputs.dtype)
+        # Scale to maintain expected value
+        keep_prob = (1 - self.feature_rate) * (1 - self.timestep_rate)
+        return inputs * combined_mask / keep_prob
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "feature_rate": self.feature_rate,
+            "timestep_rate": self.timestep_rate
+        })
+        return config
 
 # %% [markdown]
 # # 7. Expert Model Architecture
@@ -773,13 +857,13 @@ def build_expert_model(
     pep = MaskedEmbedding(name=f"{name}_pep_mask_embed")(pep_in, pep_mask_in)
     pep = PositionalEncoding(pep_dim, max_pep_len * 2, name=f"{name}_pep_pos")(pep, pep_mask_in)
     pep = layers.GaussianNoise(noise_std, name=f"{name}_pep_noise")(pep)
-    pep = layers.SpatialDropout1D(dropout_rate, name=f"{name}_pep_dropout")(pep)
+    pep = SpatialTemporalDropout1D(feature_rate=dropout_rate, timestep_rate=dropout_rate, name=f"{name}_pep_dropout")(pep)
 
     # === MHC Processing ===
     mhc = MaskedEmbedding(name=f"{name}_mhc_mask_embed")(mhc_in, mhc_mask_in)
     mhc = PositionalEncoding(mhc_dim, max_mhc_len * 2, name=f"{name}_mhc_pos")(mhc, mhc_mask_in)
     mhc = layers.GaussianNoise(noise_std, name=f"{name}_mhc_noise")(mhc)
-    mhc = layers.SpatialDropout1D(dropout_rate, name=f"{name}_mhc_dropout")(mhc)
+    mhc = SpatialTemporalDropout1D(feature_rate=dropout_rate, timestep_rate=dropout_rate, name=f"{name}_mhc_dropout")(mhc)
 
     # === SubtractLayer for Interaction ===
     # Output: (B, M, P*D)
@@ -1239,9 +1323,41 @@ class DataGenerator(keras.utils.Sequence):
 
         # Optional augmentation (masking)
         if self.augment:
-            data = self._apply_masking(data)
+            data = self._apply_dynamic_masking(data)
 
         return {k: tf.convert_to_tensor(v) for k, v in data.items()}
+
+    def _apply_dynamic_masking(self, data):
+        """
+        Apply dynamic masking for data augmentation.
+        Includes position-level and dimension-level masking for both peptide and MHC.
+        """
+        for i in range(len(data['pep_emb'])):
+            # Peptide masking (15% of valid positions, minimum 2)
+            valid_pos = np.where(data['pep_mask'][i] == NORM_TOKEN)[0]
+            if len(valid_pos) > 2:
+                n_mask = max(2, int(len(valid_pos) * 0.15))
+                mask_pos = np.random.choice(valid_pos, n_mask, replace=False)
+                data['pep_mask'][i, mask_pos] = MASK_TOKEN
+                data['pep_emb'][i, mask_pos] = MASK_VALUE
+
+            # MHC position masking (15% of valid positions, minimum 10)
+            valid_pos = np.where(data['mhc_mask'][i] == NORM_TOKEN)[0]
+            if len(valid_pos) > 5:
+                n_mask = max(10, int(len(valid_pos) * 0.15))
+                n_mask = min(n_mask, len(valid_pos))  # Don't mask more than available
+                mask_pos = np.random.choice(valid_pos, n_mask, replace=False)
+                data['mhc_mask'][i, mask_pos] = MASK_TOKEN
+                data['mhc_emb'][i, mask_pos] = MASK_VALUE
+
+            # Dimension-level masking for MHC embeddings (15% of dimensions at remaining valid positions)
+            remaining_valid = np.where(data['mhc_mask'][i] == NORM_TOKEN)[0]
+            if len(remaining_valid) > 0:
+                # Create random mask for feature dimensions (15% dropout)
+                dim_mask = np.random.random((len(remaining_valid), data['mhc_emb'].shape[-1])) < 0.15
+                data['mhc_emb'][i, remaining_valid] = data['mhc_emb'][i, remaining_valid] * (~dim_mask).astype(np.float32)
+
+        return data
 
     def _apply_masking(self, data):
         """Apply random masking for data augmentation."""
@@ -1589,71 +1705,308 @@ class MixtureOfExpertsTrainer:
 
         return self.history
 
-    def predict(self, df: pd.DataFrame) -> np.ndarray:
-        """Make predictions using appropriate expert for each sample."""
-        df = df.copy()
-        df['cluster'] = df['allele_key'].map(lambda x: self.allele_to_cluster.get(x, 0))
-
-        predictions = np.zeros(len(df))
-
-        for cluster_id, expert in self.experts.items():
-            cluster_mask = df['cluster'] == cluster_id
-            if not cluster_mask.any():
+    def _compute_cluster_centroids(self) -> Dict[int, np.ndarray]:
+        """
+        Compute centroids for each cluster based on MHC pseudo sequences.
+        Used for similarity-based expert selection for unseen alleles.
+        
+        Returns:
+            Dictionary mapping cluster_id to centroid feature vector
+        """
+        centroids = {}
+        
+        for cluster_id in self.experts.keys():
+            # Get alleles in this cluster
+            cluster_alleles = [k for k, v in self.allele_to_cluster.items() if v == cluster_id]
+            
+            if not cluster_alleles:
                 continue
+            
+            # Get MHC sequences for these alleles
+            cluster_mhc = self.mhc_info[self.mhc_info['allele_key'].isin(cluster_alleles)]
+            
+            if len(cluster_mhc) == 0:
+                continue
+            
+            # Encode sequences and compute centroid
+            seq_col = 'mhc_sequence' if 'mhc_sequence' in cluster_mhc.columns else 'pseudo_3di'
+            sequences = cluster_mhc[seq_col].dropna().tolist()
+            
+            if not sequences:
+                continue
+            
+            # Use same encoding as clustering
+            def encode_sequence(seq, max_len=50):
+                features = []
+                for i, aa in enumerate(seq.upper()[:max_len]):
+                    props = PHYSICOCHEMICAL_PROPERTIES.get(aa, PHYSICOCHEMICAL_PROPERTIES.get('X'))
+                    features.extend(props)
+                while len(features) < max_len * ENCODING_DIM:
+                    features.extend([0.0] * ENCODING_DIM)
+                return features[:max_len * ENCODING_DIM]
+            
+            feature_vectors = np.array([encode_sequence(seq) for seq in sequences])
+            centroids[cluster_id] = np.mean(feature_vectors, axis=0)
+        
+        return centroids
+    
+    def _compute_cluster_similarities(self, mhc_sequence: str) -> Dict[int, float]:
+        """
+        Compute similarity between an MHC sequence and each cluster centroid.
+        Uses cosine similarity.
+        
+        Args:
+            mhc_sequence: The MHC pseudo sequence
+            
+        Returns:
+            Dictionary mapping cluster_id to similarity score (0-1)
+        """
+        if not hasattr(self, '_cluster_centroids') or self._cluster_centroids is None:
+            self._cluster_centroids = self._compute_cluster_centroids()
+        
+        # Encode the query sequence
+        def encode_sequence(seq, max_len=50):
+            features = []
+            for i, aa in enumerate(seq.upper()[:max_len]):
+                props = PHYSICOCHEMICAL_PROPERTIES.get(aa, PHYSICOCHEMICAL_PROPERTIES.get('X'))
+                features.extend(props)
+            while len(features) < max_len * ENCODING_DIM:
+                features.extend([0.0] * ENCODING_DIM)
+            return np.array(features[:max_len * ENCODING_DIM])
+        
+        query_vec = encode_sequence(mhc_sequence)
+        query_norm = np.linalg.norm(query_vec)
+        
+        if query_norm < 1e-8:
+            # If query has no signal, return uniform weights
+            return {cid: 1.0 / len(self._cluster_centroids) for cid in self._cluster_centroids}
+        
+        similarities = {}
+        for cluster_id, centroid in self._cluster_centroids.items():
+            centroid_norm = np.linalg.norm(centroid)
+            if centroid_norm < 1e-8:
+                similarities[cluster_id] = 0.0
+            else:
+                # Cosine similarity
+                cos_sim = np.dot(query_vec, centroid) / (query_norm * centroid_norm)
+                # Convert to 0-1 range (cosine similarity is -1 to 1)
+                similarities[cluster_id] = (cos_sim + 1.0) / 2.0
+        
+        return similarities
+    
+    def _softmax_weights(self, similarities: Dict[int, float], temperature: float = 0.5) -> Dict[int, float]:
+        """
+        Convert similarities to softmax weights for weighted prediction.
+        
+        Args:
+            similarities: Dictionary of cluster_id -> similarity
+            temperature: Temperature for softmax (lower = more peaked)
+            
+        Returns:
+            Dictionary of cluster_id -> weight (sums to 1)
+        """
+        if not similarities:
+            return {}
+        
+        # Apply temperature scaling
+        scaled = {k: v / temperature for k, v in similarities.items()}
+        
+        # Softmax for numerical stability
+        max_val = max(scaled.values())
+        exp_vals = {k: np.exp(v - max_val) for k, v in scaled.items()}
+        total = sum(exp_vals.values())
+        
+        if total < 1e-8:
+            # Uniform weights as fallback
+            n = len(similarities)
+            return {k: 1.0 / n for k in similarities}
+        
+        return {k: v / total for k, v in exp_vals.items()}
 
-            cluster_df = df[cluster_mask]
-            gen = DataGenerator(cluster_df, self.batch_size, shuffle=False, augment=False)
-
-            preds = []
-            for batch in gen:
-                outputs = expert([
-                    batch['pep_emb'], batch['pep_mask'],
-                    batch['mhc_emb'], batch['mhc_mask'],
-                    batch['pep_ohe_target']
-                ], training=False)
-                probs = tf.nn.sigmoid(outputs['binding_pred']).numpy().flatten()
-                preds.extend(probs)
-
-            predictions[cluster_mask.values] = preds[:cluster_mask.sum()]
-
-        # Handle samples with no matching expert (use expert 0)
-        no_expert_mask = ~df['cluster'].isin(self.experts.keys())
-        if no_expert_mask.any() and 0 in self.experts:
-            fallback_df = df[no_expert_mask]
-            gen = DataGenerator(fallback_df, self.batch_size, shuffle=False, augment=False)
-
-            preds = []
-            for batch in gen:
-                outputs = self.experts[0]([
-                    batch['pep_emb'], batch['pep_mask'],
-                    batch['mhc_emb'], batch['mhc_mask'],
-                    batch['pep_ohe_target']
-                ], training=False)
-                probs = tf.nn.sigmoid(outputs['binding_pred']).numpy().flatten()
-                preds.extend(probs)
-
-            predictions[no_expert_mask.values] = preds[:no_expert_mask.sum()]
-
+    def predict(self, df: pd.DataFrame, weighted_unseen: bool = True, 
+                similarity_temperature: float = 0.5, min_weight_threshold: float = 0.05) -> np.ndarray:
+        """
+        Make predictions using appropriate expert for each sample.
+        
+        For known alleles: use the assigned expert directly.
+        For unseen alleles: compute similarity to each cluster and do weighted prediction.
+        
+        Args:
+            df: DataFrame with peptide, allele_key, mhc_sequence columns
+            weighted_unseen: If True, use weighted prediction for unseen alleles.
+                            If False, use most similar cluster only.
+            similarity_temperature: Temperature for softmax weighting (lower = more peaked)
+            min_weight_threshold: Minimum weight to include an expert in weighted prediction
+            
+        Returns:
+            Array of binding probabilities
+        """
+        df = df.copy()
+        
+        # Identify seen vs unseen alleles
+        df['is_seen'] = df['allele_key'].isin(self.allele_to_cluster.keys())
+        df['cluster'] = df['allele_key'].map(lambda x: self.allele_to_cluster.get(x, -1))
+        
+        predictions = np.zeros(len(df))
+        
+        # === Handle SEEN alleles (use assigned expert) ===
+        seen_mask = df['is_seen']
+        if seen_mask.any():
+            seen_df = df[seen_mask]
+            
+            for cluster_id, expert in self.experts.items():
+                cluster_mask = seen_df['cluster'] == cluster_id
+                if not cluster_mask.any():
+                    continue
+                
+                cluster_df = seen_df[cluster_mask]
+                gen = DataGenerator(cluster_df, self.batch_size, shuffle=False, augment=False)
+                
+                preds = []
+                for batch in gen:
+                    outputs = expert([
+                        batch['pep_emb'], batch['pep_mask'],
+                        batch['mhc_emb'], batch['mhc_mask'],
+                        batch['pep_ohe_target']
+                    ], training=False)
+                    probs = tf.nn.sigmoid(outputs['binding_pred']).numpy().flatten()
+                    preds.extend(probs)
+                
+                # Map back to original indices
+                original_indices = seen_df.index[cluster_mask]
+                for i, idx in enumerate(original_indices):
+                    if i < len(preds):
+                        predictions[df.index.get_loc(idx)] = preds[i]
+        
+        # === Handle UNSEEN alleles (weighted prediction based on similarity) ===
+        unseen_mask = ~df['is_seen']
+        if unseen_mask.any():
+            unseen_df = df[unseen_mask]
+            print(f"\n  Predicting for {len(unseen_df)} samples with unseen alleles...")
+            
+            # Initialize cluster centroids if not done
+            if not hasattr(self, '_cluster_centroids') or self._cluster_centroids is None:
+                self._cluster_centroids = self._compute_cluster_centroids()
+            
+            # Group by unique MHC sequences for efficiency
+            unique_mhc_seqs = unseen_df['mhc_sequence'].unique()
+            mhc_to_weights = {}
+            
+            print(f"  Computing similarities for {len(unique_mhc_seqs)} unique unseen MHC sequences...")
+            for mhc_seq in unique_mhc_seqs:
+                similarities = self._compute_cluster_similarities(mhc_seq)
+                weights = self._softmax_weights(similarities, temperature=similarity_temperature)
+                
+                # Filter weights below threshold
+                filtered_weights = {k: v for k, v in weights.items() if v >= min_weight_threshold}
+                
+                # Renormalize
+                total = sum(filtered_weights.values())
+                if total > 0:
+                    filtered_weights = {k: v / total for k, v in filtered_weights.items()}
+                else:
+                    # Fallback: use all experts equally
+                    filtered_weights = {k: 1.0 / len(self.experts) for k in self.experts}
+                
+                mhc_to_weights[mhc_seq] = filtered_weights
+            
+            # Get predictions from each expert for all unseen samples
+            expert_predictions = {}
+            for cluster_id, expert in self.experts.items():
+                gen = DataGenerator(unseen_df, self.batch_size, shuffle=False, augment=False)
+                
+                preds = []
+                for batch in gen:
+                    outputs = expert([
+                        batch['pep_emb'], batch['pep_mask'],
+                        batch['mhc_emb'], batch['mhc_mask'],
+                        batch['pep_ohe_target']
+                    ], training=False)
+                    probs = tf.nn.sigmoid(outputs['binding_pred']).numpy().flatten()
+                    preds.extend(probs)
+                
+                expert_predictions[cluster_id] = np.array(preds[:len(unseen_df)])
+            
+            # Compute weighted predictions for each unseen sample
+            for i, (idx, row) in enumerate(unseen_df.iterrows()):
+                mhc_seq = row['mhc_sequence']
+                weights = mhc_to_weights.get(mhc_seq, {})
+                
+                if weighted_unseen and weights:
+                    # Weighted combination of expert predictions
+                    weighted_pred = 0.0
+                    for cluster_id, weight in weights.items():
+                        if cluster_id in expert_predictions and i < len(expert_predictions[cluster_id]):
+                            weighted_pred += weight * expert_predictions[cluster_id][i]
+                    predictions[df.index.get_loc(idx)] = weighted_pred
+                else:
+                    # Use most similar expert only
+                    if weights:
+                        best_cluster = max(weights, key=weights.get)
+                    else:
+                        best_cluster = 0  # Fallback to first expert
+                    
+                    if best_cluster in expert_predictions and i < len(expert_predictions[best_cluster]):
+                        predictions[df.index.get_loc(idx)] = expert_predictions[best_cluster][i]
+            
+            # Report which experts were used for unseen alleles
+            all_weights = list(mhc_to_weights.values())
+            if all_weights:
+                avg_weights = {}
+                for cid in self.experts:
+                    cid_weights = [w.get(cid, 0) for w in all_weights]
+                    avg_weights[cid] = np.mean(cid_weights)
+                print(f"  Average expert weights for unseen alleles: {dict(sorted(avg_weights.items()))}")
+        
         return predictions
 
-    def evaluate(self, df: pd.DataFrame, name: str = "Test") -> Dict[str, float]:
-        """Evaluate on a dataset."""
+    def evaluate(self, df: pd.DataFrame, name: str = "Test", 
+                 weighted_unseen: bool = True, similarity_temperature: float = 0.5) -> Dict[str, float]:
+        """
+        Evaluate on a dataset.
+        
+        Args:
+            df: DataFrame with peptide, allele_key, mhc_sequence, assigned_label columns
+            name: Name for logging
+            weighted_unseen: If True, use weighted prediction for unseen alleles
+            similarity_temperature: Temperature for softmax weighting
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
         if len(df) == 0:
             print(f"{name}: No samples")
             return {}
 
-        predictions = self.predict(df)
+        predictions = self.predict(df, weighted_unseen=weighted_unseen, 
+                                   similarity_temperature=similarity_temperature)
         labels = df['assigned_label'].values
 
         metrics = compute_metrics(labels, predictions)
 
-        print(f"\n{name} Results ({len(df)} samples):")
+        # Count seen vs unseen
+        seen_count = df['allele_key'].isin(self.allele_to_cluster.keys()).sum()
+        unseen_count = len(df) - seen_count
+
+        print(f"\n{name} Results ({len(df)} samples, {seen_count} seen, {unseen_count} unseen alleles):")
         print(f"  AUC:      {metrics['auc']:.4f}")
         print(f"  AUPRC:    {metrics['auprc']:.4f}")
         print(f"  MCC:      {metrics['mcc']:.4f}")
         print(f"  Accuracy: {metrics['accuracy']:.4f}")
         print(f"  F1:       {metrics['f1']:.4f}")
         print(f"  AUC@0.1:  {metrics['auc_01']:.4f}")
+        
+        # If there are unseen alleles, evaluate them separately
+        if unseen_count > 0:
+            unseen_mask = ~df['allele_key'].isin(self.allele_to_cluster.keys())
+            unseen_preds = predictions[unseen_mask]
+            unseen_labels = labels[unseen_mask]
+            
+            if len(np.unique(unseen_labels)) > 1:
+                unseen_metrics = compute_metrics(unseen_labels, unseen_preds)
+                print(f"\n  Unseen-only metrics ({unseen_count} samples):")
+                print(f"    AUC:  {unseen_metrics['auc']:.4f}, MCC: {unseen_metrics['mcc']:.4f}, "
+                      f"F1: {unseen_metrics['f1']:.4f}")
 
         return metrics
 
@@ -1924,24 +2277,127 @@ def analyze_expert_specialization(moe: MixtureOfExpertsTrainer, mhc_info: pd.Dat
             print(f"  Sample alleles: {', '.join(sample_alleles)}")
 
 
-def predict_single(moe: MixtureOfExpertsTrainer, peptide: str, allele: str, mhc_sequence: str):
-    """Make prediction for a single peptide-MHC pair."""
+def analyze_unseen_allele_handling(moe: MixtureOfExpertsTrainer, unseen_df: pd.DataFrame):
+    """
+    Analyze how the model handles unseen alleles.
+    Shows which experts contribute most to predictions for each unseen allele.
+    """
+    print("\n" + "=" * 60)
+    print("UNSEEN ALLELE HANDLING ANALYSIS")
+    print("=" * 60)
+    
+    if len(unseen_df) == 0:
+        print("No unseen alleles to analyze")
+        return
+    
+    # Initialize cluster centroids
+    if not hasattr(moe, '_cluster_centroids') or moe._cluster_centroids is None:
+        moe._cluster_centroids = moe._compute_cluster_centroids()
+    
+    # Get unique unseen alleles and their MHC sequences
+    unseen_alleles = unseen_df[['allele_key', 'mhc_sequence']].drop_duplicates()
+    
+    print(f"\nAnalyzing {len(unseen_alleles)} unique unseen alleles...\n")
+    
+    for _, row in unseen_alleles.iterrows():
+        allele_key = row['allele_key']
+        mhc_seq = row['mhc_sequence']
+        
+        # Compute similarities
+        similarities = moe._compute_cluster_similarities(mhc_seq)
+        weights = moe._softmax_weights(similarities, temperature=0.5)
+        
+        # Sort by weight
+        sorted_weights = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+        
+        print(f"Allele: {allele_key}")
+        print(f"  Top expert weights:")
+        for cluster_id, weight in sorted_weights[:3]:
+            print(f"    Expert {cluster_id}: {weight:.3f} (similarity: {similarities[cluster_id]:.3f})")
+        print()
+    
+    # Aggregate statistics
+    print("\n--- Aggregate Expert Usage for Unseen Alleles ---")
+    all_weights = []
+    for _, row in unseen_alleles.iterrows():
+        similarities = moe._compute_cluster_similarities(row['mhc_sequence'])
+        weights = moe._softmax_weights(similarities, temperature=0.5)
+        all_weights.append(weights)
+    
+    avg_weights = {}
+    for cid in moe.experts:
+        cid_weights = [w.get(cid, 0) for w in all_weights]
+        avg_weights[cid] = np.mean(cid_weights)
+        print(f"  Expert {cid}: avg_weight={avg_weights[cid]:.3f}, "
+              f"range=[{min(cid_weights):.3f}, {max(cid_weights):.3f}]")
+
+
+def predict_single(moe: MixtureOfExpertsTrainer, peptide: str, allele: str, mhc_sequence: str,
+                   verbose: bool = True, weighted_unseen: bool = True):
+    """
+    Make prediction for a single peptide-MHC pair.
+    
+    For unseen alleles, shows which experts are used and their weights.
+    
+    Args:
+        moe: Trained MixtureOfExpertsTrainer
+        peptide: Peptide sequence
+        allele: Allele name
+        mhc_sequence: MHC pseudo sequence
+        verbose: If True, print details about expert selection
+        weighted_unseen: If True, use weighted prediction for unseen alleles
+        
+    Returns:
+        Binding probability (0-1)
+    """
     # Create mini dataframe
+    allele_key = clean_allele_key(allele)
     df = pd.DataFrame({
         'peptide': [peptide],
         'allele': [allele],
-        'allele_key': [clean_allele_key(allele)],
+        'allele_key': [allele_key],
         'mhc_sequence': [mhc_sequence],
         'assigned_label': [0]  # Dummy
     })
+    
+    is_seen = allele_key in moe.allele_to_cluster
+    
+    if verbose:
+        if is_seen:
+            cluster_id = moe.allele_to_cluster[allele_key]
+            print(f"Allele {allele} is SEEN -> using Expert {cluster_id}")
+        else:
+            print(f"Allele {allele} is UNSEEN -> computing similarity-based weights")
+            # Show similarities
+            similarities = moe._compute_cluster_similarities(mhc_sequence)
+            weights = moe._softmax_weights(similarities)
+            print(f"  Cluster similarities: {dict(sorted(similarities.items()))}")
+            print(f"  Expert weights: {dict(sorted(weights.items()))}")
 
-    prob = moe.predict(df)[0]
+    prob = moe.predict(df, weighted_unseen=weighted_unseen)[0]
     return prob
 
 
 def batch_predict(moe: MixtureOfExpertsTrainer, peptides: List[str],
-                  alleles: List[str], mhc_sequences: List[str]) -> np.ndarray:
-    """Make predictions for multiple peptide-MHC pairs."""
+                  alleles: List[str], mhc_sequences: List[str],
+                  weighted_unseen: bool = True, similarity_temperature: float = 0.5) -> np.ndarray:
+    """
+    Make predictions for multiple peptide-MHC pairs.
+    
+    For unseen alleles, uses weighted prediction across multiple experts
+    based on similarity to cluster centroids.
+    
+    Args:
+        moe: Trained MixtureOfExpertsTrainer
+        peptides: List of peptide sequences
+        alleles: List of allele names
+        mhc_sequences: List of MHC pseudo sequences
+        weighted_unseen: If True, use weighted prediction for unseen alleles
+        similarity_temperature: Temperature for softmax weighting
+        
+    Returns:
+        Array of binding probabilities
+    """
     df = pd.DataFrame({
         'peptide': peptides,
         'allele': alleles,
@@ -1950,4 +2406,5 @@ def batch_predict(moe: MixtureOfExpertsTrainer, peptides: List[str],
         'assigned_label': [0] * len(peptides)
     })
 
-    return moe.predict(df)
+    return moe.predict(df, weighted_unseen=weighted_unseen, 
+                       similarity_temperature=similarity_temperature)
